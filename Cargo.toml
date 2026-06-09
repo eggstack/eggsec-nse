@@ -3,8 +3,15 @@ name = "eggsec-nse"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 description = "Nmap Scripting Engine support for Eggsec"
+authors.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+readme = "../../README.md"
+keywords = ["nse", "nmap", "lua", "scripting-engine"]
+categories = ["development-tools"]
 
 [dependencies]
 anyhow.workspace = true
