@@ -3,14 +3,14 @@
 //! Table manipulation utilities for NSE scripts.
 //! Based on Lua's table library extensions.
 
-use mlua::{Lua, Table};
+use mlua::{Lua, LuaResult, Table};
 
-pub fn register_table_library(lua: &Lua) {
+pub fn register_table_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
 
     let table_lib = lua.create_table().expect("Failed to create table table");
 
-    let _ = table_lib.set(
+    table_lib.set(
         "serialize",
         lua.create_function(|_lua, (t, _options): (Table, Option<Table>)| {
             let mut output = Vec::new();
@@ -63,45 +63,41 @@ pub fn register_table_library(lua: &Lua) {
 
             serialize_value(&mut output, &mlua::Value::Table(t), 0);
             Ok(output.join(""))
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = table_lib.set(
+    table_lib.set(
         "deserialize",
-        lua.create_function(|_lua, _s: String| Ok(_lua.create_table().ok()))
-            .ok(),
-    );
+        lua.create_function(|_lua, _s: String| Ok(_lua.create_table().ok()))?,
+    )?;
 
-    let _ = table_lib.set(
+    table_lib.set(
         "keys",
         lua.create_function(|_lua, t: Table| {
             let keys = _lua.create_table()?;
             let mut count = 0;
             for (k, _) in t.pairs::<mlua::Value, mlua::Value>().flatten() {
                 count += 1;
-                let _ = keys.set(count, k);
+                keys.set(count, k)?;
             }
             Ok(keys)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = table_lib.set(
+    table_lib.set(
         "values",
         lua.create_function(|_lua, t: Table| {
             let values = _lua.create_table()?;
             let mut count = 0;
             for (_, v) in t.pairs::<mlua::Value, mlua::Value>().flatten() {
                 count += 1;
-                let _ = values.set(count, v);
+                values.set(count, v)?;
             }
             Ok(values)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = table_lib.set(
+    table_lib.set(
         "size",
         lua.create_function(|_lua, t: Table| {
             let mut count = 0;
@@ -109,11 +105,10 @@ pub fn register_table_library(lua: &Lua) {
                 count += 1;
             }
             Ok(count)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = table_lib.set(
+    table_lib.set(
         "contains",
         lua.create_function(|_lua, (t, value): (Table, mlua::Value)| {
             for (_, v) in t.pairs::<mlua::Value, mlua::Value>().flatten() {
@@ -122,27 +117,26 @@ pub fn register_table_library(lua: &Lua) {
                 }
             }
             Ok(false)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = table_lib.set(
+    table_lib.set(
         "merge",
         lua.create_function(|_lua, (t1, t2): (Table, Table)| {
             let result = _lua.create_table()?;
 
             for (k, v) in t1.pairs::<mlua::Value, mlua::Value>().flatten() {
-                let _ = result.set(k, v);
+                result.set(k, v)?;
             }
 
             for (k, v) in t2.pairs::<mlua::Value, mlua::Value>().flatten() {
-                let _ = result.set(k, v);
+                result.set(k, v)?;
             }
 
             Ok(result)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = globals.set("table", table_lib);
+    globals.set("table", table_lib)?;
+    Ok(())
 }

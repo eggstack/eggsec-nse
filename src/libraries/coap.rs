@@ -44,7 +44,9 @@ pub fn register_coap_library(lua: &Lua) -> LuaResult<()> {
                 }
             }
 
-            socket.send_to(&request, &addr).ok();
+            if socket.send_to(&request, &addr).is_err() {
+                tracing::warn!("CoAP: Failed to send request to {}", addr);
+            }
 
             let mut response = [0u8; 1024];
             match socket.recv_from(&mut response) {

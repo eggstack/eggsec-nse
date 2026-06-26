@@ -210,11 +210,15 @@ pub fn register_bitcoin_library(lua: &Lua) -> LuaResult<()> {
 
             // Send version + verack
             let version_msg = create_version_message(70015);
-            stream.write_all(&version_msg).ok();
+            if stream.write_all(&version_msg).is_err() {
+                tracing::warn!("Bitcoin: Failed to send version message");
+            }
 
             // Read responses
             let mut response = [0u8; 4096];
-            let _ = stream.read(&mut response);
+            if stream.read(&mut response).is_err() {
+                tracing::warn!("Failed to read Bitcoin version response");
+            }
 
             result.set("status", "ok")?;
             result.set("version", "70015")?;
@@ -255,16 +259,24 @@ pub fn register_bitcoin_library(lua: &Lua) -> LuaResult<()> {
 
             // Send version + verack + getaddr
             let version_msg = create_version_message(70015);
-            stream.write_all(&version_msg).ok();
+            if stream.write_all(&version_msg).is_err() {
+                tracing::warn!("Bitcoin: Failed to send version message");
+            }
 
             // Read version + verack
             let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
-            let _ = stream.read(&mut buf);
+            if stream.read(&mut buf).is_err() {
+                tracing::warn!("Failed to read Bitcoin version");
+            }
+            if stream.read(&mut buf).is_err() {
+                tracing::warn!("Failed to read Bitcoin verack");
+            }
 
             // Send getaddr
             let getaddr_msg = create_getaddr_message();
-            stream.write_all(&getaddr_msg).ok();
+            if stream.write_all(&getaddr_msg).is_err() {
+                tracing::warn!("Bitcoin: Failed to send getaddr");
+            }
 
             // Read addr response
             let _n = stream.read(&mut buf).unwrap_or(0);

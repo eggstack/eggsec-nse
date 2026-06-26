@@ -51,7 +51,9 @@ fn smtp_login(
     stream.flush()?;
 
     let mut response = vec![0u8; 1024];
-    let _ = stream.read(&mut response);
+    if stream.read(&mut response).is_err() {
+        tracing::warn!("Failed to read SMTP EHLO response");
+    }
 
     stream.write_all("AUTH LOGIN\r\n".to_string().as_bytes())?;
     stream.flush()?;
@@ -517,11 +519,13 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
             match smtp_connect(&host, port) {
                 Ok((mut stream, _banner)) => {
                     if let Some(cmd) = command {
-                        stream
-                            .write_all(format!("HELP {}\r\n", cmd).as_bytes())
-                            .ok();
+                        if stream.write_all(format!("HELP {}\r\n", cmd).as_bytes()).is_err() {
+                            tracing::warn!("SMTP: Failed to send HELP {}", cmd);
+                        }
                     } else {
-                        stream.write_all(b"HELP\r\n").ok();
+                        if stream.write_all(b"HELP\r\n").is_err() {
+                            tracing::warn!("SMTP: Failed to send HELP");
+                        }
                     }
                     stream.flush().ok();
 
@@ -551,7 +555,9 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
         lua.create_function(
             |lua, (host, port): (String, u16)| match smtp_connect(&host, port) {
                 Ok((mut stream, _banner)) => {
-                    stream.write_all(b"NOOP\r\n").ok();
+                    if stream.write_all(b"NOOP\r\n").is_err() {
+                        tracing::warn!("SMTP: Failed to send NOOP");
+                    }
                     stream.flush().ok();
 
                     let mut response = vec![0u8; 256];
@@ -584,7 +590,9 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
         lua.create_function(
             |lua, (host, port): (String, u16)| match smtp_connect(&host, port) {
                 Ok((mut stream, _banner)) => {
-                    stream.write_all(b"RSET\r\n").ok();
+                    if stream.write_all(b"RSET\r\n").is_err() {
+                        tracing::warn!("SMTP: Failed to send RSET");
+                    }
                     stream.flush().ok();
 
                     let mut response = vec![0u8; 256];
@@ -617,7 +625,9 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
         lua.create_function(
             |lua, (host, port): (String, u16)| match smtp_connect(&host, port) {
                 Ok((mut stream, _banner)) => {
-                    stream.write_all(b"QUIT\r\n").ok();
+                    if stream.write_all(b"QUIT\r\n").is_err() {
+                        tracing::warn!("SMTP: Failed to send QUIT");
+                    }
                     stream.flush().ok();
 
                     let result = lua.create_table()?;

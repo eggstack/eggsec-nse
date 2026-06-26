@@ -71,7 +71,9 @@ pub fn register_smb2_library(lua: &Lua) -> LuaResult<()> {
             stream.write_all(&request).ok();
 
             let mut response = vec![0u8; 1024];
-            let _ = stream.read(&mut response);
+            if stream.read(&mut response).is_err() {
+                tracing::warn!("Failed to read SMB2 negotiate response");
+            }
 
             if !response.is_empty() {
                 result.set("status", "ok")?;

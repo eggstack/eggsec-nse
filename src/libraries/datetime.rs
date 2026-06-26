@@ -3,44 +3,41 @@
 //! Date and time utilities for NSE scripts.
 //! Based on Nmap's datetime library.
 
-use mlua::Lua;
+use mlua::{Lua, LuaResult};
 
-pub fn register_datetime_library(lua: &Lua) {
+pub fn register_datetime_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
 
     let datetime = lua.create_table().expect("Failed to create datetime table");
 
-    let _ = datetime.set(
+    datetime.set(
         "now",
         lua.create_function(|_lua, _: ()| {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs() as i64;
             Ok(now)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = datetime.set(
+    datetime.set(
         "current_time",
         lua.create_function(|_lua, _: ()| {
             let now = chrono::Utc::now();
             Ok(now.format("%Y-%m-%d %H:%M:%S").to_string())
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = datetime.set(
+    datetime.set(
         "timestamp",
         lua.create_function(|_lua, _: ()| {
             let now = chrono::Utc::now().timestamp();
             Ok(now)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = datetime.set(
+    datetime.set(
         "parse_timespec",
         lua.create_function(|_lua, timespec: String| {
             let timespec = timespec.to_lowercase();
@@ -58,11 +55,10 @@ pub fn register_datetime_library(lua: &Lua) {
             };
 
             Ok(seconds)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = datetime.set(
+    datetime.set(
         "format_time",
         lua.create_function(|_lua, (timestamp, format): (i64, String)| {
             use chrono::{TimeZone, Utc};
@@ -71,11 +67,10 @@ pub fn register_datetime_library(lua: &Lua) {
                 Some(d) => Ok(d.format(&format).to_string()),
                 None => Ok("".to_string()),
             }
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = datetime.set(
+    datetime.set(
         "format_date",
         lua.create_function(|_lua, (timestamp, format): (i64, String)| {
             use chrono::{TimeZone, Utc};
@@ -84,11 +79,10 @@ pub fn register_datetime_library(lua: &Lua) {
                 Some(d) => Ok(d.format(&format).to_string()),
                 None => Ok("".to_string()),
             }
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = datetime.set(
+    datetime.set(
         "isotime",
         lua.create_function(|_lua, timestamp: Option<i64>| {
             let ts = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
@@ -98,11 +92,10 @@ pub fn register_datetime_library(lua: &Lua) {
                 Some(d) => Ok(d.to_rfc3339()),
                 None => Ok("".to_string()),
             }
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = datetime.set(
+    datetime.set(
         "to_epoch",
         lua.create_function(
             |_lua, (year, month, day, hour, min, sec): (i32, i32, i32, i32, i32, i32)| {
@@ -122,15 +115,14 @@ pub fn register_datetime_library(lua: &Lua) {
                     None => Ok(0i64),
                 }
             },
-        )
-        .ok(),
-    );
+        )?,
+    )?;
 
-    let _ = datetime.set(
+    datetime.set(
         "diff",
-        lua.create_function(|_lua, (t1, t2): (i64, i64)| Ok(t1 - t2))
-            .ok(),
-    );
+        lua.create_function(|_lua, (t1, t2): (i64, i64)| Ok(t1 - t2))?,
+    )?;
 
-    let _ = globals.set("datetime", datetime);
+    globals.set("datetime", datetime)?;
+    Ok(())
 }

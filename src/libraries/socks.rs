@@ -49,7 +49,11 @@ pub fn register_socks_library(lua: &Lua) -> LuaResult<()> {
                     .map_err(|e| mlua::Error::RuntimeError(format!("SOCKS5 greeting write failed: {}", e)))?;
 
                 let mut response = [0u8; 2];
-                let _ = stream.read(&mut response);
+                if stream.read(&mut response).is_err() {
+                    result.set("status", "error")?;
+                    result.set("error", "Failed to read SOCKS5 greeting response")?;
+                    return Ok(result);
+                }
 
                 if response[1] == 0x00 {
                     // SOCKS5 connect request
@@ -70,7 +74,11 @@ pub fn register_socks_library(lua: &Lua) -> LuaResult<()> {
                         .map_err(|e| mlua::Error::RuntimeError(format!("SOCKS5 request write failed: {}", e)))?;
 
                     let mut reply = [0u8; 10];
-                    let _ = stream.read(&mut reply);
+                    if stream.read(&mut reply).is_err() {
+                        result.set("status", "error")?;
+                        result.set("error", "Failed to read SOCKS5 connect reply")?;
+                        return Ok(result);
+                    }
 
                     if reply[0] == 0x05 && reply[1] == 0x00 {
                         result.set("status", "ok")?;
@@ -118,7 +126,11 @@ pub fn register_socks_library(lua: &Lua) -> LuaResult<()> {
                 .map_err(|e| mlua::Error::RuntimeError(format!("SOCKS5 greeting write failed: {}", e)))?;
 
             let mut response = [0u8; 2];
-            let _ = stream.read(&mut response);
+            if stream.read(&mut response).is_err() {
+                result.set("status", "error")?;
+                result.set("error", "Failed to read SOCKS5 auth response")?;
+                return Ok(result);
+            }
 
             let methods = lua.create_table()?;
             if response[1] == 0x00 {

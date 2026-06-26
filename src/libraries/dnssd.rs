@@ -267,7 +267,7 @@ fn rand_simple() -> u16 {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .subsec_nanos();
     (nanos as u16) ^ ((nanos >> 16) as u16)
 }

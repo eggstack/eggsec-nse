@@ -191,7 +191,9 @@ pub fn register_io_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
 
             if let Ok(mut handles) = FILE_HANDLES.lock() {
                 if let Some(handle) = handles.get_mut(&fd) {
-                    let _ = handle.file.flush();
+                    if handle.file.flush().is_err() {
+                        tracing::warn!("Failed to flush file handle {}", fd);
+                    }
                 }
             }
             Ok(true)

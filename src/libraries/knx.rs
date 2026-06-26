@@ -37,7 +37,9 @@ pub fn register_knx_library(lua: &Lua) -> LuaResult<()> {
                 0x06, 0x10, 0x02, 0x01, 0x00, 0x1E, // KNXnet/IP header
             ];
 
-            socket.send_to(&search_request, &addr).ok();
+            if socket.send_to(&search_request, &addr).is_err() {
+                tracing::warn!("KNX: Failed to send search request to {}", addr);
+            }
 
             let mut response = [0u8; 1024];
             match socket.recv_from(&mut response) {

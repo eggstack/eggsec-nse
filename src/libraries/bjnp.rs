@@ -24,9 +24,13 @@ pub fn register_bjnp_library(lua: &Lua) -> LuaResult<()> {
 
             for addr in broadcast_addrs.iter() {
                 if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
-                    let _ = socket.set_broadcast(true);
+                    if socket.set_broadcast(true).is_err() {
+                        tracing::warn!("Failed to set broadcast on BJNP socket");
+                    }
                     let bjnp_discovery = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
-                    let _ = socket.send_to(bjnp_discovery, format!("{}:8611", addr));
+                    if socket.send_to(bjnp_discovery, format!("{}:8611", addr)).is_err() {
+                        tracing::warn!("Failed to send BJNP discovery to {}", addr);
+                    }
                 }
             }
 

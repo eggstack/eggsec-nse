@@ -25,7 +25,9 @@ pub fn register_comm_library(lua: &Lua) -> LuaResult<()> {
                 match addr.parse() {
                     Ok(socket_addr) => match TcpStream::connect_timeout(&socket_addr, timeout) {
                         Ok(mut stream) => {
-                            let _ = stream.set_read_timeout(Some(timeout));
+                            if stream.set_read_timeout(Some(timeout)).is_err() {
+                                tracing::warn!("Failed to set read timeout on comm stream");
+                            }
 
                             std::thread::sleep(Duration::from_millis(500));
 
@@ -70,8 +72,12 @@ pub fn register_comm_library(lua: &Lua) -> LuaResult<()> {
                 match addr.parse() {
                     Ok(socket_addr) => match TcpStream::connect_timeout(&socket_addr, timeout) {
                         Ok(mut stream) => {
-                            let _ = stream.set_read_timeout(Some(timeout));
-                            let _ = stream.set_write_timeout(Some(timeout));
+                            if stream.set_read_timeout(Some(timeout)).is_err() {
+                                tracing::warn!("Failed to set read timeout on comm stream");
+                            }
+                            if stream.set_write_timeout(Some(timeout)).is_err() {
+                                tracing::warn!("Failed to set write timeout on comm stream");
+                            }
 
                             if stream.write_all(data.as_bytes()).is_err() {
                                 let result = lua.create_table()?;

@@ -178,7 +178,9 @@ pub fn register_tns_library(lua: &Lua) -> LuaResult<()> {
                     stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
                     stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
 
-                    let _ = stream.write_all(&build_tns_connect(&service, "", ""));
+                    if stream.write_all(&build_tns_connect(&service, "", "")).is_err() {
+                        tracing::warn!("Failed to send TNS connect packet");
+                    }
 
                     let cmd_packet = build_tns_command(&sql);
 
@@ -284,7 +286,9 @@ pub fn register_tns_library(lua: &Lua) -> LuaResult<()> {
 
                 match AsyncTcpStream::connect(format!("{}:{}", host_clone, port)).await {
                     Ok(mut stream) => {
-                        let _ = stream.write_all(&build_tns_connect(&service, "", "")).await;
+                        if stream.write_all(&build_tns_connect(&service, "", "")).await.is_err() {
+                            tracing::warn!("Failed to send TNS connect packet");
+                        }
 
                         let cmd_packet = build_tns_command(&sql);
 

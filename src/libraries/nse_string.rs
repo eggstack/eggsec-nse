@@ -3,14 +3,14 @@
 //! String manipulation utilities for NSE scripts.
 //! Based on Lua's string library extensions.
 
-use mlua::Lua;
+use mlua::{Lua, LuaResult};
 
-pub fn register_string_library(lua: &Lua) {
+pub fn register_string_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
 
     let string = lua.create_table().expect("Failed to create string table");
 
-    let _ = string.set(
+    string.set(
         "unescape",
         lua.create_function(|_lua, s: String| {
             let mut result = String::new();
@@ -38,11 +38,10 @@ pub fn register_string_library(lua: &Lua) {
                 }
             }
             Ok(result)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = string.set(
+    string.set(
         "escape",
         lua.create_function(|_lua, s: String| {
             let result: String = s
@@ -58,11 +57,10 @@ pub fn register_string_library(lua: &Lua) {
                 })
                 .collect();
             Ok(result)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = string.set(
+    string.set(
         "random",
         lua.create_function(|_lua, (length, charset): (usize, Option<String>)| {
             let charset = charset.unwrap_or_else(|| {
@@ -73,11 +71,10 @@ pub fn register_string_library(lua: &Lua) {
                 .map(|_| chars[rand::random::<usize>() % chars.len()])
                 .collect();
             Ok(result)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = string.set(
+    string.set(
         "random_alpha",
         lua.create_function(|_lua, length: usize| {
             let charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -86,11 +83,10 @@ pub fn register_string_library(lua: &Lua) {
                 .map(|_| chars[rand::random::<usize>() % chars.len()])
                 .collect();
             Ok(result)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = string.set(
+    string.set(
         "random_numeric",
         lua.create_function(|_lua, length: usize| {
             let charset = "0123456789";
@@ -99,11 +95,10 @@ pub fn register_string_library(lua: &Lua) {
                 .map(|_| chars[rand::random::<usize>() % chars.len()])
                 .collect();
             Ok(result)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = string.set(
+    string.set(
         "random_alphanumeric",
         lua.create_function(|_lua, length: usize| {
             let charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -112,9 +107,9 @@ pub fn register_string_library(lua: &Lua) {
                 .map(|_| chars[rand::random::<usize>() % chars.len()])
                 .collect();
             Ok(result)
-        })
-        .ok(),
-    );
+        })?,
+    )?;
 
-    let _ = globals.set("string", string);
+    globals.set("string", string)?;
+    Ok(())
 }

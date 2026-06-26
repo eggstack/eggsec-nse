@@ -92,7 +92,9 @@ impl UserData for SshSession {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_method_mut("disconnect", |_lua, this, _: ()| {
             if let Some(ref session) = this.session {
-                let _ = session.disconnect(None, "User disconnected", None);
+                if session.disconnect(None, "User disconnected", None).is_err() {
+                    tracing::warn!("Failed to disconnect SSH session");
+                }
             }
             Ok(true)
         });
@@ -347,7 +349,9 @@ pub fn register_ssh2_library(lua: &Lua) -> LuaResult<()> {
                 Ok(mut stream) => {
                     stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
                     let mut banner = vec![0u8; 256];
-                    let _ = stream.read(&mut banner);
+                    if stream.read(&mut banner).is_err() {
+                        tracing::warn!("Failed to read SSH banner");
+                    }
                     let banner_str = String::from_utf8_lossy(&banner).trim().to_string();
 
                     result.set("status", "connected")?;
@@ -398,7 +402,9 @@ pub fn register_ssh2_library(lua: &Lua) -> LuaResult<()> {
                             .set_read_timeout(Some(std::time::Duration::from_secs(5)))
                             .ok();
                         let mut banner = vec![0u8; 256];
-                        let _ = stream.read(&mut banner);
+                        if stream.read(&mut banner).is_err() {
+                            tracing::warn!("Failed to read SSH banner");
+                        }
                         let banner_str = String::from_utf8_lossy(&banner).trim().to_string();
 
                         let r = lua.create_table()?;
