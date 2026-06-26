@@ -44,7 +44,9 @@ pub fn register_socks_library(lua: &Lua) -> LuaResult<()> {
                     0x00, // No authentication
                 ];
 
-                stream.write_all(&greeting).ok();
+                stream
+                    .write_all(&greeting)
+                    .map_err(|e| mlua::Error::RuntimeError(format!("SOCKS5 greeting write failed: {}", e)))?;
 
                 let mut response = [0u8; 2];
                 let _ = stream.read(&mut response);
@@ -63,7 +65,9 @@ pub fn register_socks_library(lua: &Lua) -> LuaResult<()> {
                     request.extend_from_slice(target_host.as_bytes());
                     request.extend_from_slice(&target_port.to_be_bytes());
 
-                    stream.write_all(&request).ok();
+                    stream
+                        .write_all(&request)
+                        .map_err(|e| mlua::Error::RuntimeError(format!("SOCKS5 request write failed: {}", e)))?;
 
                     let mut reply = [0u8; 10];
                     let _ = stream.read(&mut reply);
@@ -109,7 +113,9 @@ pub fn register_socks_library(lua: &Lua) -> LuaResult<()> {
             };
 
             // SOCKS5 greeting
-            stream.write_all(&[0x05, 0x02, 0x00, 0x02]).ok();
+            stream
+                .write_all(&[0x05, 0x02, 0x00, 0x02])
+                .map_err(|e| mlua::Error::RuntimeError(format!("SOCKS5 greeting write failed: {}", e)))?;
 
             let mut response = [0u8; 2];
             let _ = stream.read(&mut response);

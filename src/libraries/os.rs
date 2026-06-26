@@ -116,7 +116,9 @@ pub fn register_os_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
         // spawn_blocking(). Concurrent NSE executors each have their own isolated
         // Lua state, but env::set_var modifies process-global state. This is a known
         // TOCTOU hazard. NSE scripts should not rely on environment mutation across
-        // threads. Consider replacing with a per-executor env store in the future.
+        // threads. set_var/remove_var are unsafe in Rust 2024+ edition because they
+        // are not thread-safe; concurrent reads from other threads is UB.
+        // Consider replacing with a per-executor env store in the future.
         unsafe { env::set_var(&name, &value) };
         Ok(true)
     })?;
@@ -132,6 +134,7 @@ pub fn register_os_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
             return Ok(false);
         }
         // SAFETY: Same concern as setenv_fn — process-global env mutation.
+        // Unsafe in Rust 2024+ edition. See setenv_fn safety comment above.
         unsafe { env::remove_var(&name) };
         Ok(true)
     })?;

@@ -153,7 +153,9 @@ fn mysql_query(conn: &mut MySqlConnection, query: &str) -> std::io::Result<Strin
     let query_bytes = query.as_bytes();
     let packet_len = (query_bytes.len() + 1) as u32;
 
-    packet.extend_from_slice(&(packet_len as u8).to_le_bytes());
+    packet.push((packet_len & 0xFF) as u8);
+    packet.push(((packet_len >> 8) & 0xFF) as u8);
+    packet.push(((packet_len >> 16) & 0xFF) as u8);
     packet.extend_from_slice(&[0x03]);
     packet.extend_from_slice(query_bytes);
 
@@ -162,11 +164,19 @@ fn mysql_query(conn: &mut MySqlConnection, query: &str) -> std::io::Result<Strin
 
     let mut response = Vec::new();
     let mut buffer = vec![0u8; 16384];
+    let max_response_bytes = 16 * 1024 * 1024; // 16 MiB safety limit
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
+        if response.len() >= max_response_bytes {
+            break;
+        }
         match conn.stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => response.extend_from_slice(&buffer[..n]),
             Err(_e) => break,
+        }
+        if std::time::Instant::now() > deadline {
+            break;
         }
         if response.len() < 4 {
             break;

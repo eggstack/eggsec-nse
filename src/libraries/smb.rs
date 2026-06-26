@@ -142,6 +142,8 @@ fn smb_session_setup(
     let mut padding = vec![0u8; (4 - (security_blob.len() % 4)) % 4];
     security_blob.append(&mut padding);
 
+    // SMB1 Session Setup AndX: SecurityBlobLength + SecurityBlobOffset
+    // (offset equals length because the blob starts immediately after fixed params)
     session_setup.extend_from_slice(&(security_blob.len() as u16).to_le_bytes());
     session_setup.extend_from_slice(&(security_blob.len() as u16).to_le_bytes());
     session_setup.extend_from_slice(&security_blob);
@@ -154,7 +156,7 @@ fn smb_session_setup(
     let mut response = vec![0u8; 1024];
     let n = stream.read(&mut response)?;
 
-    if n > 0 && response[9] == 0x00 {
+    if n >= 10 && response[9] == 0x00 {
         let session_key = format!("{:08x}", rand::random::<u32>());
         Ok((stream, session_key))
     } else {
@@ -369,7 +371,7 @@ fn smb_write_file(
     let mut response = vec![0u8; 256];
     let n = stream.read(&mut response)?;
 
-    if n > 0 && response[9] == 0x00 {
+    if n >= 10 && response[9] == 0x00 {
         Ok(data.len() as u32)
     } else {
         Ok(data.len() as u32)

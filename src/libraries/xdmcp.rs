@@ -184,7 +184,13 @@ pub fn register_xdmcp_library(lua: &Lua) -> LuaResult<()> {
             let target_port = port.unwrap_or(XDMCP_PORT);
 
             // Use UDP for broadcast
-            let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok();
+            let socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
+                Ok(s) => Some(s),
+                Err(e) => {
+                    tracing::warn!("XDMCP: failed to bind UDP socket: {}", e);
+                    None
+                }
+            };
 
             if socket.is_none() {
                 result.set("status", "error")?;
