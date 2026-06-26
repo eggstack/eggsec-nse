@@ -79,6 +79,10 @@ fn encode_variable_length(mut value: u32, bytes: &mut Vec<u8>) {
         encoded.reverse();
     }
 
+    if encoded.is_empty() {
+        return;
+    }
+
     for (i, &b) in encoded.iter().enumerate() {
         if i < encoded.len() - 1 {
             bytes.push(b | 0x80);
@@ -88,13 +92,14 @@ fn encode_variable_length(mut value: u32, bytes: &mut Vec<u8>) {
     }
 }
 
-fn encode_integer(value: i32) -> Vec<u8> {
+fn encode_integer(value: u32) -> Vec<u8> {
     let mut bytes = Vec::new();
-    let mut val = value as u32;
 
-    if val == 0 {
+    if value == 0 {
         return vec![0x02, 0x01, 0x00];
     }
+
+    let mut val = value;
 
     while val > 0 {
         bytes.push((val & 0xFF) as u8);
@@ -174,7 +179,7 @@ fn build_snmp_request(
     let mut content = Vec::new();
 
     // Request ID
-    content.extend(encode_integer(request_id));
+    content.extend(encode_integer(request_id as u32));
 
     // Error status (0)
     content.extend(encode_integer(0));
@@ -194,7 +199,7 @@ fn build_snmp_request(
     let pdu = encode_pdu(pdu_type, content);
 
     let community_enc = encode_octet_string(community);
-    let mut message = encode_integer(version);
+    let mut message = encode_integer(version as u32);
     message.extend(community_enc);
     message.extend(pdu);
 
@@ -237,7 +242,7 @@ fn decode_oid(bytes: &[u8], start: usize) -> (String, usize) {
 
     pos += 1;
 
-    while pos < bytes.len() && bytes[pos] < 0x80 {
+    while pos < bytes.len() {
         let mut value = 0u32;
         while pos < bytes.len() && bytes[pos] >= 0x80 {
             value = (value << 7) | (bytes[pos] & 0x7F) as u32;
@@ -614,7 +619,7 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
             let pdu = encode_pdu(0xA5, content); // GetBulkRequest
 
             let community_enc = encode_octet_string(&community);
-            let mut message = encode_integer(SNMP_VERSION_2C);
+            let mut message = encode_integer(SNMP_VERSION_2C as u32);
             message.extend(community_enc);
             message.extend(pdu);
 
@@ -683,7 +688,7 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
             // Encode value based on type
             let value_bytes: Vec<u8> = match vtype.as_deref() {
                 Some("INTEGER") | Some("Counter") | Some("Gauge") | Some("TimeTicks") => {
-                    encode_integer(value.parse().unwrap_or(0))
+                    encode_integer(value.parse::<u32>().unwrap_or(0))
                 }
                 _ => encode_octet_string(&value),
             };
@@ -695,7 +700,7 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
             let pdu = encode_pdu(0xA3, content); // SetRequest
 
             let community_enc = encode_octet_string(&community);
-            let mut message = encode_integer(SNMP_VERSION_1);
+            let mut message = encode_integer(SNMP_VERSION_1 as u32);
             message.extend(community_enc);
             message.extend(pdu);
 

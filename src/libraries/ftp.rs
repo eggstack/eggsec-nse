@@ -350,7 +350,9 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
                 .write_all(format!("PASS {}\r\n", pass).as_bytes())
                 .ok();
             let mut response = vec![0u8; 4096];
-            let _ = stream.read(&mut response);
+            if stream.read(&mut response).is_err() {
+                tracing::warn!("Failed to read FTP login response");
+            }
 
             let result = lua.create_table()?;
             result.set(
@@ -387,7 +389,9 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
             .write_all(format!("CWD {}\r\n", path).as_bytes())
             .ok();
         let mut response = vec![0u8; 4096];
-        let _ = stream.read(&mut response);
+        if stream.read(&mut response).is_err() {
+            tracing::warn!("Failed to read FTP CWD response");
+        }
 
         let result = lua.create_table()?;
         result.set("success", response[..3].starts_with(b"250"))?;
@@ -416,7 +420,9 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
             .write_all(b"PWD\r\n")
             .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
         let mut response = vec![0u8; 4096];
-        let _ = stream.read(&mut response);
+        if stream.read(&mut response).is_err() {
+            tracing::warn!("Failed to read FTP PWD response");
+        }
 
         let response_str = String::from_utf8_lossy(&response);
         let path = if let Some(start) = response_str.find('"') {
@@ -651,7 +657,9 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
             .write_all(format!("MDTM {}\r\n", filename).as_bytes())
             .ok();
         let mut response = vec![0u8; 4096];
-        let _ = stream.read(&mut response);
+        if stream.read(&mut response).is_err() {
+            tracing::warn!("Failed to read FTP MDTM response");
+        }
 
         let result = lua.create_table()?;
         let response_str = String::from_utf8_lossy(&response).to_string();
@@ -695,7 +703,9 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
             .write_all(format!("MLST {}\r\n", path).as_bytes())
             .ok();
         let mut response = vec![0u8; 4096];
-        let _ = stream.read(&mut response);
+        if stream.read(&mut response).is_err() {
+            tracing::warn!("Failed to read FTP MLST response");
+        }
 
         let result = lua.create_table()?;
         let response_str = String::from_utf8_lossy(&response).to_string();
@@ -757,7 +767,9 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
 
         stream.write_all(b"FEAT\r\n").ok();
         let mut response = vec![0u8; 4096];
-        let _ = stream.read(&mut response);
+        if stream.read(&mut response).is_err() {
+            tracing::warn!("Failed to read FTP FEAT response");
+        }
 
         let result = lua.create_table()?;
         let response_str = String::from_utf8_lossy(&response).to_string();
@@ -802,7 +814,9 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
             .write_all(format!("SITE {}\r\n", command).as_bytes())
             .ok();
         let mut response = vec![0u8; 4096];
-        let _ = stream.read(&mut response);
+        if stream.read(&mut response).is_err() {
+            tracing::warn!("Failed to read FTP SITE response");
+        }
 
         let result = lua.create_table()?;
         let response_str = String::from_utf8_lossy(&response).to_string();
@@ -839,7 +853,9 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
                 stream.write_all(b"STAT\r\n").ok();
             }
             let mut response = vec![0u8; 4096];
-            let _ = stream.read(&mut response);
+            if stream.read(&mut response).is_err() {
+                tracing::warn!("Failed to read FTP STAT response");
+            }
 
             let result = lua.create_table()?;
             result.set(
@@ -873,7 +889,9 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
 
         stream.write_all(b"NOOP\r\n").ok();
         let mut response = vec![0u8; 256];
-        let _ = stream.read(&mut response);
+        if stream.read(&mut response).is_err() {
+            tracing::warn!("Failed to read FTP NOOP response");
+        }
 
         let result = lua.create_table()?;
         result.set("success", response.starts_with(b"200"))?;
@@ -904,7 +922,9 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
 
         stream.write_all(b"SYST\r\n").ok();
         let mut response = vec![0u8; 256];
-        let _ = stream.read(&mut response);
+        if stream.read(&mut response).is_err() {
+            tracing::warn!("Failed to read FTP SYST response");
+        }
 
         let result = lua.create_table()?;
         let response_str = String::from_utf8_lossy(&response).to_string();
@@ -943,7 +963,9 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
             .write_all(format!("TYPE {}\r\n", type_char).as_bytes())
             .ok();
         let mut response = vec![0u8; 4096];
-        let _ = stream.read(&mut response);
+        if stream.read(&mut response).is_err() {
+            tracing::warn!("Failed to read FTP TYPE response");
+        }
 
         let result = lua.create_table()?;
         result.set("success", response[..3].starts_with(b"200"))?;
@@ -971,7 +993,9 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
             .write_all(b"PASV\r\n")
             .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
         let mut response = vec![0u8; 4096];
-        let _ = stream.read(&mut response);
+        if stream.read(&mut response).is_err() {
+            tracing::warn!("Failed to read FTP PASV response");
+        }
 
         Ok(String::from_utf8_lossy(&response).to_string())
     })?;
@@ -996,7 +1020,9 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
             .write_all(b"EPSV\r\n")
             .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
         let mut response = vec![0u8; 4096];
-        let _ = stream.read(&mut response);
+        if stream.read(&mut response).is_err() {
+            tracing::warn!("Failed to read FTP EPSV response");
+        }
 
         Ok(String::from_utf8_lossy(&response).to_string())
     })?;
@@ -1034,20 +1060,26 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
             tokio::runtime::Handle::current().block_on(async {
                 match AsyncTcpStream::connect(&addr).await {
                     Ok(mut stream) => {
-                        let _ = stream.read(&mut vec![0u8; 4096]).await;
+                        if stream.read(&mut vec![0u8; 4096]).await.is_err() {
+                            tracing::warn!("Failed to read FTP async greeting");
+                        }
 
                         stream
                             .write_all(format!("USER {}\r\n", user).as_bytes())
                             .await
                             .ok();
-                        let _ = stream.read(&mut vec![0u8; 4096]).await;
+                        if stream.read(&mut vec![0u8; 4096]).await.is_err() {
+                            tracing::warn!("Failed to read FTP async USER response");
+                        }
 
                         stream
                             .write_all(format!("PASS {}\r\n", pass).as_bytes())
                             .await
                             .ok();
                         let mut response = vec![0u8; 4096];
-                        let _ = stream.read(&mut response).await;
+                        if stream.read(&mut response).await.is_err() {
+                            tracing::warn!("Failed to read FTP async PASS response");
+                        }
 
                         let result = lua.create_table()?;
                         result.set(

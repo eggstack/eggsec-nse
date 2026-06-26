@@ -8,7 +8,7 @@ use mlua::{Lua, Result as LuaResult};
 pub fn register_string_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
 
-    let string = lua.create_table().expect("Failed to create string table");
+    let string = lua.create_table().map_err(|e| mlua::Error::RuntimeError(format!("Failed to create string table: {}", e)))?;
 
     string.set(
         "unescape",

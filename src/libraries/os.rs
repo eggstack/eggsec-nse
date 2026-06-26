@@ -3,11 +3,16 @@
 //! Provides OS operations compatible with NSE.
 
 use mlua::{Lua, Result as LuaResult, Table};
-use std::env;
+use std::collections::HashMap;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::SandboxConfig;
+
+thread_local! {
+    static NSE_ENV: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+}
 
 static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
@@ -96,9 +101,12 @@ pub fn register_os_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
 
     let getenv_fn = lua.create_function(move |_lua, name: String| {
         if sandbox_enabled {
-            Ok(String::new())
+            NSE_ENV.with(|e| {
+                Ok(e.borrow().get(&name).cloned().unwrap_or_default())
+            })
         } else {
-            Ok(env::var(&name).unwrap_or_default())
+            let local = NSE_ENV.with(|e| e.borrow().get(&name).cloned());
+            Ok(local.unwrap_or_else(|| std::env::var(&name).unwrap_or_default()))
         }
     })?;
     nse_os.set("getenv", getenv_fn)?;
@@ -112,14 +120,9 @@ pub fn register_os_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
             }
             return Ok(false);
         }
-        // SAFETY: This NSE executor runs inside a single-threaded Lua VM within
-        // spawn_blocking(). Concurrent NSE executors each have their own isolated
-        // Lua state, but env::set_var modifies process-global state. This is a known
-        // TOCTOU hazard. NSE scripts should not rely on environment mutation across
-        // threads. set_var/remove_var are unsafe in Rust 2024+ edition because they
-        // are not thread-safe; concurrent reads from other threads is UB.
-        // Consider replacing with a per-executor env store in the future.
-        unsafe { env::set_var(&name, &value) };
+        NSE_ENV.with(|e| {
+            e.borrow_mut().insert(name, value);
+        });
         Ok(true)
     })?;
     nse_os.set("setenv", setenv_fn)?;
@@ -133,9 +136,9 @@ pub fn register_os_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
             }
             return Ok(false);
         }
-        // SAFETY: Same concern as setenv_fn — process-global env mutation.
-        // Unsafe in Rust 2024+ edition. See setenv_fn safety comment above.
-        unsafe { env::remove_var(&name) };
+        NSE_ENV.with(|e| {
+            e.borrow_mut().remove(&name);
+        });
         Ok(true)
     })?;
     nse_os.set("unsetenv", unsetenv_fn)?;

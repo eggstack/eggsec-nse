@@ -4,6 +4,30 @@
 //! Based on Nmap's shortport library: https://nmap.org/nsedoc/lib/shortport.html
 
 use mlua::{Lua, Result as LuaResult, Table, Value};
+use std::sync::LazyLock;
+use regex::Regex;
+
+static SHORTPORT_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    let patterns = [
+        r"^\d+$",     // just a port number
+        r"^\d+-\d+$", // port range
+        r"^tcp$",
+        r"^udp$",
+        r"^sctp$", // protocols
+        r"^http$",
+        r"^https?$", // common services
+        r"^ssh$",
+        r"^ftp$",
+        r"^smtp$",
+        r"^mysql$",
+        r"^postgres$",
+        r"^redis$",
+        r"^mongodb$",
+        r"^oracle$",
+        r"^mssql$",
+    ];
+    patterns.iter().filter_map(|p| Regex::new(p).ok()).collect()
+});
 
 fn value_to_string(v: &Value) -> Option<String> {
     match v {
@@ -418,31 +442,9 @@ pub fn register_shortport_library(lua: &Lua) -> LuaResult<()> {
         let expr = port_str.or(host_str);
 
         if let Some(expr) = expr {
-            // Common NSE port expressions to check
-            let patterns = [
-                r"^\d+$",     // just a port number
-                r"^\d+-\d+$", // port range
-                r"^tcp$",
-                r"^udp$",
-                r"^sctp$", // protocols
-                r"^http$",
-                r"^https?$", // common services
-                r"^ssh$",
-                r"^ftp$",
-                r"^smtp$",
-                r"^mysql$",
-                r"^postgres$",
-                r"^redis$",
-                r"^mongodb$",
-                r"^oracle$",
-                r"^mssql$",
-            ];
-
-            for pattern in patterns {
-                if let Ok(re) = regex::Regex::new(pattern) {
-                    if re.is_match(&expr) {
-                        return Ok(true);
-                    }
+            for re in SHORTPORT_PATTERNS.iter() {
+                if re.is_match(&expr) {
+                    return Ok(true);
                 }
             }
 

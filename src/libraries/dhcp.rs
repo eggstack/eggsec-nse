@@ -125,7 +125,7 @@ fn parse_dhcp_response(packet: &[u8]) -> Result<(String, String, String, String,
     let mut lease_time: u32 = 3600;
 
     let mut i = 240;
-    while i < packet.len() - 2 {
+    while i + 1 < packet.len() {
         let opt_code = packet[i];
         let opt_len = packet[i + 1] as usize;
 

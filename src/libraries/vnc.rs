@@ -382,12 +382,16 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
                     stream.read_exact(&mut name_length).ok();
                     let _name_len = u32::from_be_bytes(name_length);
 
-                    stream.write_all(&[0x03, 0x00]).ok();
-                    stream.write_all(&[0x00, 0x00]).ok();
-                    stream.write_all(&[0x00, 0x00]).ok();
-                    stream.write_all(&[0x00, 0x00]).ok();
-                    stream.write_all(&(width as u32).to_be_bytes()).ok();
-                    stream.write_all(&(height as u32).to_be_bytes()).ok();
+                    let mut buf = Vec::with_capacity(18);
+                    buf.extend_from_slice(&[0x03, 0x00]);
+                    buf.extend_from_slice(&[0x00, 0x00]);
+                    buf.extend_from_slice(&[0x00, 0x00]);
+                    buf.extend_from_slice(&[0x00, 0x00]);
+                    buf.extend_from_slice(&(width as u32).to_be_bytes());
+                    buf.extend_from_slice(&(height as u32).to_be_bytes());
+                    if stream.write_all(&buf).is_err() {
+                        tracing::warn!("Failed to write VNC screen capture request");
+                    }
                     stream.flush().ok();
 
                     let mut response = vec![0u8; 1024];

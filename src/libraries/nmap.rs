@@ -85,8 +85,12 @@ fn reconnect_stream(host: &str, port: u16, timeout_secs: i64) -> Option<TcpStrea
     let addr = format!("{}:{}", host, port).parse().ok()?;
     let stream =
         TcpStream::connect_timeout(&addr, Duration::from_secs(timeout_secs as u64)).ok()?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(timeout_secs as u64)));
-    let _ = stream.set_write_timeout(Some(Duration::from_secs(timeout_secs as u64)));
+    if stream.set_read_timeout(Some(Duration::from_secs(timeout_secs as u64))).is_err() {
+        tracing::warn!("Failed to set read timeout on reconnect stream");
+    }
+    if stream.set_write_timeout(Some(Duration::from_secs(timeout_secs as u64))).is_err() {
+        tracing::warn!("Failed to set write timeout on reconnect stream");
+    }
     Some(stream)
 }
 

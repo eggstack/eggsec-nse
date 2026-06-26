@@ -199,12 +199,13 @@ pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
                 }
 
                 // Parse RECENT
-                if let Some(recent) = response.find("* ") {
-                    if let Some(end) = response[recent + 2..].find(" RECENT") {
-                        if let Ok(count) =
-                            response[recent + 2..recent + 2 + end].trim().parse::<i32>()
-                        {
-                            result.set("recent", count)?;
+                if let Some(recent_offset) = response.lines().find(|line| line.contains(" RECENT")) {
+                    if let Some(star_pos) = recent_offset.find("* ") {
+                        let after_star = &recent_offset[star_pos + 2..];
+                        if let Some(end) = after_star.find(" RECENT") {
+                            if let Ok(count) = after_star[..end].trim().parse::<i32>() {
+                                result.set("recent", count)?;
+                            }
                         }
                     }
                 }

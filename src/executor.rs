@@ -29,7 +29,9 @@ impl NseExecutor {
 
     pub fn with_target(target: &str) -> LuaResult<Self> {
         let mut exec = Self::new()?;
-        let _ = exec.set_target(target);
+        if let Err(e) = exec.set_target(target) {
+            tracing::warn!("Failed to set NSE target '{}': {}", target, e);
+        }
         Ok(exec)
     }
 
@@ -78,7 +80,9 @@ impl NseExecutor {
         std::thread::spawn(move || {
             let result = (|| -> LuaResult<String> {
                 let mut exec = NseExecutor::with_sandbox(sandbox)?;
-                let _ = exec.set_target(&target);
+                if let Err(e) = exec.set_target(&target) {
+                    tracing::warn!("Failed to set NSE target '{}': {}", target, e);
+                }
                 for path in script_paths {
                     exec.add_scripts_path(path);
                 }

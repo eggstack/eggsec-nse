@@ -21,7 +21,7 @@ pub fn register_msrpcperformance_library(lua: &Lua) -> LuaResult<()> {
             "timestamp",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .unwrap_or_default()
                 .as_secs(),
         )?;
         Ok(counter)

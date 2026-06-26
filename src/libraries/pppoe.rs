@@ -407,7 +407,12 @@ pub fn register_pppoe_library(lua: &Lua) -> LuaResult<()> {
             // Find network interfaces
             let interfaces: Vec<_> = match std::fs::read_dir("/sys/class/net") {
                 Ok(entries) => entries
-                    .filter_map(|e| e.ok())
+                    .filter_map(|e| {
+                        if let Err(ref e) = e {
+                            tracing::warn!("Error reading network interface: {}", e);
+                        }
+                        e.ok()
+                    })
                     .filter(|e| {
                         if let Ok(name) = e.file_name().into_string() {
                             !name.starts_with('l')
@@ -470,7 +475,12 @@ pub fn register_pppoe_library(lua: &Lua) -> LuaResult<()> {
 
             let interfaces: Vec<_> = match std::fs::read_dir("/sys/class/net") {
                 Ok(entries) => entries
-                    .filter_map(|e| e.ok())
+                    .filter_map(|e| {
+                        if let Err(ref e) = e {
+                            tracing::warn!("Error reading network interface: {}", e);
+                        }
+                        e.ok()
+                    })
                     .filter(|e| {
                         if let Ok(name) = e.file_name().into_string() {
                             !name.starts_with('l')
