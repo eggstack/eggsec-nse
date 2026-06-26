@@ -3,7 +3,7 @@
 //! Table manipulation utilities for NSE scripts.
 //! Based on Lua's table library extensions.
 
-use mlua::{Lua, LuaResult, Table};
+use mlua::{Lua, Result as LuaResult, Table};
 
 pub fn register_table_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();

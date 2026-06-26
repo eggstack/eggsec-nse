@@ -3,7 +3,7 @@
 //! Date and time utilities for NSE scripts.
 //! Based on Nmap's datetime library.
 
-use mlua::{Lua, LuaResult};
+use mlua::{Lua, Result as LuaResult};
 
 pub fn register_datetime_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();

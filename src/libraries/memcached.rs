@@ -468,10 +468,19 @@ pub fn register_memcached_library(lua: &Lua) -> LuaResult<()> {
     // memcached.quit() - Close connection
     let quit_fn = lua.create_function(|lua, (host, port): (String, u16)| {
         let cmd = b"quit\r\n";
-        let _ = memcached_send(&host, port, cmd);
-        let result = lua.create_table()?;
-        result.set("success", true)?;
-        Ok(result)
+        match memcached_send(&host, port, cmd) {
+            Ok(_) => {
+                let result = lua.create_table()?;
+                result.set("success", true)?;
+                Ok(result)
+            }
+            Err(e) => {
+                let result = lua.create_table()?;
+                result.set("success", false)?;
+                result.set("error", e.to_string())?;
+                Ok(result)
+            }
+        }
     })?;
     memcached.set("quit", quit_fn)?;
 

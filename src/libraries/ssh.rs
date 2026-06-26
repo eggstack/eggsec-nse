@@ -104,6 +104,7 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     let login_fn = lua.create_function(
         |lua, (host, port, user, password): (String, Option<u16>, String, String)| {
             let _port = port.unwrap_or(SSH_PORT);
+            let _ = (&host, &user, &password);
 
             #[cfg(feature = "nse-ssh2")]
             {
@@ -179,6 +180,7 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     let execute_fn = lua.create_function(
         |lua, (host, port, command): (String, Option<u16>, String)| {
             let _port = port.unwrap_or(SSH_PORT);
+            let _ = &host;
 
             #[cfg(feature = "nse-ssh2")]
             {
@@ -407,6 +409,7 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     let userauth_pubkey_fn = lua.create_function(
         |lua, (host, port, user, key_file): (String, Option<u16>, String, String)| {
             let _port = port.unwrap_or(SSH_PORT);
+            let _ = (&host, &user, &key_file);
 
             #[cfg(feature = "nse-ssh2")]
             {
@@ -602,6 +605,7 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     let scp_upload_fn = lua.create_function(
         |lua, (host, port, _local_path, _remote_path): (String, Option<u16>, String, String)| {
             let _port = port.unwrap_or(SSH_PORT);
+            let _ = &host;
 
             #[cfg(feature = "nse-ssh2")]
             {
@@ -660,6 +664,7 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     let sftp_fn = lua.create_function(
         |lua, (host, port, operation, path): (String, Option<u16>, String, String)| {
             let _port = port.unwrap_or(SSH_PORT);
+            let _ = (&host, &operation, &path);
 
             #[cfg(feature = "nse-ssh2")]
             {
@@ -777,6 +782,7 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     let userauth_fn = lua.create_function(
         |lua, (host, port, user, password): (String, Option<u16>, String, String)| {
             let _port = port.unwrap_or(SSH_PORT);
+            let _ = (&host, &user, &password);
 
             #[cfg(feature = "nse-ssh2")]
             {

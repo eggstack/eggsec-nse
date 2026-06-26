@@ -38,7 +38,9 @@ pub fn register_slaxml_library(lua: &Lua) -> LuaResult<()> {
             if bytes[i] == b'<' {
                 if !current_text.is_empty() {
                     if let Some(ref f) = chars_fn {
-                        let _ = f.call::<()>(current_text.clone());
+                        if let Err(e) = f.call::<()>(current_text.clone()) {
+                            tracing::warn!("slaxml: characters callback error: {}", e);
+                        }
                     }
                     current_text.clear();
                 }
@@ -48,7 +50,9 @@ pub fn register_slaxml_library(lua: &Lua) -> LuaResult<()> {
                         let end_tag = &xml[i + 2..i + end_pos];
 
                         if let Some(ref f) = end_fn {
-                            let _ = f.call::<()>(end_tag.to_string());
+                            if let Err(e) = f.call::<()>(end_tag.to_string()) {
+                                tracing::warn!("slaxml: endElement callback error: {}", e);
+                            }
                         }
 
                         depth -= 1;
@@ -68,7 +72,9 @@ pub fn register_slaxml_library(lua: &Lua) -> LuaResult<()> {
                             for (k, v) in attrs {
                                 attrs_table.set(k, v).ok();
                             }
-                            let _ = f.call::<mlua::Value>((elem_name.clone(), attrs_table));
+                            if let Err(e) = f.call::<mlua::Value>((elem_name.clone(), attrs_table)) {
+                                tracing::warn!("slaxml: startElement callback error: {}", e);
+                            }
                         }
 
                         depth += 1;

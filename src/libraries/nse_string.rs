@@ -3,7 +3,7 @@
 //! String manipulation utilities for NSE scripts.
 //! Based on Lua's string library extensions.
 
-use mlua::{Lua, LuaResult};
+use mlua::{Lua, Result as LuaResult};
 
 pub fn register_string_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();

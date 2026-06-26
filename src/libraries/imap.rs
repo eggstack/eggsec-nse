@@ -475,10 +475,19 @@ pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
     let logout_fn = lua.create_function(|lua, (host, port): (String, u16)| {
         let tag = format!("A{:04}", 1);
         let cmd = format!("{} LOGOUT\r\n", tag);
-        let _ = imap_send(&host, port, &cmd);
-        let result = lua.create_table()?;
-        result.set("success", true)?;
-        Ok(result)
+        match imap_send(&host, port, &cmd) {
+            Ok(_) => {
+                let result = lua.create_table()?;
+                result.set("success", true)?;
+                Ok(result)
+            }
+            Err(e) => {
+                let result = lua.create_table()?;
+                result.set("success", false)?;
+                result.set("error", e.to_string())?;
+                Ok(result)
+            }
+        }
     })?;
     imap.set("logout", logout_fn)?;
 
