@@ -301,7 +301,6 @@ pub fn nse_sslcert_get(host: &str, port: u16) -> NseResult<NseSslCertResult> {
 
     let connector = TlsConnector::builder()
         .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
         .build()
         .map_err(|e| NseError::Tls(e.to_string()))?;
 
