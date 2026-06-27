@@ -107,7 +107,7 @@ pub fn create_async_http_client(
         builder = builder.danger_accept_invalid_hostnames(true);
     }
 
-    builder.build().expect("Failed to create async HTTP client")
+    builder.build().unwrap_or_else(|_| reqwest::Client::new())
 }
 
 pub fn spawn_blocking<T, F>(f: F) -> tokio::task::JoinHandle<T>

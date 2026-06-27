@@ -614,33 +614,40 @@ impl ExecutorCore {
             }
 
             // Try loading from file
-            let paths = scripts_path.lock();
-            for base in paths.iter() {
-                for ext in &["nse", "lua"] {
-                    let script_path = base.join(format!("{}.{}", name, ext));
-                    if script_path.exists() {
-                        if let Ok(content) = std::fs::read_to_string(&script_path) {
-                            if lua.load(&content).eval::<Value>().is_ok() {
-                                let globals = lua.globals();
-                                if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
-                                    if let Ok(module) = modules.get::<Table>(name.as_str()) {
-                                        cache
-                                            .lock()
-                                            .insert(name.clone(), Value::Table(module.clone()));
-                                        return Ok(Value::Table(module));
-                                    }
-                                }
-                                if let Ok(module) = globals.get::<Table>(name.as_str()) {
-                                    if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
-                                        if let Err(e) = modules.set(name.clone(), module.clone()) {
-                                            tracing::warn!("NSE require: failed to cache module '{}' in _REQUIRE_MODULES: {}", name, e);
-                                        }
-                                    }
+            let script_candidates: Vec<std::path::PathBuf> = {
+                let paths = scripts_path.lock();
+                let mut candidates = Vec::new();
+                for base in paths.iter() {
+                    for ext in &["nse", "lua"] {
+                        candidates.push(base.join(format!("{}.{}", name, ext)));
+                    }
+                }
+                candidates
+            };
+
+            for script_path in &script_candidates {
+                if script_path.exists() {
+                    if let Ok(content) = std::fs::read_to_string(script_path) {
+                        if lua.load(&content).eval::<Value>().is_ok() {
+                            let globals = lua.globals();
+                            if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
+                                if let Ok(module) = modules.get::<Table>(name.as_str()) {
                                     cache
                                         .lock()
                                         .insert(name.clone(), Value::Table(module.clone()));
                                     return Ok(Value::Table(module));
                                 }
+                            }
+                            if let Ok(module) = globals.get::<Table>(name.as_str()) {
+                                if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
+                                    if let Err(e) = modules.set(name.clone(), module.clone()) {
+                                        tracing::warn!("NSE require: failed to cache module '{}' in _REQUIRE_MODULES: {}", name, e);
+                                    }
+                                }
+                                cache
+                                    .lock()
+                                    .insert(name.clone(), Value::Table(module.clone()));
+                                return Ok(Value::Table(module));
                             }
                         }
                     }

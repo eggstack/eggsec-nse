@@ -110,8 +110,13 @@ pub fn register_finger_library(lua: &Lua) -> LuaResult<()> {
         let addr = format!("{}:79", host);
 
         tokio::runtime::Handle::current().block_on(async {
-            match AsyncTcpStream::connect(&addr).await {
-                Ok(mut stream) => {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                AsyncTcpStream::connect(&addr),
+            )
+            .await
+            {
+                Ok(Ok(mut stream)) => {
                     let query = format!("{}\r\n", user);
                     stream.write_all(query.as_bytes()).await.ok();
 
@@ -125,9 +130,14 @@ pub fn register_finger_library(lua: &Lua) -> LuaResult<()> {
                     result.set("user", user)?;
                     Ok(result)
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let r = lua.create_table()?;
                     r.set("error", e.to_string())?;
+                    Ok(r)
+                }
+                Err(_) => {
+                    let r = lua.create_table()?;
+                    r.set("error", "Connection timed out".to_string())?;
                     Ok(r)
                 }
             }

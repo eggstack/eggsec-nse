@@ -12,7 +12,9 @@ pub fn register_strict_library(lua: &Lua) -> LuaResult<()> {
         "on",
         lua.create_function(|_lua, env: Option<Table>| {
             if let Some(e) = env {
-                let _ = e.set("_STRICT", true);
+                if let Err(err) = e.set("_STRICT", true) {
+                    tracing::warn!("Failed to set _STRICT mode: {}", err);
+                }
             }
             Ok(true)
         })?,
@@ -22,7 +24,9 @@ pub fn register_strict_library(lua: &Lua) -> LuaResult<()> {
         "off",
         lua.create_function(|_lua, env: Option<Table>| {
             if let Some(e) = env {
-                let _ = e.set("_STRICT", false);
+                if let Err(err) = e.set("_STRICT", false) {
+                    tracing::warn!("Failed to unset _STRICT mode: {}", err);
+                }
             }
             Ok(true)
         })?,

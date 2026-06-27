@@ -84,8 +84,8 @@ impl SocketHandle {
         let stream =
             TcpStream::connect_timeout(&socket_addr, self.timeout).map_err(|e| e.to_string())?;
 
-        let _ = stream.set_read_timeout(Some(self.timeout));
-        let _ = stream.set_write_timeout(Some(self.timeout));
+        stream.set_read_timeout(Some(self.timeout)).unwrap_or_else(|e| tracing::warn!("Failed to set TCP read timeout: {}", e));
+        stream.set_write_timeout(Some(self.timeout)).unwrap_or_else(|e| tracing::warn!("Failed to set TCP write timeout: {}", e));
 
         self.stream = Some(StreamType::Tcp(stream));
         self.host = host.to_string();
@@ -195,12 +195,12 @@ impl SocketHandle {
         // Update timeout on existing socket if connected
         match self.stream.as_mut() {
             Some(StreamType::Tcp(stream)) => {
-                let _ = stream.set_read_timeout(Some(self.timeout));
-                let _ = stream.set_write_timeout(Some(self.timeout));
+                stream.set_read_timeout(Some(self.timeout)).unwrap_or_else(|e| tracing::warn!("Failed to set TCP read timeout: {}", e));
+                stream.set_write_timeout(Some(self.timeout)).unwrap_or_else(|e| tracing::warn!("Failed to set TCP write timeout: {}", e));
             }
             Some(StreamType::Udp(socket)) => {
-                let _ = socket.set_read_timeout(Some(self.timeout));
-                let _ = socket.set_write_timeout(Some(self.timeout));
+                socket.set_read_timeout(Some(self.timeout)).unwrap_or_else(|e| tracing::warn!("Failed to set UDP read timeout: {}", e));
+                socket.set_write_timeout(Some(self.timeout)).unwrap_or_else(|e| tracing::warn!("Failed to set UDP write timeout: {}", e));
             }
             None => {}
         }

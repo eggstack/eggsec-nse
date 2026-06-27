@@ -77,7 +77,7 @@ pub fn register_oops_library(lua: &Lua) -> LuaResult<()> {
                 }
             };
 
-            stream.set_read_timeout(Some(timeout_dur)).ok();
+            stream.set_read_timeout(Some(timeout_dur)).unwrap_or_else(|e| tracing::warn!("Failed to set OOPS read timeout: {}", e));
 
             let mut buffer = vec![0u8; 65536];
             match stream.read(&mut buffer) {
@@ -128,8 +128,8 @@ pub fn register_oops_library(lua: &Lua) -> LuaResult<()> {
                         }
                     };
 
-                stream.set_read_timeout(Some(timeout_dur)).ok();
-                stream.set_write_timeout(Some(timeout_dur)).ok();
+                stream.set_read_timeout(Some(timeout_dur)).unwrap_or_else(|e| tracing::warn!("Failed to set OOPS read timeout: {}", e));
+                stream.set_write_timeout(Some(timeout_dur)).unwrap_or_else(|e| tracing::warn!("Failed to set OOPS write timeout: {}", e));
 
                 if let Err(e) = stream.write_all(data.as_bytes()) {
                     result.set("status", "error")?;

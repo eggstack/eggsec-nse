@@ -26,7 +26,7 @@ pub fn register_coap_library(lua: &Lua) -> LuaResult<()> {
                 }
             };
 
-            socket.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap_or_else(|e| tracing::warn!("Failed to set CoAP read timeout: {}", e));
 
             // CoAP GET request
             let mut request = vec![

@@ -185,7 +185,7 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
                 if stream.write_all(RFB_VERSION_3_8).is_err() {
                     tracing::warn!("VNC: Failed to send version");
                 }
-                stream.flush().ok();
+                stream.flush().unwrap_or_else(|e| tracing::warn!("VNC: Failed to flush stream: {}", e));
 
                 let mut version = [0u8; 12];
                 if stream.read_exact(&mut version).is_err() {
@@ -274,13 +274,13 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
                 Duration::from_secs(10),
             ) {
                 Ok(mut stream) => {
-                    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-                    stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
+                    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap_or_else(|e| tracing::warn!("VNC: Failed to set read timeout: {}", e));
+                    stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap_or_else(|e| tracing::warn!("VNC: Failed to set write timeout: {}", e));
 
                     if stream.write_all(RFB_VERSION_3_8).is_err() {
                         tracing::warn!("VNC: Failed to send version");
                     }
-                    stream.flush().ok();
+                    stream.flush().unwrap_or_else(|e| tracing::warn!("VNC: Failed to flush stream: {}", e));
 
                     let mut version = [0u8; 12];
                     if stream.read_exact(&mut version).is_err() {
@@ -290,7 +290,7 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
                     if stream.write_all(&[SECURITY_TYPE_NONE]).is_err() {
                         tracing::warn!("VNC: Failed to send security type");
                     }
-                    stream.flush().ok();
+                    stream.flush().unwrap_or_else(|e| tracing::warn!("VNC: Failed to flush stream: {}", e));
 
                     let mut auth_result = [0u8; 4];
                     if stream.read_exact(&mut auth_result).is_err() {
@@ -301,7 +301,7 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
                         if stream.write_all(&[SECURITY_TYPE_VNC_AUTH]).is_err() {
                             tracing::warn!("VNC: Failed to send auth type");
                         }
-                        stream.flush().ok();
+                        stream.flush().unwrap_or_else(|e| tracing::warn!("VNC: Failed to flush stream: {}", e));
 
                         let mut challenge = [0u8; 16];
                         if stream.read_exact(&mut challenge).is_err() {
@@ -349,8 +349,8 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
                         response[..8].copy_from_slice(&encrypted);
                         response[8..].copy_from_slice(&encrypted2);
 
-                        stream.write_all(&response).ok();
-                        stream.flush().ok();
+                        stream.write_all(&response).unwrap_or_else(|e| tracing::warn!("VNC: Failed to send auth response: {}", e));
+                        stream.flush().unwrap_or_else(|e| tracing::warn!("VNC: Failed to flush stream: {}", e));
 
                         let mut auth_result = [0u8; 4];
                         if stream.read_exact(&mut auth_result).is_err() {

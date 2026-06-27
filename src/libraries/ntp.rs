@@ -33,6 +33,9 @@ fn ntp_request(host: &str, port: u16, mode: u8, data: &[u8]) -> Result<Vec<u8>, 
 }
 
 fn ntp_read_response(response: &[u8]) -> (u8, u8, u8, u8, String, f64, f64, f64) {
+    if response.len() < 48 {
+        return (0, 0, 0, 0, String::new(), 0.0, 0.0, 0.0);
+    }
     let leap = (response[0] >> 6) & 0x3;
     let version = (response[0] >> 3) & 0x7;
     let mode = response[0] & 0x7;

@@ -169,7 +169,9 @@ fn pg_query(conn: &mut PgConnection, query: &str) -> std::io::Result<String> {
     let mut query_data = query.as_bytes().to_vec();
     query_data.push(0);
 
-    let length = (query_data.len() + 4) as u32;
+    let length = (query_data.len() + 4).try_into().map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("PostgreSQL query too long: {} bytes", query_data.len() + 4))
+    })?;
     packet.extend_from_slice(&length.to_be_bytes());
     packet.extend_from_slice(&query_data);
 
@@ -178,8 +180,12 @@ fn pg_query(conn: &mut PgConnection, query: &str) -> std::io::Result<String> {
 
     let mut response = Vec::new();
     let mut buffer = vec![0u8; 16384];
+    const MAX_RESPONSE_SIZE: usize = 16 * 1024 * 1024;
 
     loop {
+        if response.len() >= MAX_RESPONSE_SIZE {
+            break;
+        }
         match conn.stream.read(&mut buffer) {
             Ok(0) => break,
             Ok(n) => response.extend_from_slice(&buffer[..n]),

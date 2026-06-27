@@ -56,7 +56,7 @@ pub fn register_msrpc_library(lua: &Lua) -> LuaResult<()> {
             bind_packet.extend_from_slice(&1u16.to_le_bytes());
             bind_packet.extend_from_slice(&1u16.to_le_bytes());
 
-            stream.write_all(&bind_packet).ok();
+            stream.write_all(&bind_packet).unwrap_or_else(|e| tracing::warn!("Failed to send MSRPC bind packet: {}", e));
 
             let mut response = [0u8; 1024];
             let n = stream.read(&mut response).unwrap_or(0);

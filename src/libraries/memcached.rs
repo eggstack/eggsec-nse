@@ -16,8 +16,8 @@ fn memcached_send(host: &str, port: u16, command: &[u8]) -> std::io::Result<Stri
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?,
         Duration::from_secs(10),
     )?;
-    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-    stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
+    stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap_or_else(|e| tracing::warn!("Failed to set memcached read timeout: {}", e));
+    stream.set_write_timeout(Some(Duration::from_secs(10))).unwrap_or_else(|e| tracing::warn!("Failed to set memcached write timeout: {}", e));
 
     stream.write_all(command)?;
     stream.flush()?;

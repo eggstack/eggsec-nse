@@ -42,7 +42,7 @@ pub fn register_tn3270_library(lua: &Lua) -> LuaResult<()> {
                 0x00, 0x00, // Length
             ];
 
-            stream.write_all(&negotiate).ok();
+            stream.write_all(&negotiate).unwrap_or_else(|e| tracing::warn!("Failed to send TN3270 negotiate: {}", e));
 
             let mut response = [0u8; 1024];
             let n = stream.read(&mut response).unwrap_or(0);

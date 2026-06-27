@@ -38,7 +38,7 @@ pub fn register_jdwp_library(lua: &Lua) -> LuaResult<()> {
 
             // JDWP Handshake
             let handshake = "JDWP-Handshake";
-            stream.write_all(handshake.as_bytes()).ok();
+            stream.write_all(handshake.as_bytes()).unwrap_or_else(|e| tracing::warn!("Failed to send JDWP handshake: {}", e));
 
             let mut response = [0u8; 1024];
             let n = stream.read(&mut response).unwrap_or(0);

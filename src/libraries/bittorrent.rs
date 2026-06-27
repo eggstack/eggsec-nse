@@ -44,7 +44,7 @@ pub fn register_bittorrent_library(lua: &Lua) -> LuaResult<()> {
                 handshake.extend_from_slice(&[0u8; 20]); // Info hash (20 bytes)
                 handshake.extend_from_slice(&[0u8; 20]); // Peer ID
 
-                stream.write_all(&handshake).ok();
+                stream.write_all(&handshake).unwrap_or_else(|e| tracing::warn!("Failed to send BitTorrent handshake: {}", e));
 
                 let mut response = [0u8; 68];
                 let n = stream.read(&mut response).unwrap_or(0);

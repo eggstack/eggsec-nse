@@ -54,6 +54,9 @@ impl KafkaConnection {
         let mut buffer = Vec::new();
 
         let message_len = 4 + 2 + 2 + 4 + request.len() + 2 + CLIENT_ID.len();
+        if message_len > i32::MAX as usize {
+            return Err(format!("Kafka message too large: {} bytes", message_len));
+        }
 
         buffer.extend_from_slice(&(message_len as i32).to_be_bytes());
         buffer.extend_from_slice(&api_key.to_be_bytes());
@@ -72,7 +75,11 @@ impl KafkaConnection {
         self.stream
             .read_exact(&mut len_buf)
             .map_err(|e| e.to_string())?;
-        let response_len = i32::from_be_bytes(len_buf) as usize;
+        let response_len_raw = i32::from_be_bytes(len_buf);
+        if response_len_raw < 0 || response_len_raw as usize > 64 * 1024 * 1024 {
+            return Err(format!("Invalid Kafka response length: {}", response_len_raw));
+        }
+        let response_len = response_len_raw as usize;
 
         let mut response_buf = vec![0u8; response_len];
         self.stream
@@ -98,6 +105,9 @@ impl KafkaConnection {
         let mut request = Vec::new();
 
         let topic_bytes = topic.as_bytes();
+        if topic_bytes.len() > i16::MAX as usize {
+            return Err(format!("Kafka topic too long: {} bytes (max {})", topic_bytes.len(), i16::MAX));
+        }
         request.extend_from_slice(&(topic_bytes.len() as i16).to_be_bytes());
         request.extend_from_slice(topic_bytes);
         request.extend_from_slice(&partition.to_be_bytes());
@@ -122,6 +132,9 @@ impl KafkaConnection {
         if key.is_empty() {
             request.extend_from_slice(&(-1i32).to_be_bytes());
         } else {
+            if key.len() > i32::MAX as usize {
+                return Err(format!("Kafka key too long: {} bytes", key.len()));
+            }
             request.extend_from_slice(&(key.len() as i32).to_be_bytes());
             request.extend_from_slice(key);
         }
@@ -129,6 +142,9 @@ impl KafkaConnection {
         if value.is_empty() {
             request.extend_from_slice(&(-1i32).to_be_bytes());
         } else {
+            if value.len() > i32::MAX as usize {
+                return Err(format!("Kafka value too long: {} bytes", value.len()));
+            }
             request.extend_from_slice(&(value.len() as i32).to_be_bytes());
             request.extend_from_slice(value);
         }

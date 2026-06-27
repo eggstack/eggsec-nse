@@ -109,10 +109,12 @@ impl Drop for AsyncNseExecutor {
 
 impl Default for AsyncNseExecutor {
     fn default() -> Self {
-        Self {
-            core: ExecutorCore::new().expect("Lua VM initialization failed (out of memory?)"),
-            runtime: None,
-            owns_runtime: false,
+        match Self::new() {
+            Ok(executor) => executor,
+            Err(e) => {
+                tracing::error!("Lua VM initialization failed: {}", e);
+                panic!("Lua VM initialization failed: {}", e);
+            }
         }
     }
 }

@@ -13,6 +13,7 @@ use std::time::Duration;
 use tokio::net::TcpStream as AsyncTcpStream;
 
 static SMB_SESSIONS: LazyLock<Mutex<Vec<SmbSession>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+const MAX_SMB_SESSIONS: usize = 64;
 
 #[derive(Clone)]
 struct SmbSession {
@@ -324,7 +325,10 @@ fn smb_read_file(
     stream.write_all(&read_cmd)?;
     stream.flush()?;
 
-    let mut response = vec![0u8; length as usize + 100];
+    let alloc_len = (length as usize).checked_add(100).filter(|&n| n <= 16 * 1024 * 1024).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("SMB response length {} too large", length))
+    })?;
+    let mut response = vec![0u8; alloc_len];
     let n = stream.read(&mut response)?;
 
     if n > 0 && response[9] == 0x00 {
@@ -714,9 +718,17 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
         let addr = format!("{}:{}", host, port);
 
         tokio::runtime::Handle::current().block_on(async {
-            match AsyncTcpStream::connect(&addr).await {
-                Ok(_stream) => {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                AsyncTcpStream::connect(&addr),
+            )
+            .await
+            {
+                Ok(Ok(_stream)) => {
                     if let Ok(mut sessions) = SMB_SESSIONS.lock() {
+                        if sessions.len() >= MAX_SMB_SESSIONS {
+                            sessions.retain(|s| s.connected && s.authenticated);
+                        }
                         let mut session = SmbSession::new(host.clone(), port);
                         session.connected = true;
                         sessions.push(session);
@@ -728,10 +740,16 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
                     r.set("status", "connected")?;
                     Ok(r)
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let r = lua.create_table()?;
                     r.set("status", "error")?;
                     r.set("error", e.to_string())?;
+                    Ok(r)
+                }
+                Err(_) => {
+                    let r = lua.create_table()?;
+                    r.set("status", "error")?;
+                    r.set("error", "Connection timed out".to_string())?;
                     Ok(r)
                 }
             }

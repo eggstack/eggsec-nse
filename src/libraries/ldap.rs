@@ -444,6 +444,9 @@ fn decode_ldap_search_response(
             // Sequence
             let entry_len = if pos + 1 < data.len() && data[pos + 1] >= 0x81 {
                 let num_bytes = (data[pos + 1] - 0x80) as usize;
+                if num_bytes > 4 || pos + 2 + num_bytes > data.len() {
+                    break;
+                }
                 let mut len = 0usize;
                 for i in 1..=num_bytes {
                     len = (len << 8) | data[pos + 1 + i] as usize;
@@ -477,6 +480,9 @@ fn decode_ldap_search_response(
             if pos < entry_end && data[pos] == 0x30 {
                 let attrs_len = if pos + 1 < entry_end && data[pos + 1] >= 0x81 {
                     let num_bytes = (data[pos + 1] - 0x80) as usize;
+                    if num_bytes > 4 || pos + 2 + num_bytes > data.len() {
+                        break;
+                    }
                     let mut len = 0usize;
                     for i in 1..=num_bytes {
                         len = (len << 8) | data[pos + 1 + i] as usize;
@@ -497,6 +503,9 @@ fn decode_ldap_search_response(
                     if data[pos] == 0x30 {
                         let attr_len = if pos + 1 < attrs_end && data[pos + 1] >= 0x81 {
                             let num_bytes = (data[pos + 1] - 0x80) as usize;
+                            if num_bytes > 4 || pos + 2 + num_bytes > data.len() {
+                                break;
+                            }
                             let mut len = 0usize;
                             for i in 1..=num_bytes {
                                 len = (len << 8) | data[pos + 1 + i] as usize;

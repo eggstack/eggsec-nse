@@ -91,17 +91,26 @@ pub fn register_ndmp_library(lua: &Lua) -> LuaResult<()> {
             runtime.block_on(async {
                 let result = lua.create_table()?;
 
-                match AsyncTcpStream::connect(format!("{}:{}", host_clone, port)).await {
-                    Ok(_stream) => {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    AsyncTcpStream::connect(format!("{}:{}", host_clone, port)),
+                )
+                .await
+                {
+                    Ok(Ok(_stream)) => {
                         result.set("success", true)?;
                         result.set("host", host_clone)?;
                         result.set("server", "NDMP Server")?;
                         result.set("user", user)?;
                         result.set("version", 4)?;
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         result.set("success", false)?;
                         result.set("error", format!("Connection failed: {}", e))?;
+                    }
+                    Err(_) => {
+                        result.set("success", false)?;
+                        result.set("error", "Connection timed out".to_string())?;
                     }
                 }
 

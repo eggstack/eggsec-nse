@@ -87,8 +87,13 @@ pub fn register_http2_library(lua: &Lua) -> LuaResult<()> {
         let addr = format!("{}:{}", host, port);
 
         tokio::runtime::Handle::current().block_on(async {
-            match AsyncTcpStream::connect(&addr).await {
-                Ok(_stream) => {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                AsyncTcpStream::connect(&addr),
+            )
+            .await
+            {
+                Ok(Ok(_stream)) => {
                     let r = lua.create_table()?;
                     r.set("host", host)?;
                     r.set("port", port)?;
@@ -96,9 +101,14 @@ pub fn register_http2_library(lua: &Lua) -> LuaResult<()> {
                     r.set("protocol", "h2")?;
                     Ok(r)
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let r = lua.create_table()?;
                     r.set("error", e.to_string())?;
+                    Ok(r)
+                }
+                Err(_) => {
+                    let r = lua.create_table()?;
+                    r.set("error", "Connection timed out".to_string())?;
                     Ok(r)
                 }
             }

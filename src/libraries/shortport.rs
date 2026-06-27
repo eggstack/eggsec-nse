@@ -77,16 +77,27 @@ fn parse_port_spec(value: &Value) -> Vec<u16> {
 
     match value {
         Value::Number(n) => {
-            let n = *n;
-            ports.push(n as u16);
+            let n = *n as u32;
+            if n <= u16::MAX as u32 {
+                ports.push(n as u16);
+            }
         }
         Value::String(s) => {
             let s = s.to_string_lossy();
             for part in s.split(',') {
                 let part = part.trim();
                 if let Some((start, end)) = part.split_once('-') {
-                    let start: u16 = start.trim().parse().unwrap_or(0);
-                    let end: u16 = end.trim().parse().unwrap_or(65535);
+                    let start: u16 = match start.trim().parse() {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    let end: u16 = match end.trim().parse() {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    if start > end {
+                        continue;
+                    }
                     ports.extend(start..=end);
                 } else if let Ok(port) = part.parse::<u16>() {
                     ports.push(port);

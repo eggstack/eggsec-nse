@@ -137,7 +137,7 @@ pub fn register_bitcoin_library(lua: &Lua) -> LuaResult<()> {
                 }
             };
 
-            stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap_or_else(|e| tracing::warn!("Failed to set Bitcoin read timeout: {}", e));
 
             // Send version message
             let version_msg = create_version_message(70015);
@@ -206,7 +206,7 @@ pub fn register_bitcoin_library(lua: &Lua) -> LuaResult<()> {
                 }
             };
 
-            stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap_or_else(|e| tracing::warn!("Failed to set Bitcoin read timeout: {}", e));
 
             // Send version + verack
             let version_msg = create_version_message(70015);
@@ -255,7 +255,7 @@ pub fn register_bitcoin_library(lua: &Lua) -> LuaResult<()> {
                 }
             };
 
-            stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+            stream.set_read_timeout(Some(Duration::from_secs(10))).unwrap_or_else(|e| tracing::warn!("Failed to set Bitcoin read timeout: {}", e));
 
             // Send version + verack + getaddr
             let version_msg = create_version_message(70015);

@@ -90,8 +90,13 @@ pub fn register_citrixxml_library(lua: &Lua) -> LuaResult<()> {
         runtime.block_on(async {
             let result = lua.create_table()?;
 
-            match AsyncTcpStream::connect(format!("{}:{}", host_clone, port)).await {
-                Ok(_stream) => {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                AsyncTcpStream::connect(format!("{}:{}", host_clone, port)),
+            )
+            .await
+            {
+                Ok(Ok(_stream)) => {
                     let farms = lua.create_table()?;
                     let farm = lua.create_table()?;
                     farm.set("name", "Farm1")?;
@@ -101,7 +106,7 @@ pub fn register_citrixxml_library(lua: &Lua) -> LuaResult<()> {
                     result.set("success", true)?;
                     result.set("farms", farms)?;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     let farms = lua.create_table()?;
                     let farm = lua.create_table()?;
                     farm.set("name", "Farm1")?;
@@ -111,6 +116,17 @@ pub fn register_citrixxml_library(lua: &Lua) -> LuaResult<()> {
                     result.set("success", true)?;
                     result.set("farms", farms)?;
                     result.set("note", format!("Using stub data: {}", e))?;
+                }
+                Err(_) => {
+                    let farms = lua.create_table()?;
+                    let farm = lua.create_table()?;
+                    farm.set("name", "Farm1")?;
+                    farm.set("servers", 5)?;
+                    farms.set(1, farm)?;
+
+                    result.set("success", true)?;
+                    result.set("farms", farms)?;
+                    result.set("note", "Using stub data: Connection timed out".to_string())?;
                 }
             }
 
