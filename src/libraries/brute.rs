@@ -10,6 +10,8 @@ use std::net::TcpStream;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use super::helpers::fallback_lua_table;
+
 static CREDS_STORE: std::sync::LazyLock<Mutex<FxHashMap<String, Vec<(String, String)>>>> =
     std::sync::LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
@@ -218,7 +220,7 @@ pub fn register_brute_library(lua: &Lua) -> LuaResult<()> {
             iterator.set("driver", "libcurl")?;
             iterator.set(
                 "options",
-                options.unwrap_or_else(|| lua.create_table().unwrap_or_default()),
+                options.unwrap_or_else(|| fallback_lua_table(lua)),
             )?;
             Ok(iterator)
         })?,

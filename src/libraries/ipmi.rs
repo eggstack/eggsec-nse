@@ -26,9 +26,13 @@ pub fn register_ipmi_library(lua: &Lua) -> LuaResult<()> {
                     return Ok(result);
                 }
             };
-            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap_or_else(|e| tracing::warn!("Failed to set IPMI read timeout: {}", e));
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap_or_else(|e| tracing::warn!("Failed to set IPMI read timeout: {}", e));
             let cmd = vec![0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x18, 0xc8];
-            socket.send_to(&cmd, &addr).unwrap_or_else(|e| tracing::warn!("Failed to send IPMI command: {}", e));
+            if let Err(e) = socket.send_to(&cmd, &addr) {
+                tracing::warn!("Failed to send IPMI command: {}", e);
+            }
             let mut response = [0u8; 1024];
             match socket.recv_from(&mut response) {
                 Ok(_) => {
@@ -57,11 +61,15 @@ pub fn register_ipmi_library(lua: &Lua) -> LuaResult<()> {
                     return Ok(result);
                 }
             };
-            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap_or_else(|e| tracing::warn!("Failed to set IPMI read timeout: {}", e));
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap_or_else(|e| tracing::warn!("Failed to set IPMI read timeout: {}", e));
             let cmd = vec![
                 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x1c, channel, 0xc9,
             ];
-            socket.send_to(&cmd, &addr).unwrap_or_else(|e| tracing::warn!("Failed to send IPMI channel command: {}", e));
+            if let Err(e) = socket.send_to(&cmd, &addr) {
+                tracing::warn!("Failed to send IPMI channel command: {}", e);
+            }
             let mut response = [0u8; 256];
             match socket.recv_from(&mut response) {
                 Ok(_) => {

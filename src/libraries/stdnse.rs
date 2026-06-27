@@ -4,6 +4,8 @@
 
 use mlua::{Lua, Result as LuaResult, Table, Value};
 
+use super::helpers::{fallback_lua_table, parse_hex_pairs};
+
 pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
 
@@ -153,10 +155,7 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
     stdnse.set("hex_to_bytes", hex_fn)?;
 
     let unhex_fn = lua.create_function(|_lua, s: String| {
-        let bytes: Vec<u8> = (0..s.len())
-            .step_by(2)
-            .filter_map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-            .collect();
+        let bytes = parse_hex_pairs(&s);
         Ok(String::from_utf8_lossy(&bytes).to_string())
     })?;
     stdnse.set("unhex", unhex_fn)?;
@@ -252,10 +251,7 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
     stdnse.set("tohex", tohex_fn)?;
 
     let fromhex_fn = lua.create_function(|_lua, s: String| {
-        let bytes: Vec<u8> = (0..s.len())
-            .step_by(2)
-            .filter_map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
-            .collect();
+        let bytes = parse_hex_pairs(&s);
         Ok(String::from_utf8_lossy(&bytes).to_string())
     })?;
     stdnse.set("fromhex", fromhex_fn)?;
@@ -437,7 +433,7 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
 
         let script_output: Table = globals.get("_SCRIPT_OUTPUT").unwrap_or_else(|_| {
             lua.create_table()
-                .unwrap_or_else(|_| lua.create_table().unwrap_or_default())
+                .unwrap_or_else(|_| fallback_lua_table(lua))
         });
         let len = script_output.len().unwrap_or(0) + 1;
         script_output.set(len, format!("{}: {:?}", key, value))?;
@@ -768,7 +764,7 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
         let stdnse_tbl: Table = globals.get("stdnse")?;
         let base: Table = stdnse_tbl
             .get("base_coroutine")
-            .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
+            .unwrap_or_else(|_| fallback_lua_table(lua));
         Ok(base)
     })?;
     stdnse.set("base", base_fn)?;
@@ -817,7 +813,7 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
             if let Ok(stdnse_tbl) = globals.get::<Table>("stdnse") {
                 let threads: Table = stdnse_tbl
                     .get("_threads")
-                    .unwrap_or_else(|_| _lua.create_table().unwrap_or_default());
+                    .unwrap_or_else(|_| fallback_lua_table(_lua));
                 let thread_info = _lua.create_table()?;
                 thread_info.set("id", thread_id)?;
                 thread_info.set("status", "running")?;
@@ -838,7 +834,7 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
         if let Ok(stdnse_tbl) = globals.get::<Table>("stdnse") {
             let threads: Table = stdnse_tbl
                 .get("_threads")
-                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
+                .unwrap_or_else(|_| fallback_lua_table(lua));
             let count = threads.len().unwrap_or(0);
             return Ok(count as i32);
         }
@@ -876,10 +872,10 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
         let globals = lua.globals();
         let nmap_tbl: Table = globals
             .get("nmap")
-            .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
+            .unwrap_or_else(|_| fallback_lua_table(lua));
         let registry: Table = nmap_tbl
             .get("registry")
-            .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
+            .unwrap_or_else(|_| fallback_lua_table(lua));
 
         let len = keys.len().unwrap_or(0);
         if len == 0 {
@@ -895,15 +891,21 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
 
         let arr = registry
             .get::<Table>(current_key.clone())
-            .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
+            .unwrap_or_else(|_| fallback_lua_table(lua));
         let arr_len = arr.len().unwrap_or(0) as usize;
         arr.set(arr_len + 1, value).unwrap_or(());
 
         if let Err(e) = registry.set(current_key, arr) {
-            tracing::warn!("stdnse registry_add_array: failed to set registry entry: {}", e);
+            tracing::warn!(
+                "stdnse registry_add_array: failed to set registry entry: {}",
+                e
+            );
         }
         if let Err(e) = nmap_tbl.set("registry", registry) {
-            tracing::warn!("stdnse registry_add_array: failed to update registry: {}", e);
+            tracing::warn!(
+                "stdnse registry_add_array: failed to update registry: {}",
+                e
+            );
         }
 
         let result = lua.create_table()?;
@@ -916,10 +918,10 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
         let globals = lua.globals();
         let nmap_tbl: Table = globals
             .get("nmap")
-            .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
+            .unwrap_or_else(|_| fallback_lua_table(lua));
         let registry: Table = nmap_tbl
             .get("registry")
-            .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
+            .unwrap_or_else(|_| fallback_lua_table(lua));
 
         let len = keys.len().unwrap_or(0);
         if len == 0 {
@@ -934,10 +936,16 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
         }
 
         if let Err(e) = registry.set(current_key, value) {
-            tracing::warn!("stdnse registry_add_table: failed to set registry entry: {}", e);
+            tracing::warn!(
+                "stdnse registry_add_table: failed to set registry entry: {}",
+                e
+            );
         }
         if let Err(e) = nmap_tbl.set("registry", registry) {
-            tracing::warn!("stdnse registry_add_table: failed to update registry: {}", e);
+            tracing::warn!(
+                "stdnse registry_add_table: failed to update registry: {}",
+                e
+            );
         }
 
         let result = lua.create_table()?;
@@ -1107,7 +1115,7 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
 
     let provide_fn = lua.create_function(|lua, (module, exports): (String, Option<Table>)| {
         let globals = lua.globals();
-        let exports = exports.unwrap_or_else(|| lua.create_table().unwrap_or_default());
+        let exports = exports.unwrap_or_else(|| fallback_lua_table(lua));
 
         let exports_clone = exports.clone();
 
@@ -1115,7 +1123,10 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
 
         if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
             if let Err(e) = modules.set(module, exports_clone) {
-                tracing::warn!("stdnse provide: failed to record module in _REQUIRE_MODULES: {}", e);
+                tracing::warn!(
+                    "stdnse provide: failed to record module in _REQUIRE_MODULES: {}",
+                    e
+                );
             }
         }
 

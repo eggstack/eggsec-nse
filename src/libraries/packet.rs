@@ -4,6 +4,8 @@
 
 use mlua::{Lua, Result as LuaResult};
 
+use super::helpers::parse_hex_pairs;
+
 pub fn register_packet_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
     let packet = lua.create_table()?;
@@ -24,21 +26,8 @@ pub fn register_packet_library(lua: &Lua) -> LuaResult<()> {
                 let src = mac_src.unwrap_or_else(|| "000000000000".to_string());
                 let etype = ether_type.unwrap_or(0x0800);
 
-                for i in (0..dst.len()).step_by(2) {
-                    if i + 2 <= dst.len() {
-                        if let Ok(b) = u8::from_str_radix(&dst[i..i + 2], 16) {
-                            frame.push(b);
-                        }
-                    }
-                }
-
-                for i in (0..src.len()).step_by(2) {
-                    if i + 2 <= src.len() {
-                        if let Ok(b) = u8::from_str_radix(&src[i..i + 2], 16) {
-                            frame.push(b);
-                        }
-                    }
-                }
+                frame.extend(parse_hex_pairs(&dst));
+                frame.extend(parse_hex_pairs(&src));
 
                 frame.push((etype >> 8) as u8);
                 frame.push(etype as u8);
@@ -78,14 +67,7 @@ pub fn register_packet_library(lua: &Lua) -> LuaResult<()> {
     packet.set(
         "mactobin",
         lua.create_function(|_lua, mac: String| {
-            let mut result = Vec::new();
-            for i in (0..mac.len()).step_by(2) {
-                if i + 2 <= mac.len() {
-                    if let Ok(b) = u8::from_str_radix(&mac[i..i + 2], 16) {
-                        result.push(b);
-                    }
-                }
-            }
+            let result = parse_hex_pairs(&mac);
             Ok(String::from_utf8_lossy(&result).to_string())
         })?,
     )?;

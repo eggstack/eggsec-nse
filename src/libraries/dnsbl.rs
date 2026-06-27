@@ -23,7 +23,7 @@ fn get_resolver() -> &'static TokioResolver {
         )
         .with_options(opts)
         .build()
-        .unwrap_or_default()
+        .expect("failed to initialize DNSBL resolver")
     })
 }
 

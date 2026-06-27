@@ -4,11 +4,36 @@
 
 use mlua::{Lua, Result as LuaResult, Table};
 use native_tls::TlsConnector;
-use native_tls::TlsStream;
 use std::net::TcpStream;
 use std::time::Duration;
 
 pub use mlua::Table as LuaTable;
+
+pub fn fallback_lua_table(lua: &Lua) -> Table {
+    lua.create_table()
+        .expect("failed to create fallback Lua table")
+}
+
+pub fn parse_hex_pairs(input: &str) -> Vec<u8> {
+    input
+        .as_bytes()
+        .chunks_exact(2)
+        .filter_map(|pair| {
+            let high = hex_nibble(pair[0])?;
+            let low = hex_nibble(pair[1])?;
+            Some((high << 4) | low)
+        })
+        .collect()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
 
 pub fn create_tls_connector(
     accept_invalid_certs: bool,
@@ -123,6 +148,29 @@ pub fn error_result(lua: &Lua, error: impl Into<String>) -> LuaResult<Table> {
     table.set("success", false)?;
     table.set("error", error.into())?;
     Ok(table)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_hex_pairs;
+
+    #[test]
+    fn parse_hex_pairs_decodes_valid_pairs() {
+        assert_eq!(parse_hex_pairs("48656c6c6f"), b"Hello");
+        assert_eq!(parse_hex_pairs("DEadBEEF"), vec![0xde, 0xad, 0xbe, 0xef]);
+    }
+
+    #[test]
+    fn parse_hex_pairs_ignores_incomplete_and_invalid_pairs() {
+        assert_eq!(parse_hex_pairs("4"), Vec::<u8>::new());
+        assert_eq!(parse_hex_pairs("410"), vec![0x41]);
+        assert_eq!(parse_hex_pairs("41zz42"), vec![0x41, 0x42]);
+    }
+
+    #[test]
+    fn parse_hex_pairs_handles_non_ascii_without_panicking() {
+        assert_eq!(parse_hex_pairs("41é42"), vec![0x41, 0x42]);
+    }
 }
 
 pub fn ok_result(lua: &Lua) -> LuaResult<Table> {

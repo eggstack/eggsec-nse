@@ -5,6 +5,8 @@
 
 use mlua::{Lua, Result as LuaResult};
 
+use super::helpers::parse_hex_pairs;
+
 pub fn register_asn1_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
     let asn1 = lua.create_table()?;
@@ -18,11 +20,7 @@ pub fn register_asn1_library(lua: &Lua) -> LuaResult<()> {
     asn1.set("encode", encode_fn)?;
 
     let decode_fn = lua.create_function(|_lua, hex: String| {
-        let bytes: Vec<u8> = (0..hex.len())
-            .step_by(2)
-            .filter_map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
-            .collect();
-
+        let bytes = parse_hex_pairs(&hex);
         let decoded = String::from_utf8_lossy(&bytes).to_string();
         Ok(decoded)
     })?;

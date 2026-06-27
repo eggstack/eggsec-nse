@@ -81,6 +81,8 @@ pub mod giop;
 #[cfg(feature = "nse")]
 pub mod gps;
 #[cfg(feature = "nse")]
+pub mod helpers;
+#[cfg(feature = "nse")]
 pub mod http;
 #[cfg(feature = "nse")]
 pub mod http2;
