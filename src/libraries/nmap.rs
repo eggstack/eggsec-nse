@@ -112,7 +112,7 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = lua.globals();
             let nmap_tbl: Table = globals.get("nmap")?;
             let registry: Table = nmap_tbl.get("registry").unwrap_or_else(|_| {
-                let t = lua.create_table().unwrap();
+                let t = lua.create_table().unwrap_or_default();
                 if let Err(e) = nmap_tbl.set("registry", t.clone()) {
                     tracing::warn!("nmap: failed to set initial registry: {}", e);
                 }
@@ -130,10 +130,10 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = lua.globals();
             let nmap_tbl: Table = globals
                 .get("nmap")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let hostinfo: Table = nmap_tbl
                 .get("_hostinfo")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
 
             if let Some(h) = host {
                 hostinfo
@@ -153,10 +153,10 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = lua.globals();
             let nmap_tbl: Table = globals
                 .get("nmap")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let hostinfo: Table = nmap_tbl
                 .get("_hostinfo")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             hostinfo.get::<String>("ip").or_else(|_| Ok("".to_string()))
         })?,
     )?;
@@ -167,10 +167,10 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = lua.globals();
             let nmap_tbl: Table = globals
                 .get("nmap")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let ports: Table = nmap_tbl
                 .get("_ports")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
 
             let key = if let Some(ref h) = host {
                 format!("{}.{}.tcp", h, port)
@@ -196,10 +196,10 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = lua.globals();
             let nmap_tbl: Table = globals
                 .get("nmap")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let ports: Table = nmap_tbl
                 .get("_ports")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
 
             let results = lua.create_table()?;
             let mut idx = 1;
@@ -237,10 +237,10 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = lua.globals();
             let nmap_tbl: Table = globals
                 .get("nmap")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let ports: Table = nmap_tbl
                 .get("_ports")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
 
             let key = if let Some(h) = host {
                 format!("{}.{}.tcp", h, port)
@@ -633,7 +633,9 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             }
             Ok(())
         })?,
-    );
+    ) {
+        tracing::warn!("nmap socket_close: {}", e);
+    }
 
     nmap.set(
         "registry_get",
@@ -641,10 +643,10 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = lua.globals();
             let nmap_tbl: Table = globals
                 .get("nmap")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let registry: Table = nmap_tbl
                 .get("registry")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             registry.get(key.as_str()).or_else(|_| Ok(mlua::Value::Nil))
         })?,
     )?;
@@ -655,9 +657,9 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = lua.globals();
             let nmap_tbl: Table = globals
                 .get("nmap")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let registry: Table = nmap_tbl.get("registry").unwrap_or_else(|_| {
-                let t = lua.create_table().unwrap();
+                let t = lua.create_table().unwrap_or_default();
                 if let Err(e) = nmap_tbl.set("registry", t.clone()) {
                     tracing::warn!("nmap registry_set: failed to set initial registry: {}", e);
                 }
@@ -674,7 +676,7 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = lua.globals();
             let nmap_tbl: Table = globals
                 .get("nmap")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let mut count: i32 = nmap_tbl.get("refcount").unwrap_or(0);
             count += 1;
             nmap_tbl.set("refcount", count)?;
@@ -688,7 +690,7 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = lua.globals();
             let nmap_tbl: Table = globals
                 .get("nmap")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let mut count: i32 = nmap_tbl.get("refcount").unwrap_or(0);
             count = (count - 1).max(0);
             nmap_tbl.set("refcount", count)?;
@@ -750,10 +752,10 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = lua.globals();
             let nmap_tbl: Table = globals
                 .get("nmap")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let hostinfo: Table = nmap_tbl
                 .get("_hostinfo")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             hostinfo.set("status", state.as_str())?;
             Ok(())
         })?,
@@ -783,7 +785,7 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = lua.globals();
             let output: Table = globals.get("_SCRIPT_OUTPUT").unwrap_or_else(|_| {
                 lua.create_table()
-                    .unwrap_or_else(|_| lua.create_table().unwrap())
+                    .unwrap_or_else(|_| lua.create_table().unwrap_or_default())
             });
             let result = lua.create_table()?;
             result.set("lines", output)?;
@@ -1074,7 +1076,7 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let wait_fn = lua.create_function(|lua, c: Table| {
                 let waiting: Table = c
                     .get("waiting")
-                    .unwrap_or_else(|_| lua.create_table().unwrap());
+                    .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
                 let len = waiting.len().unwrap_or(0);
                 waiting.set(len + 1, true)?;
                 if let Err(e) = c.set("waiting", waiting) {
@@ -1087,7 +1089,7 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let signal_fn = lua.create_function(|lua, c: Table| {
                 let waiting: Table = c
                     .get("waiting")
-                    .unwrap_or_else(|_| lua.create_table().unwrap());
+                    .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
                 if waiting.len().unwrap_or(0) > 0 {
                     waiting.set(1, mlua::Value::Nil)?;
                 }
@@ -1594,7 +1596,7 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = lua.globals();
             let nmap_tbl: Table = globals
                 .get("nmap")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let target = nmap_tbl.get::<String>("target").unwrap_or_default();
             Ok(target)
         })?,
@@ -1633,7 +1635,7 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = _lua.globals();
             let nmap_tbl: Table = globals
                 .get("nmap")
-                .unwrap_or_else(|_| _lua.create_table().unwrap());
+                .unwrap_or_else(|_| _lua.create_table().unwrap_or_default());
             let refcount: i32 = nmap_tbl.get("refcount").unwrap_or(0);
             nmap_tbl.set("refcount", refcount + 1)?;
             Ok(refcount + 1)
@@ -1646,7 +1648,7 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let globals = _lua.globals();
             let nmap_tbl: Table = globals
                 .get("nmap")
-                .unwrap_or_else(|_| _lua.create_table().unwrap());
+                .unwrap_or_else(|_| _lua.create_table().unwrap_or_default());
             let refcount: i32 = nmap_tbl.get("refcount").unwrap_or(0);
             let new_count = (refcount - 1).max(0);
             nmap_tbl.set("refcount", new_count)?;

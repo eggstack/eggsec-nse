@@ -24,7 +24,7 @@ pub fn register_tab_library(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|lua, (t, row): (Table, Table)| {
             let rows: Table = t
                 .get("_rows")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let row_num = rows.len().unwrap_or(0) + 1;
             rows.set(row_num, row)?;
             t.set("_rows", rows)?;
@@ -38,7 +38,7 @@ pub fn register_tab_library(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|lua, t: Table| {
             let rows: Table = t
                 .get("_rows")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let row_num = rows.len().unwrap_or(0) + 1;
 
             let sep = lua.create_table()?;
@@ -71,7 +71,7 @@ pub fn register_tab_library(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|lua, t: Table| {
             let rows: Table = t
                 .get("_rows")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let len = rows.len().unwrap_or(0) as i32;
             Ok(len)
         })?,
@@ -82,7 +82,7 @@ pub fn register_tab_library(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|lua, t: Table| {
             let rows: Table = t
                 .get("_rows")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let indent: i32 = t.get("_indent").unwrap_or(0);
 
             let indent_str = " ".repeat(indent as usize);

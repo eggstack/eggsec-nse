@@ -23,7 +23,7 @@ fn get_resolver() -> &'static TokioResolver {
         )
         .with_options(opts)
         .build()
-        .expect("failed to build DNS resolver - system DNS configuration may be missing")
+        .unwrap_or_default()
     })
 }
 

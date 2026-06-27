@@ -506,7 +506,7 @@ pub fn register_http_library(lua: &Lua) -> LuaResult<()> {
             let status: i32 = response.get("status").unwrap_or(0);
             let _headers: Table = response.get("headers").unwrap_or_else(|_| {
                 lua.create_table()
-                    .unwrap_or_else(|_| lua.create_table().unwrap())
+                    .unwrap_or_else(|_| lua.create_table().unwrap_or_default())
             });
 
             Ok(status == 401)
@@ -526,7 +526,7 @@ pub fn register_http_library(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|lua, (response, name): (Table, String)| {
             let header: Table = response.get("header").unwrap_or_else(|_| {
                 lua.create_table()
-                    .unwrap_or_else(|_| lua.create_table().unwrap())
+                    .unwrap_or_else(|_| lua.create_table().unwrap_or_default())
             });
             let cookies: Option<String> = header
                 .get("set-cookie")
@@ -552,7 +552,7 @@ pub fn register_http_library(lua: &Lua) -> LuaResult<()> {
             let cookie = format!("{}={}", name, value);
             let header: Table = request.get("headers").unwrap_or_else(|_| {
                 lua.create_table()
-                    .unwrap_or_else(|_| lua.create_table().unwrap())
+                    .unwrap_or_else(|_| lua.create_table().unwrap_or_default())
             });
             header.set("Cookie", cookie)?;
             Ok(request)
@@ -690,7 +690,7 @@ pub fn register_http_library(lua: &Lua) -> LuaResult<()> {
             let path: String = request.get("path").unwrap_or_else(|_| "/".to_string());
             let headers: Table = request.get("headers").unwrap_or_else(|_| {
                 lua.create_table()
-                    .unwrap_or_else(|_| lua.create_table().unwrap())
+                    .unwrap_or_else(|_| lua.create_table().unwrap_or_default())
             });
 
             cloned.set("method", method)?;

@@ -437,7 +437,7 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
 
         let script_output: Table = globals.get("_SCRIPT_OUTPUT").unwrap_or_else(|_| {
             lua.create_table()
-                .unwrap_or_else(|_| lua.create_table().unwrap())
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default())
         });
         let len = script_output.len().unwrap_or(0) + 1;
         script_output.set(len, format!("{}: {:?}", key, value))?;
@@ -768,7 +768,7 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
         let stdnse_tbl: Table = globals.get("stdnse")?;
         let base: Table = stdnse_tbl
             .get("base_coroutine")
-            .unwrap_or_else(|_| lua.create_table().unwrap());
+            .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
         Ok(base)
     })?;
     stdnse.set("base", base_fn)?;
@@ -817,7 +817,7 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
             if let Ok(stdnse_tbl) = globals.get::<Table>("stdnse") {
                 let threads: Table = stdnse_tbl
                     .get("_threads")
-                    .unwrap_or_else(|_| _lua.create_table().unwrap());
+                    .unwrap_or_else(|_| _lua.create_table().unwrap_or_default());
                 let thread_info = _lua.create_table()?;
                 thread_info.set("id", thread_id)?;
                 thread_info.set("status", "running")?;
@@ -838,7 +838,7 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
         if let Ok(stdnse_tbl) = globals.get::<Table>("stdnse") {
             let threads: Table = stdnse_tbl
                 .get("_threads")
-                .unwrap_or_else(|_| lua.create_table().unwrap());
+                .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
             let count = threads.len().unwrap_or(0);
             return Ok(count as i32);
         }
@@ -876,10 +876,10 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
         let globals = lua.globals();
         let nmap_tbl: Table = globals
             .get("nmap")
-            .unwrap_or_else(|_| lua.create_table().unwrap());
+            .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
         let registry: Table = nmap_tbl
             .get("registry")
-            .unwrap_or_else(|_| lua.create_table().unwrap());
+            .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
 
         let len = keys.len().unwrap_or(0);
         if len == 0 {
@@ -895,7 +895,7 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
 
         let arr = registry
             .get::<Table>(current_key.clone())
-            .unwrap_or_else(|_| lua.create_table().unwrap());
+            .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
         let arr_len = arr.len().unwrap_or(0) as usize;
         arr.set(arr_len + 1, value).unwrap_or(());
 
@@ -916,10 +916,10 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
         let globals = lua.globals();
         let nmap_tbl: Table = globals
             .get("nmap")
-            .unwrap_or_else(|_| lua.create_table().unwrap());
+            .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
         let registry: Table = nmap_tbl
             .get("registry")
-            .unwrap_or_else(|_| lua.create_table().unwrap());
+            .unwrap_or_else(|_| lua.create_table().unwrap_or_default());
 
         let len = keys.len().unwrap_or(0);
         if len == 0 {
@@ -1107,7 +1107,7 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
 
     let provide_fn = lua.create_function(|lua, (module, exports): (String, Option<Table>)| {
         let globals = lua.globals();
-        let exports = exports.unwrap_or_else(|| lua.create_table().unwrap());
+        let exports = exports.unwrap_or_else(|| lua.create_table().unwrap_or_default());
 
         let exports_clone = exports.clone();
 

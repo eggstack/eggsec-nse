@@ -80,8 +80,7 @@ impl SandboxConfig {
         let dir = self.allowed_dir.as_ref()?;
         match dir.canonicalize() {
             Ok(canonical) => Some(canonical),
-            Err(_) if dir.exists() => Some(dir.clone()),
-            Err(_) => None,
+            Err(_) => Some(dir.clone()),
         }
     }
 
@@ -107,9 +106,7 @@ impl SandboxConfig {
             return Some(PathBuf::from(path));
         }
 
-        let Some(allowed_dir) = self.allowed_root() else {
-            return None;
-        };
+        let allowed_dir = self.allowed_root()?;
 
         let path_buf = PathBuf::from(path);
         let Ok(canonical) = path_buf.canonicalize() else {
@@ -119,6 +116,12 @@ impl SandboxConfig {
                         return Some(canonical_parent.join(path_buf.file_name()?));
                     }
                 }
+            }
+            // Fallback: string prefix check when neither path nor parent can be canonicalized
+            let allowed_str = allowed_dir.to_string_lossy();
+            let path_str = path_buf.to_string_lossy();
+            if path_str.starts_with(allowed_str.as_ref()) {
+                return Some(path_buf);
             }
             return None;
         };

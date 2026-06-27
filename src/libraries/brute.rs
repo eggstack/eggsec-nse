@@ -218,7 +218,7 @@ pub fn register_brute_library(lua: &Lua) -> LuaResult<()> {
             iterator.set("driver", "libcurl")?;
             iterator.set(
                 "options",
-                options.unwrap_or_else(|| lua.create_table().unwrap()),
+                options.unwrap_or_else(|| lua.create_table().unwrap_or_default()),
             )?;
             Ok(iterator)
         })?,
