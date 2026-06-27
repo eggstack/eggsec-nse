@@ -113,7 +113,9 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             let nmap_tbl: Table = globals.get("nmap")?;
             let registry: Table = nmap_tbl.get("registry").unwrap_or_else(|_| {
                 let t = lua.create_table().unwrap();
-                let _ = nmap_tbl.set("registry", t.clone());
+                if let Err(e) = nmap_tbl.set("registry", t.clone()) {
+                    tracing::warn!("nmap: failed to set initial registry: {}", e);
+                }
                 t
             });
             Ok(registry)
@@ -322,8 +324,12 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
                 Duration::from_secs(timeout as u64),
             ) {
                 Ok(stream) => {
-                    let _ = stream.set_read_timeout(Some(Duration::from_secs(timeout as u64)));
-                    let _ = stream.set_write_timeout(Some(Duration::from_secs(timeout as u64)));
+                    if let Err(e) = stream.set_read_timeout(Some(Duration::from_secs(timeout as u64))) {
+                        tracing::warn!("nmap socket_connect: failed to set read timeout: {}", e);
+                    }
+                    if let Err(e) = stream.set_write_timeout(Some(Duration::from_secs(timeout as u64))) {
+                        tracing::warn!("nmap socket_connect: failed to set write timeout: {}", e);
+                    }
 
                     let conn_key = get_connection_key(&host, port);
                     if let Ok(mut reg) = CONNECTION_REGISTRY.write() {
@@ -340,7 +346,9 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
                     }
 
                     let socket_id = format!("socket_{}", conn_key);
-                    let _ = socket_table.set("socket_key", socket_id);
+                    if let Err(e) = socket_table.set("socket_key", socket_id) {
+                        tracing::warn!("nmap socket_connect: failed to set socket_key: {}", e);
+                    }
 
                     result.set("status", "connected")?;
                     result.set("host", host.clone())?;
@@ -604,7 +612,7 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
-    let _ = nmap.set(
+    if let Err(e) = nmap.set(
         "socket_close",
         lua.create_function(|_lua, socket_table: Table| {
             let host: String = socket_table.get("remote_host").unwrap_or_default();
@@ -617,8 +625,12 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
                 }
             }
 
-            let _ = socket_table.set("closed", true);
-            let _ = socket_table.set("connected", false);
+            if let Err(e) = socket_table.set("closed", true) {
+                tracing::warn!("nmap socket_close: failed to set closed: {}", e);
+            }
+            if let Err(e) = socket_table.set("connected", false) {
+                tracing::warn!("nmap socket_close: failed to set connected: {}", e);
+            }
             Ok(())
         })?,
     );
@@ -646,7 +658,9 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
                 .unwrap_or_else(|_| lua.create_table().unwrap());
             let registry: Table = nmap_tbl.get("registry").unwrap_or_else(|_| {
                 let t = lua.create_table().unwrap();
-                let _ = nmap_tbl.set("registry", t.clone());
+                if let Err(e) = nmap_tbl.set("registry", t.clone()) {
+                    tracing::warn!("nmap registry_set: failed to set initial registry: {}", e);
+                }
                 t
             });
             registry.set(key.as_str(), value)?;
@@ -1010,15 +1024,21 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             mutex.set("count", 0)?;
 
             let lock_fn = lua.create_function(|_lua, m: Table| {
-                let _ = m.set("locked", true);
+                if let Err(e) = m.set("locked", true) {
+                    tracing::warn!("nmap mutex lock: failed to set locked: {}", e);
+                }
                 let count: i32 = m.get("count").unwrap_or(0);
-                let _ = m.set("count", count + 1);
+                if let Err(e) = m.set("count", count + 1) {
+                    tracing::warn!("nmap mutex lock: failed to set count: {}", e);
+                }
                 Ok(true)
             })?;
             mutex.set("lock", lock_fn)?;
 
             let unlock_fn = lua.create_function(|_lua, m: Table| {
-                let _ = m.set("locked", false);
+                if let Err(e) = m.set("locked", false) {
+                    tracing::warn!("nmap mutex unlock: failed to set locked: {}", e);
+                }
                 Ok(true)
             })?;
             mutex.set("unlock", unlock_fn)?;
@@ -1028,9 +1048,13 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
                 if locked {
                     return Ok(false);
                 }
-                let _ = m.set("locked", true);
+                if let Err(e) = m.set("locked", true) {
+                    tracing::warn!("nmap mutex trylock: failed to set locked: {}", e);
+                }
                 let count: i32 = m.get("count").unwrap_or(0);
-                let _ = m.set("count", count + 1);
+                if let Err(e) = m.set("count", count + 1) {
+                    tracing::warn!("nmap mutex trylock: failed to set count: {}", e);
+                }
                 Ok(true)
             })?;
             mutex.set("trylock", trylock_fn)?;
@@ -1053,7 +1077,9 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
                     .unwrap_or_else(|_| lua.create_table().unwrap());
                 let len = waiting.len().unwrap_or(0);
                 waiting.set(len + 1, true)?;
-                let _ = c.set("waiting", waiting);
+                if let Err(e) = c.set("waiting", waiting) {
+                    tracing::warn!("nmap condvar wait: failed to set waiting: {}", e);
+                }
                 Ok(true)
             })?;
             condvar.set("wait", wait_fn)?;
@@ -1065,13 +1091,17 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
                 if waiting.len().unwrap_or(0) > 0 {
                     waiting.set(1, mlua::Value::Nil)?;
                 }
-                let _ = c.set("waiting", waiting);
+                if let Err(e) = c.set("waiting", waiting) {
+                    tracing::warn!("nmap condvar signal: failed to set waiting: {}", e);
+                }
                 Ok(true)
             })?;
             condvar.set("signal", signal_fn)?;
 
             let broadcast_fn = lua.create_function(|lua, c: Table| {
-                let _ = c.set("waiting", lua.create_table()?);
+                if let Err(e) = c.set("waiting", lua.create_table()?) {
+                    tracing::warn!("nmap condvar broadcast: failed to set waiting: {}", e);
+                }
                 Ok(true)
             })?;
             condvar.set("broadcast", broadcast_fn)?;

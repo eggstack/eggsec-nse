@@ -701,7 +701,9 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
     let seeall_fn = lua.create_function(|lua, env: Table| {
         let globals = lua.globals();
         for (k, v) in globals.pairs::<String, mlua::Value>().flatten() {
-            let _ = env.set(k, v);
+            if let Err(e) = env.set(k, v) {
+                tracing::warn!("stdnse seeall: failed to set global: {}", e);
+            }
         }
         Ok(env)
     })?;
@@ -819,8 +821,12 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
                 let thread_info = _lua.create_table()?;
                 thread_info.set("id", thread_id)?;
                 thread_info.set("status", "running")?;
-                let _ = threads.set(thread_id.to_string(), thread_info);
-                let _ = stdnse_tbl.set("_threads", threads);
+                if let Err(e) = threads.set(thread_id.to_string(), thread_info) {
+                    tracing::warn!("stdnse new_thread: failed to register thread: {}", e);
+                }
+                if let Err(e) = stdnse_tbl.set("_threads", threads) {
+                    tracing::warn!("stdnse new_thread: failed to update _threads table: {}", e);
+                }
             }
 
             Ok(result)
@@ -893,8 +899,12 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
         let arr_len = arr.len().unwrap_or(0) as usize;
         arr.set(arr_len + 1, value).unwrap_or(());
 
-        let _ = registry.set(current_key, arr);
-        let _ = nmap_tbl.set("registry", registry);
+        if let Err(e) = registry.set(current_key, arr) {
+            tracing::warn!("stdnse registry_add_array: failed to set registry entry: {}", e);
+        }
+        if let Err(e) = nmap_tbl.set("registry", registry) {
+            tracing::warn!("stdnse registry_add_array: failed to update registry: {}", e);
+        }
 
         let result = lua.create_table()?;
         result.set("success", true)?;
@@ -923,8 +933,12 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
             }
         }
 
-        let _ = registry.set(current_key, value);
-        let _ = nmap_tbl.set("registry", registry);
+        if let Err(e) = registry.set(current_key, value) {
+            tracing::warn!("stdnse registry_add_table: failed to set registry entry: {}", e);
+        }
+        if let Err(e) = nmap_tbl.set("registry", registry) {
+            tracing::warn!("stdnse registry_add_table: failed to update registry: {}", e);
+        }
 
         let result = lua.create_table()?;
         result.set("success", true)?;
@@ -1100,7 +1114,9 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
         globals.set(module.clone(), exports)?;
 
         if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
-            let _ = modules.set(module, exports_clone);
+            if let Err(e) = modules.set(module, exports_clone) {
+                tracing::warn!("stdnse provide: failed to record module in _REQUIRE_MODULES: {}", e);
+            }
         }
 
         Ok(true)

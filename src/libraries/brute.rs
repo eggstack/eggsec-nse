@@ -1167,9 +1167,6 @@ fn extract_mysql_salt(handshake: &[u8], idx: usize) -> Vec<u8> {
         }
         let len = handshake[offset] as usize;
         offset += 1;
-        if offset + len <= handshake.len() {
-            let _ = &handshake[offset..offset + len];
-        }
         offset += len;
     }
 

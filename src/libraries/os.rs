@@ -5,6 +5,7 @@
 use mlua::{Lua, Result as LuaResult, Table};
 use std::collections::HashMap;
 use std::cell::RefCell;
+use std::env;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 

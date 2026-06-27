@@ -129,7 +129,9 @@ impl ExecutorCore {
         let mut out = self.output.lock();
         out.push(output.clone());
         if let Ok(script_output) = self.lua.globals().get::<Table>("_SCRIPT_OUTPUT") {
-            let _ = script_output.set(out.len(), output);
+            if let Err(e) = script_output.set(out.len(), output) {
+                tracing::warn!("NSE add_output: failed to set script output: {}", e);
+            }
         }
         Ok(())
     }
@@ -601,7 +603,9 @@ impl ExecutorCore {
             // Check global table
             if let Ok(module) = globals.get::<Table>(name.as_str()) {
                 if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
-                    let _ = modules.set(name.clone(), module.clone());
+                    if let Err(e) = modules.set(name.clone(), module.clone()) {
+                        tracing::warn!("NSE require: failed to cache module '{}' in _REQUIRE_MODULES: {}", name, e);
+                    }
                 }
                 cache
                     .lock()
@@ -628,7 +632,9 @@ impl ExecutorCore {
                                 }
                                 if let Ok(module) = globals.get::<Table>(name.as_str()) {
                                     if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
-                                        let _ = modules.set(name.clone(), module.clone());
+                                        if let Err(e) = modules.set(name.clone(), module.clone()) {
+                                            tracing::warn!("NSE require: failed to cache module '{}' in _REQUIRE_MODULES: {}", name, e);
+                                        }
                                     }
                                     cache
                                         .lock()

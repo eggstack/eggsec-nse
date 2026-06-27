@@ -88,7 +88,9 @@ impl NseExecutor {
                 }
                 exec.run_script(&script)
             })();
-            let _ = tx.send(result.map(|v| v.to_string()).map_err(|e| e.to_string()));
+            if let Err(e) = tx.send(result.map(|v| v.to_string()).map_err(|e| e.to_string())) {
+                tracing::warn!("Failed to send NSE script result: {}", e);
+            }
         });
 
         match rx.recv_timeout(timeout) {

@@ -589,8 +589,8 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
             String,
             Option<u16>,
             Option<String>,
-            i32,
-            i32,
+            u32,
+            u32,
             String,
         )| {
             let port = port.unwrap_or(SNMP_PORT);
