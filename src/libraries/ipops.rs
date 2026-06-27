@@ -5,6 +5,29 @@
 
 use mlua::{Lua, Result as LuaResult};
 
+fn parse_ipv4_octets(ip: &str) -> Option<[u8; 4]> {
+    let mut octets = [0u8; 4];
+    let mut count = 0;
+
+    for part in ip.split('.') {
+        if count == octets.len() {
+            return None;
+        }
+
+        octets[count] = part.parse().ok()?;
+        count += 1;
+    }
+
+    (count == octets.len()).then_some(octets)
+}
+
+fn ipv4_to_u32(octets: [u8; 4]) -> u32 {
+    ((octets[0] as u32) << 24)
+        | ((octets[1] as u32) << 16)
+        | ((octets[2] as u32) << 8)
+        | octets[3] as u32
+}
+
 pub fn register_ipops_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
     let ipops = lua.create_table()?;
@@ -37,18 +60,12 @@ pub fn register_ipops_library(lua: &Lua) -> LuaResult<()> {
     ipops.set("get_byte", get_byte_fn)?;
 
     let is_private_fn = lua.create_function(|_lua, ip: String| {
-        let parts: Vec<u8> = ip.split('.').filter_map(|p| p.parse().ok()).collect();
-        if parts.len() == 4 {
-            if parts[0] == 10 {
-                return Ok(true);
-            }
-            if parts[0] == 172 && (16..=31).contains(&parts[1]) {
-                return Ok(true);
-            }
-            if parts[0] == 192 && parts[1] == 168 {
-                return Ok(true);
-            }
+        if let Some(parts) = parse_ipv4_octets(&ip) {
+            return Ok(parts[0] == 10
+                || (parts[0] == 172 && (16..=31).contains(&parts[1]))
+                || (parts[0] == 192 && parts[1] == 168));
         }
+
         Ok(false)
     })?;
     ipops.set("is_private", is_private_fn)?;
@@ -66,23 +83,11 @@ pub fn register_ipops_library(lua: &Lua) -> LuaResult<()> {
     ipops.set("cidr_to_mask", cidr_to_mask_fn)?;
 
     let get_network_fn = lua.create_function(|_lua, (ip, mask): (String, String)| {
-        let ip_parts: Vec<u32> = ip
-            .split('.')
-            .filter_map(|p| p.parse::<u8>().ok())
-            .map(|b| b as u32)
-            .collect();
-        let mask_parts: Vec<u32> = mask
-            .split('.')
-            .filter_map(|p| p.parse::<u8>().ok())
-            .map(|b| b as u32)
-            .collect();
-        if ip_parts.len() == 4 && mask_parts.len() == 4 {
-            let ip_num =
-                (ip_parts[0] << 24) | (ip_parts[1] << 16) | (ip_parts[2] << 8) | ip_parts[3];
-            let mask_num = (mask_parts[0] << 24)
-                | (mask_parts[1] << 16)
-                | (mask_parts[2] << 8)
-                | mask_parts[3];
+        if let (Some(ip_parts), Some(mask_parts)) =
+            (parse_ipv4_octets(&ip), parse_ipv4_octets(&mask))
+        {
+            let ip_num = ipv4_to_u32(ip_parts);
+            let mask_num = ipv4_to_u32(mask_parts);
             let net_num = ip_num & mask_num;
             Ok(format!(
                 "{}.{}.{}.{}",
@@ -102,4 +107,43 @@ pub fn register_ipops_library(lua: &Lua) -> LuaResult<()> {
 
     globals.set("ipOps", ipops)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mlua::Lua;
+
+    #[test]
+    fn parse_ipv4_octets_requires_exactly_four_valid_octets() {
+        assert_eq!(parse_ipv4_octets("192.168.1.10"), Some([192, 168, 1, 10]));
+        assert_eq!(parse_ipv4_octets("192.168.1"), None);
+        assert_eq!(parse_ipv4_octets("192.168.1.10.5"), None);
+        assert_eq!(parse_ipv4_octets("192.168.bad.10"), None);
+        assert_eq!(parse_ipv4_octets("192.168.999.10"), None);
+    }
+
+    #[test]
+    fn is_private_does_not_ignore_malformed_octets() {
+        let lua = Lua::new();
+        register_ipops_library(&lua).expect("register ipOps");
+
+        let private: bool = lua
+            .load("return ipOps.is_private('10.bad.0.1.2')")
+            .eval()
+            .expect("script should run");
+        assert!(!private);
+    }
+
+    #[test]
+    fn get_network_does_not_ignore_malformed_octets() {
+        let lua = Lua::new();
+        register_ipops_library(&lua).expect("register ipOps");
+
+        let network: String = lua
+            .load("return ipOps.get_network('192.168.bad.5.9', '255.255.255.0')")
+            .eval()
+            .expect("script should run");
+        assert_eq!(network, "192.168.bad.5.9");
+    }
 }
