@@ -3,8 +3,8 @@
 //! Provides OS operations compatible with NSE.
 
 use mlua::{Lua, Result as LuaResult, Table};
-use std::collections::HashMap;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -102,9 +102,7 @@ pub fn register_os_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
 
     let getenv_fn = lua.create_function(move |_lua, name: String| {
         if sandbox_enabled {
-            NSE_ENV.with(|e| {
-                Ok(e.borrow().get(&name).cloned().unwrap_or_default())
-            })
+            NSE_ENV.with(|e| Ok(e.borrow().get(&name).cloned().unwrap_or_default()))
         } else {
             let local = NSE_ENV.with(|e| e.borrow().get(&name).cloned());
             Ok(local.unwrap_or_else(|| std::env::var(&name).unwrap_or_default()))

@@ -77,7 +77,10 @@ impl KafkaConnection {
             .map_err(|e| e.to_string())?;
         let response_len_raw = i32::from_be_bytes(len_buf);
         if response_len_raw < 0 || response_len_raw as usize > 64 * 1024 * 1024 {
-            return Err(format!("Invalid Kafka response length: {}", response_len_raw));
+            return Err(format!(
+                "Invalid Kafka response length: {}",
+                response_len_raw
+            ));
         }
         let response_len = response_len_raw as usize;
 
@@ -106,7 +109,11 @@ impl KafkaConnection {
 
         let topic_bytes = topic.as_bytes();
         if topic_bytes.len() > i16::MAX as usize {
-            return Err(format!("Kafka topic too long: {} bytes (max {})", topic_bytes.len(), i16::MAX));
+            return Err(format!(
+                "Kafka topic too long: {} bytes (max {})",
+                topic_bytes.len(),
+                i16::MAX
+            ));
         }
         request.extend_from_slice(&(topic_bytes.len() as i16).to_be_bytes());
         request.extend_from_slice(topic_bytes);

@@ -4,8 +4,8 @@
 //! Based on Nmap's shortport library: https://nmap.org/nsedoc/lib/shortport.html
 
 use mlua::{Lua, Result as LuaResult, Table, Value};
-use std::sync::LazyLock;
 use regex::Regex;
+use std::sync::LazyLock;
 
 static SHORTPORT_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     let patterns = [

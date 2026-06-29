@@ -519,7 +519,10 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
             match smtp_connect(&host, port) {
                 Ok((mut stream, _banner)) => {
                     if let Some(cmd) = command {
-                        if stream.write_all(format!("HELP {}\r\n", cmd).as_bytes()).is_err() {
+                        if stream
+                            .write_all(format!("HELP {}\r\n", cmd).as_bytes())
+                            .is_err()
+                        {
                             tracing::warn!("SMTP: Failed to send HELP {}", cmd);
                         }
                     } else {

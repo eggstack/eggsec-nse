@@ -8,7 +8,9 @@ use mlua::{Lua, Result as LuaResult};
 pub fn register_datetime_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
 
-    let datetime = lua.create_table().map_err(|e| mlua::Error::RuntimeError(format!("Failed to create datetime table: {}", e)))?;
+    let datetime = lua.create_table().map_err(|e| {
+        mlua::Error::RuntimeError(format!("Failed to create datetime table: {}", e))
+    })?;
 
     datetime.set(
         "now",

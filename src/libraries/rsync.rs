@@ -38,7 +38,9 @@ pub fn register_rsync_library(lua: &Lua) -> LuaResult<()> {
 
             // Rsync protocol greeting
             let greeting = b"@RSYNCD: 31.0\n";
-            stream.write_all(greeting).unwrap_or_else(|e| tracing::warn!("Failed to send rsync greeting: {}", e));
+            stream
+                .write_all(greeting)
+                .unwrap_or_else(|e| tracing::warn!("Failed to send rsync greeting: {}", e));
 
             let mut response = [0u8; 1024];
             let n = stream.read(&mut response).unwrap_or(0);
@@ -80,8 +82,12 @@ pub fn register_rsync_library(lua: &Lua) -> LuaResult<()> {
                 }
             };
 
-            stream.write_all(b"@RSYNCD: 31.0\n").unwrap_or_else(|e| tracing::warn!("Failed to send rsync greeting: {}", e));
-            stream.write_all(b"\n").unwrap_or_else(|e| tracing::warn!("Failed to send rsync newline: {}", e));
+            stream
+                .write_all(b"@RSYNCD: 31.0\n")
+                .unwrap_or_else(|e| tracing::warn!("Failed to send rsync greeting: {}", e));
+            stream
+                .write_all(b"\n")
+                .unwrap_or_else(|e| tracing::warn!("Failed to send rsync newline: {}", e));
 
             let mut response = [0u8; 4096];
             let n = stream.read(&mut response).unwrap_or(0);

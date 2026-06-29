@@ -38,7 +38,9 @@ pub fn register_membase_library(lua: &Lua) -> LuaResult<()> {
 
             // Membase hello
             let hello = b"MECHO\r\n";
-            stream.write_all(hello).unwrap_or_else(|e| tracing::warn!("Failed to send membase hello: {}", e));
+            stream
+                .write_all(hello)
+                .unwrap_or_else(|e| tracing::warn!("Failed to send membase hello: {}", e));
 
             let mut response = [0u8; 1024];
             let n = stream.read(&mut response).unwrap_or(0);

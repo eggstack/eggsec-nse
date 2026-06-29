@@ -72,7 +72,8 @@ pub fn register_slaxml_library(lua: &Lua) -> LuaResult<()> {
                             for (k, v) in attrs {
                                 attrs_table.set(k, v).ok();
                             }
-                            if let Err(e) = f.call::<mlua::Value>((elem_name.clone(), attrs_table)) {
+                            if let Err(e) = f.call::<mlua::Value>((elem_name.clone(), attrs_table))
+                            {
                                 tracing::warn!("slaxml: startElement callback error: {}", e);
                             }
                         }

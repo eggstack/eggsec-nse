@@ -108,7 +108,10 @@ pub fn register_tftp_library(lua: &Lua) -> LuaResult<()> {
 
                                                 let ack = build_ack(received_block);
                                                 if socket.send_to(&ack, &addr).is_err() {
-                                                    tracing::warn!("Failed to send TFTP ACK for block {}", received_block);
+                                                    tracing::warn!(
+                                                        "Failed to send TFTP ACK for block {}",
+                                                        received_block
+                                                    );
                                                 }
 
                                                 if n < 516 {
@@ -126,7 +129,10 @@ pub fn register_tftp_library(lua: &Lua) -> LuaResult<()> {
                                         if last_block > 0 {
                                             let ack = build_ack(last_block);
                                             if socket.send_to(&ack, &addr).is_err() {
-                                                tracing::warn!("Failed to send TFTP ACK for block {}", last_block);
+                                                tracing::warn!(
+                                                    "Failed to send TFTP ACK for block {}",
+                                                    last_block
+                                                );
                                             }
                                         }
                                     }
@@ -326,7 +332,10 @@ pub fn register_tftp_library(lua: &Lua) -> LuaResult<()> {
 
                                                     let ack = build_ack(received_block);
                                                     if socket.send_to(&ack, &addr).await.is_err() {
-                                                        tracing::warn!("Failed to send TFTP ACK for block {}", received_block);
+                                                        tracing::warn!(
+                                                            "Failed to send TFTP ACK for block {}",
+                                                            received_block
+                                                        );
                                                     }
 
                                                     if n < 516 {
@@ -343,7 +352,10 @@ pub fn register_tftp_library(lua: &Lua) -> LuaResult<()> {
                                             if last_block > 0 {
                                                 let ack = build_ack(last_block);
                                                 if socket.send_to(&ack, &addr).await.is_err() {
-                                                    tracing::warn!("Failed to send TFTP ACK for block {}", last_block);
+                                                    tracing::warn!(
+                                                        "Failed to send TFTP ACK for block {}",
+                                                        last_block
+                                                    );
                                                 }
                                             }
                                         }

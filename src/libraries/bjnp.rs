@@ -28,7 +28,10 @@ pub fn register_bjnp_library(lua: &Lua) -> LuaResult<()> {
                         tracing::warn!("Failed to set broadcast on BJNP socket");
                     }
                     let bjnp_discovery = b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
-                    if socket.send_to(bjnp_discovery, format!("{}:8611", addr)).is_err() {
+                    if socket
+                        .send_to(bjnp_discovery, format!("{}:8611", addr))
+                        .is_err()
+                    {
                         tracing::warn!("Failed to send BJNP discovery to {}", addr);
                     }
                 }

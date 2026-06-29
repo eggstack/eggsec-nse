@@ -325,9 +325,15 @@ fn smb_read_file(
     stream.write_all(&read_cmd)?;
     stream.flush()?;
 
-    let alloc_len = (length as usize).checked_add(100).filter(|&n| n <= 16 * 1024 * 1024).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("SMB response length {} too large", length))
-    })?;
+    let alloc_len = (length as usize)
+        .checked_add(100)
+        .filter(|&n| n <= 16 * 1024 * 1024)
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("SMB response length {} too large", length),
+            )
+        })?;
     let mut response = vec![0u8; alloc_len];
     let n = stream.read(&mut response)?;
 

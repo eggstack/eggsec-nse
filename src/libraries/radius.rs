@@ -92,8 +92,16 @@ pub fn register_radius_library(lua: &Lua) -> LuaResult<()> {
 
                 match AsyncUdpSocket::bind(bind_addr).await {
                     Ok(socket) => {
-                        if socket.connect(format!("{}:{}", host_clone, port)).await.is_err() {
-                            tracing::warn!("Failed to connect RADIUS socket to {}:{}", host_clone, port);
+                        if socket
+                            .connect(format!("{}:{}", host_clone, port))
+                            .await
+                            .is_err()
+                        {
+                            tracing::warn!(
+                                "Failed to connect RADIUS socket to {}:{}",
+                                host_clone,
+                                port
+                            );
                         }
                         result.set("host", host_clone)?;
                         result.set("port", port)?;

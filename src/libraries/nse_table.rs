@@ -8,7 +8,9 @@ use mlua::{Lua, Result as LuaResult, Table};
 pub fn register_table_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
 
-    let table_lib = lua.create_table().map_err(|e| mlua::Error::RuntimeError(format!("Failed to create table table: {}", e)))?;
+    let table_lib = lua
+        .create_table()
+        .map_err(|e| mlua::Error::RuntimeError(format!("Failed to create table table: {}", e)))?;
 
     table_lib.set(
         "serialize",

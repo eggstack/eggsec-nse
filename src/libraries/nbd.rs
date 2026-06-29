@@ -46,7 +46,9 @@ pub fn register_nbd_library(lua: &Lua) -> LuaResult<()> {
             // Client flags
             handshake[4..8].copy_from_slice(&0u32.to_be_bytes());
 
-            stream.write_all(&handshake).unwrap_or_else(|e| tracing::warn!("Failed to send NBD handshake: {}", e));
+            stream
+                .write_all(&handshake)
+                .unwrap_or_else(|e| tracing::warn!("Failed to send NBD handshake: {}", e));
 
             let mut response = [0u8; 12];
             let n = stream.read(&mut response).unwrap_or(0);
