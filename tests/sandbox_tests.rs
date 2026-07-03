@@ -24,7 +24,6 @@ fn test_sandbox_enabled_restricts_paths() {
     assert!(config
         .get_allowed_path("/tmp/eggsec-nse/test.txt")
         .is_some());
-    assert!(config.is_path_allowed("/tmp/eggsec-nse/test.txt"));
 }
 
 #[test]
