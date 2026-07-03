@@ -16,26 +16,40 @@ fn test_sandbox_disabled_allows_all_paths() {
 
 #[test]
 fn test_sandbox_enabled_restricts_paths() {
+    // Create a temporary directory for the sandbox test
+    let tmp_dir = std::env::temp_dir().join("eggsec-nse-sandbox-test");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
     let config = SandboxConfig {
         enabled: true,
-        allowed_dir: Some(PathBuf::from("/tmp/eggsec-nse")),
+        allowed_dir: Some(tmp_dir.clone()),
         ..Default::default()
     };
     assert!(config
-        .get_allowed_path("/tmp/eggsec-nse/test.txt")
+        .get_allowed_path(&tmp_dir.join("test.txt").to_string_lossy())
         .is_some());
+
+    // Clean up
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
 #[test]
 fn test_sandbox_blocks_outside_allowed_dir() {
+    // Create a temporary directory for the sandbox test
+    let tmp_dir = std::env::temp_dir().join("eggsec-nse-sandbox-test-block");
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
     let config = SandboxConfig {
         enabled: true,
-        allowed_dir: Some(PathBuf::from("/tmp/eggsec-nse")),
+        allowed_dir: Some(tmp_dir.clone()),
         ..Default::default()
     };
     // These paths are outside the allowed directory
     assert!(config.get_allowed_path("/etc/passwd").is_none());
     assert!(config.get_allowed_path("/tmp/other/file.txt").is_none());
+
+    // Clean up
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
 #[test]

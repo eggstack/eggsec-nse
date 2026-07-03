@@ -17,6 +17,8 @@ use crate::limits::{
     NseCancellationToken, NseExecutionLimits, NseExecutionStats, NseLimitViolation,
     NseResourceCounters,
 };
+use crate::profile::{NseModulePolicy, NseScriptPolicy};
+use crate::resolver::ScriptResolver;
 
 #[derive(Debug, Clone, Default)]
 pub struct SandboxMetrics {
@@ -44,6 +46,8 @@ pub struct ExecutorCore {
     pub(crate) execution_start: Arc<Mutex<Option<Instant>>>,
     pub(crate) lua_instruction_count: Arc<std::sync::atomic::AtomicU64>,
     pub(crate) limit_violation: Arc<Mutex<Option<NseLimitViolation>>>,
+    pub(crate) script_policy: NseScriptPolicy,
+    pub(crate) module_policy: NseModulePolicy,
 }
 
 impl ExecutorCore {
@@ -56,6 +60,8 @@ impl ExecutorCore {
             sandbox,
             NseExecutionLimits::default(),
             NseCancellationToken::new(),
+            default_script_policy(),
+            default_module_policy(),
         )
     }
 
@@ -68,6 +74,8 @@ impl ExecutorCore {
         sandbox: crate::SandboxConfig,
         limits: NseExecutionLimits,
         cancellation: NseCancellationToken,
+        script_policy: NseScriptPolicy,
+        module_policy: NseModulePolicy,
     ) -> LuaResult<Self> {
         let lua = Lua::new();
         let scripts_path = Arc::new(Mutex::new(vec![]));
@@ -88,6 +96,8 @@ impl ExecutorCore {
             execution_start: Arc::new(Mutex::new(None)),
             lua_instruction_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             limit_violation: Arc::new(Mutex::new(None)),
+            script_policy,
+            module_policy,
         };
 
         core.setup_globals()?;
@@ -95,6 +105,19 @@ impl ExecutorCore {
         core.setup_require(scripts_path)?;
 
         Ok(core)
+    }
+
+    /// Create an executor core from a resolved execution profile.
+    ///
+    /// This is the preferred constructor for surfaces that have an explicit profile.
+    pub fn with_profile(profile: &crate::profile::ResolvedNseExecutionProfile) -> LuaResult<Self> {
+        Self::with_policy(
+            profile.sandbox.clone(),
+            profile.limits.clone(),
+            NseCancellationToken::new(),
+            profile.script_policy.clone(),
+            profile.module_policy.clone(),
+        )
     }
 
     pub fn lua(&self) -> &Lua {
@@ -376,14 +399,41 @@ impl ExecutorCore {
     }
 
     pub fn load_script(&self, name: &str) -> LuaResult<String> {
+        if self.cancellation.is_cancelled() {
+            return Err(mlua::Error::RuntimeError(
+                "Script loading cancelled".to_string(),
+            ));
+        }
         let paths = self.scripts_path.lock();
         for base in paths.iter() {
             let lua_path = base.join(format!("{}.lua", name));
             if lua_path.exists() {
+                // Validate the canonicalized path is under the base directory
+                // to prevent traversal via names like "../etc/passwd"
+                if let Ok(canonical) = lua_path.canonicalize() {
+                    if let Ok(canonical_base) = base.canonicalize() {
+                        if !canonical.starts_with(&canonical_base) {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "Script '{}' escapes search root",
+                                name
+                            )));
+                        }
+                    }
+                }
                 return Ok(std::fs::read_to_string(&lua_path)?);
             }
             let nse_path = base.join(format!("{}.nse", name));
             if nse_path.exists() {
+                if let Ok(canonical) = nse_path.canonicalize() {
+                    if let Ok(canonical_base) = base.canonicalize() {
+                        if !canonical.starts_with(&canonical_base) {
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "Script '{}' escapes search root",
+                                name
+                            )));
+                        }
+                    }
+                }
                 return Ok(std::fs::read_to_string(&nse_path)?);
             }
         }
@@ -759,11 +809,19 @@ impl ExecutorCore {
     }
 
     fn setup_require(&self, _scripts_path: Arc<Mutex<Vec<PathBuf>>>) -> LuaResult<()> {
-        let scripts_path = self.scripts_path.clone();
         let cache: Arc<Mutex<FxHashMap<String, Value>>> =
             Arc::new(Mutex::new(FxHashMap::default()));
+        let script_policy = self.script_policy.clone();
+        let module_policy = self.module_policy.clone();
+        let limits = self.limits.clone();
+        let cancellation = self.cancellation.clone();
 
         let require_fn = self.lua.create_function(move |lua, name: String| {
+            if cancellation.is_cancelled() {
+                return Err(mlua::Error::RuntimeError(
+                    "Require cancelled".to_string(),
+                ));
+            }
             {
                 let g = cache.lock();
                 if let Some(cached) = g.get(&name) {
@@ -796,97 +854,61 @@ impl ExecutorCore {
                 return Ok(Value::Table(module));
             }
 
-            // Validate module name before any filesystem access
-            let validated_name = match crate::resolver::validate_nse_module_name(&name) {
-                Ok(n) => n,
+            // Delegate filesystem module loading to ScriptResolver.
+            // The resolver enforces: module-name grammar, allow_filesystem_modules,
+            // allowed_module_roots, canonical root containment, symlink escape
+            // rejection, extension allowlist, and max_required_module_bytes.
+            let mut resolver = ScriptResolver::new(
+                script_policy.clone(),
+                module_policy.clone(),
+                limits.clone(),
+            );
+
+            match resolver.resolve_module(&name) {
+                Ok(Some(resolved)) => {
+                    // Evaluate the loaded module content
+                    match lua.load(&resolved.content).eval::<Value>() {
+                        Ok(value) => {
+                            // Cache successful loads in _REQUIRE_MODULES
+                            let globals = lua.globals();
+                            if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
+                                if let Err(e) = modules.set(name.clone(), value.clone()) {
+                                    tracing::warn!("NSE require: failed to cache module '{}' in _REQUIRE_MODULES: {}", name, e);
+                                }
+                            }
+                            cache.lock().insert(name.clone(), value.clone());
+                            return Ok(value);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "NSE require: failed to evaluate module '{}' from '{}': {}",
+                                name,
+                                resolved.path.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "unknown".to_string()),
+                                e
+                            );
+                            return Err(mlua::Error::RuntimeError(format!(
+                                "module '{}' eval error: {}",
+                                name, e
+                            )));
+                        }
+                    }
+                }
+                Ok(None) => {
+                    // Module not found in filesystem (resolver returned None)
+                    // This means either filesystem modules are disallowed by policy,
+                    // no module roots are configured, or the module wasn't found.
+                    tracing::debug!(
+                        "NSE require: module '{}' not found in filesystem (policy: filesystem_modules={})",
+                        name,
+                        module_policy.allow_filesystem_modules
+                    );
+                }
                 Err(e) => {
-                    tracing::warn!("NSE require: invalid module name '{}': {}", name, e);
+                    tracing::warn!("NSE require: resolver rejected module '{}': {}", name, e);
                     return Err(mlua::Error::RuntimeError(format!(
                         "module '{}' not found: {}",
                         name, e
                     )));
-                }
-            };
-
-            // Try loading from file with path containment checks
-            let script_candidates: Vec<std::path::PathBuf> = {
-                let paths = scripts_path.lock();
-                let mut candidates = Vec::new();
-                for base in paths.iter() {
-                    for ext in &["nse", "lua"] {
-                        candidates.push(base.join(format!("{}.{}", validated_name.as_str(), ext)));
-                    }
-                }
-                candidates
-            };
-
-            for script_path in &script_candidates {
-                if !script_path.exists() {
-                    continue;
-                }
-
-                // Validate extension
-                let ext = script_path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
-                if ext != "nse" && ext != "lua" {
-                    tracing::warn!(
-                        "NSE require: skipping module '{}' with disallowed extension '{}'",
-                        name,
-                        ext
-                    );
-                    continue;
-                }
-
-                // Validate symlink containment (canonicalize and check)
-                let canonical = match script_path.canonicalize() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!(
-                            "NSE require: failed to canonicalize module path '{}': {}",
-                            script_path.display(),
-                            e
-                        );
-                        continue;
-                    }
-                };
-
-                // Read content with size check
-                let content = match std::fs::read_to_string(&canonical) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!(
-                            "NSE require: failed to read module '{}' from '{}': {}",
-                            name,
-                            canonical.display(),
-                            e
-                        );
-                        continue;
-                    }
-                };
-
-                if lua.load(&content).eval::<Value>().is_ok() {
-                    let globals = lua.globals();
-                    if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
-                        if let Ok(module) = modules.get::<Table>(name.as_str()) {
-                            cache
-                                .lock()
-                                .insert(name.clone(), Value::Table(module.clone()));
-                            return Ok(Value::Table(module));
-                        }
-                    }
-                    if let Ok(module) = globals.get::<Table>(name.as_str()) {
-                        if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
-                            if let Err(e) = modules.set(name.clone(), module.clone()) {
-                                tracing::warn!("NSE require: failed to cache module '{}' in _REQUIRE_MODULES: {}", name, e);
-                            }
-                        }
-                        cache
-                            .lock()
-                            .insert(name.clone(), Value::Table(module.clone()));
-                        return Ok(Value::Table(module));
-                    }
                 }
             }
 
@@ -898,6 +920,27 @@ impl ExecutorCore {
 
         self.lua.globals().set("require", require_fn)?;
         Ok(())
+    }
+}
+
+/// Permissive script policy for manual/interactive use.
+pub fn default_script_policy() -> NseScriptPolicy {
+    NseScriptPolicy {
+        allow_builtin_scripts: true,
+        allow_script_files: true,
+        allowed_script_roots: Vec::new(),
+        allow_conventional_nmap_paths: true,
+        max_script_bytes: None,
+    }
+}
+
+/// Permissive module policy for manual/interactive use.
+pub fn default_module_policy() -> NseModulePolicy {
+    NseModulePolicy {
+        allow_builtin_modules: true,
+        allow_filesystem_modules: true,
+        allowed_module_roots: Vec::new(),
+        max_module_bytes: None,
     }
 }
 

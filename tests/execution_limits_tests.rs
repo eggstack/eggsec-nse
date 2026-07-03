@@ -20,6 +20,8 @@ fn test_infinite_loop_is_interrupted() {
         SandboxConfig::default(),
         limits,
         NseCancellationToken::new(),
+        eggsec_nse::default_script_policy(),
+        eggsec_nse::default_module_policy(),
     )
     .unwrap();
 
@@ -54,6 +56,8 @@ fn test_timeout_returns_violation() {
         SandboxConfig::default(),
         limits,
         NseCancellationToken::new(),
+        eggsec_nse::default_script_policy(),
+        eggsec_nse::default_module_policy(),
     )
     .unwrap();
 
@@ -88,6 +92,8 @@ fn test_script_size_rejection() {
         SandboxConfig::default(),
         limits,
         NseCancellationToken::new(),
+        eggsec_nse::default_script_policy(),
+        eggsec_nse::default_module_policy(),
     )
     .unwrap();
 
@@ -107,8 +113,14 @@ fn test_script_size_rejection() {
 fn test_cancellation_token_stops_execution() {
     let cancellation = NseCancellationToken::new();
     let limits = NseExecutionLimits::unlimited();
-    let executor =
-        NseExecutor::with_policy(SandboxConfig::default(), limits, cancellation.clone()).unwrap();
+    let executor = NseExecutor::with_policy(
+        SandboxConfig::default(),
+        limits,
+        cancellation.clone(),
+        eggsec_nse::default_script_policy(),
+        eggsec_nse::default_module_policy(),
+    )
+    .unwrap();
 
     // Cancel before running
     cancellation.cancel();
@@ -207,6 +219,8 @@ fn test_normal_script_succeeds_within_limits() {
         SandboxConfig::default(),
         limits,
         NseCancellationToken::new(),
+        eggsec_nse::default_script_policy(),
+        eggsec_nse::default_module_policy(),
     )
     .unwrap();
 
@@ -230,6 +244,8 @@ fn test_unlimited_allows_long_execution() {
         SandboxConfig::default(),
         limits,
         NseCancellationToken::new(),
+        eggsec_nse::default_script_policy(),
+        eggsec_nse::default_module_policy(),
     )
     .unwrap();
 
@@ -254,6 +270,8 @@ fn test_execution_stats_tracks_instructions() {
         SandboxConfig::default(),
         limits,
         NseCancellationToken::new(),
+        eggsec_nse::default_script_policy(),
+        eggsec_nse::default_module_policy(),
     )
     .unwrap();
 
@@ -326,6 +344,8 @@ fn test_with_policy_async_executor() {
         SandboxConfig::default(),
         limits,
         NseCancellationToken::new(),
+        eggsec_nse::default_script_policy(),
+        eggsec_nse::default_module_policy(),
     )
     .unwrap();
 
@@ -384,6 +404,8 @@ mod output_limit_tests {
             SandboxConfig::default(),
             limits,
             NseCancellationToken::new(),
+            eggsec_nse::default_script_policy(),
+            eggsec_nse::default_module_policy(),
         )
         .unwrap();
 
@@ -410,6 +432,8 @@ mod output_limit_tests {
             SandboxConfig::default(),
             limits,
             NseCancellationToken::new(),
+            eggsec_nse::default_script_policy(),
+            eggsec_nse::default_module_policy(),
         )
         .unwrap();
 

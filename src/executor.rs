@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use crate::executor_core::ExecutorCore;
 use crate::limits::{NseCancellationToken, NseExecutionLimits, NseExecutionStats};
+use crate::profile::{NseModulePolicy, NseScriptPolicy};
 use crate::SandboxMetrics;
 
 pub struct NseExecutor {
@@ -16,18 +17,40 @@ pub struct NseExecutor {
 }
 
 impl NseExecutor {
+    /// Create an executor with default (manual-permissive) limits.
+    ///
+    /// # Manual-only
+    ///
+    /// This constructor uses permissive defaults suitable for interactive
+    /// CLI/TUI use. Automated surfaces (agent, MCP, REST, daemon, CI) must
+    /// use [`NseExecutor::with_policy`] or [`NseExecutor::with_profile`]
+    /// with an appropriate non-manual profile.
     pub fn new() -> LuaResult<Self> {
         Ok(Self {
             core: ExecutorCore::new()?,
         })
     }
 
+    /// Create an executor with a sandbox config and default (manual-permissive) limits.
+    ///
+    /// # Manual-only
+    ///
+    /// This constructor uses permissive defaults suitable for interactive
+    /// CLI/TUI use. Automated surfaces must use [`NseExecutor::with_policy`]
+    /// or [`NseExecutor::with_profile`].
     pub fn with_sandbox(sandbox: crate::SandboxConfig) -> LuaResult<Self> {
         Ok(Self {
             core: ExecutorCore::with_sandbox(sandbox)?,
         })
     }
 
+    /// Create an executor with a target and default (manual-permissive) limits.
+    ///
+    /// # Manual-only
+    ///
+    /// This constructor uses permissive defaults suitable for interactive
+    /// CLI/TUI use. Automated surfaces must use [`NseExecutor::with_policy`]
+    /// or [`NseExecutor::with_profile`].
     pub fn with_target(target: &str) -> LuaResult<Self> {
         let mut exec = Self::new()?;
         if let Err(e) = exec.set_target(target) {
@@ -45,9 +68,20 @@ impl NseExecutor {
         sandbox: crate::SandboxConfig,
         limits: NseExecutionLimits,
         cancellation: NseCancellationToken,
+        script_policy: NseScriptPolicy,
+        module_policy: NseModulePolicy,
     ) -> LuaResult<Self> {
         Ok(Self {
-            core: ExecutorCore::with_policy(sandbox, limits, cancellation)?,
+            core: ExecutorCore::with_policy(sandbox, limits, cancellation, script_policy, module_policy)?,
+        })
+    }
+
+    /// Create an executor from a resolved execution profile.
+    ///
+    /// This is the preferred constructor when a profile is available.
+    pub fn with_profile(profile: &crate::profile::ResolvedNseExecutionProfile) -> LuaResult<Self> {
+        Ok(Self {
+            core: ExecutorCore::with_profile(profile)?,
         })
     }
 
@@ -116,7 +150,13 @@ impl NseExecutor {
             ..NseExecutionLimits::default()
         };
         let cancellation = self.core.cancellation_token().clone();
-        let mut exec = NseExecutor::with_policy(self.core.sandbox.clone(), limits, cancellation)?;
+        let mut exec = NseExecutor::with_policy(
+            self.core.sandbox.clone(),
+            limits,
+            cancellation,
+            self.core.script_policy.clone(),
+            self.core.module_policy.clone(),
+        )?;
         if let Err(e) = exec.set_target(self.target()) {
             tracing::warn!("Failed to set NSE target '{}': {}", self.target(), e);
         }
@@ -335,6 +375,20 @@ impl NseExecutor {
     }
 
     pub fn run_script_file(&self, path: &std::path::Path) -> LuaResult<String> {
+        // Validate path against script policy roots if configured
+        if !self.core.script_policy.allowed_script_roots.is_empty() {
+            let mut resolver = crate::resolver::ScriptResolver::new(
+                self.core.script_policy.clone(),
+                self.core.module_policy.clone(),
+                self.core.limits.clone(),
+            );
+            let source = crate::resolver::NseScriptSource::File {
+                path: path.to_path_buf(),
+            };
+            resolver.resolve_script(source).map_err(|e| {
+                mlua::Error::RuntimeError(format!("Script file rejected: {}", e))
+            })?;
+        }
         let script = std::fs::read_to_string(path)?;
         self.run_script(&script)
     }
@@ -343,6 +397,20 @@ impl NseExecutor {
         &self,
         path: &std::path::Path,
     ) -> LuaResult<(String, Vec<String>)> {
+        // Validate path against script policy roots if configured
+        if !self.core.script_policy.allowed_script_roots.is_empty() {
+            let mut resolver = crate::resolver::ScriptResolver::new(
+                self.core.script_policy.clone(),
+                self.core.module_policy.clone(),
+                self.core.limits.clone(),
+            );
+            let source = crate::resolver::NseScriptSource::File {
+                path: path.to_path_buf(),
+            };
+            resolver.resolve_script(source).map_err(|e| {
+                mlua::Error::RuntimeError(format!("Script file rejected: {}", e))
+            })?;
+        }
         let script = std::fs::read_to_string(path)?;
         self.run_script_with_output(&script)
     }

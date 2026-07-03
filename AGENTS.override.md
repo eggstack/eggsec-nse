@@ -52,6 +52,48 @@ All NSE library files now use `rustc_hash::FxHashMap`/`FxHashSet` for consistenc
 - **Profile-Aware Execution**: `run_cli_with_profile(config, Option<ResolvedNseExecutionProfile>)` in `lib.rs` is the profile-aware entry point. Falls back to `manual_permissive` when `None`. Validates script file policy, creates executor via `NseExecutor::with_policy()`, includes profile metadata in JSON output.
 - **Script/Module Resolver**: `resolver.rs` provides `ScriptResolver` which enforces profile-derived script/module policies, strict module-name grammar, canonical path validation, symlink-aware containment, file extension allowlists, size limits, and structured diagnostics. All script and module loading flows through the resolver. Types: `NseScriptSource`, `NseModuleName`, `ResolvedNseScript`, `ResolvedNseModule`, `NseLoadError`, `NseLoadDiagnostic`. Validation function: `validate_nse_module_name()`.
 
+## Rust-Side Side-Effect Inventory (Milestone 1 Closure)
+
+All Rust-side side-effecting helpers have been classified. Cancellation is enforced at the Lua interrupt hook level (`set_interrupt`) which fires between Lua instructions — not during blocking I/O syscalls. Individual cancellation checks are present in core infrastructure paths (`load_script`, `setup_require`). Library-level helpers are classified for Milestone 3 capability-wrapper migration.
+
+### Core Infrastructure (cancellation-aware)
+
+| Location | Category | Cancellation | Notes |
+|----------|----------|-------------|-------|
+| `executor_core.rs:load_script()` | fs | ✅ Pre-check | Checks `cancellation.is_cancelled()` before file reads |
+| `executor_core.rs:setup_require()` | fs | ✅ Pre-check | Checks `is_cancelled()` before resolver delegation |
+| `resolver.rs:resolve_module_content()` | fs | ⚠️ Bounded | File reads bounded by `max_required_module_bytes` |
+| `resolver.rs:resolve_script_content()` | fs | ⚠️ Bounded | File reads bounded by `max_script_bytes` |
+
+### Lua Library Helpers (Milestone 3 follow-up)
+
+| Category | Count | Key Files | Current Bounding |
+|----------|-------|-----------|-----------------|
+| TCP connect | ~85 | `nmap.rs`, `smb.rs`, `vnc.rs`, `brute.rs`, `comm.rs`, `sslcert.rs`, ... | Lua interrupt hook; `connect_timeout` on some |
+| UDP bind/send | ~31 | `socket.rs`, `snmp.rs`, `dhcp.rs`, `packet.rs`, ... | Lua interrupt hook only |
+| reqwest::blocking | ~12 | `http.rs`, `upnp.rs`, `vulns.rs`, `httpspider.rs`, ... | HTTP client timeout on some |
+| native_tls | ~16 | `tls.rs`, `openssl.rs`, `sslcert.rs` | TLS handshake timeout |
+| std::process::Command | 6 | `nmap.rs`, `io.rs` | Sandbox-gated; no timeout |
+| std::fs (library) | ~20 | `io.rs`, `unpwdb.rs`, `os.rs`, `brute.rs`, `datafiles.rs` | Resource counters; no cancellation |
+
+### Public API Helpers (manual-only, not Lua-bound)
+
+| Category | Count | Files | Notes |
+|----------|-------|-------|-------|
+| TcpStream::connect | 5 | `public_api/api.rs` | Hardcoded timeouts; manual-only Rust API |
+| reqwest::blocking | 3 | `public_api/api.rs` | HTTP client timeout; manual-only |
+| UdpSocket | 1 | `public_api/api.rs` | Manual-only |
+
+### Architecture Guard
+
+Do NOT add new direct `std::fs::read_to_string`, `TcpStream::connect`, or `reqwest::blocking` calls outside:
+- `resolver.rs` (script/module loading)
+- `executor_core.rs` (load_script, setup_require)
+- `public_api/api.rs` (manual-only Rust APIs)
+- `libraries/` (Lua-bound helpers — require sandbox enforcement + resource counters)
+
+New side-effecting code in `eggsec-nse` must go through `ScriptResolver` for file reads, or be classified in this inventory.
+
 ## Known Issues (Pending Fix)
 
 1. ~~**Missing Sandbox Integration Tests**~~ FIXED - 17 integration tests added in `tests/sandbox_tests.rs` covering path restrictions, command allowlists, network filtering, and host resolution.

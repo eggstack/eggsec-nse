@@ -78,10 +78,9 @@ impl Default for SandboxConfig {
 impl SandboxConfig {
     fn allowed_root(&self) -> Option<PathBuf> {
         let dir = self.allowed_dir.as_ref()?;
-        match dir.canonicalize() {
-            Ok(canonical) => Some(canonical),
-            Err(_) => Some(dir.clone()),
-        }
+        // Return the raw path; canonicalization is checked per-path in get_allowed_path().
+        // This allows the sandbox to reference a not-yet-created directory.
+        Some(dir.clone())
     }
 
     /// Create a sandbox config with sandboxing enabled and default settings.
@@ -94,7 +93,10 @@ impl SandboxConfig {
 
     /// Check if a file path is allowed under the sandbox and return the canonical path.
     ///
-    /// This method canonicalizes the path and verifies it starts with the allowed root.
+    /// This method canonicalizes the path and verifies it starts with the allowed root
+    /// using path-component semantics (`Path::strip_prefix` / `Path::starts_with` on
+    /// canonical paths only). String-prefix fallback is never used.
+    ///
     /// Returns `Some(canonical_path)` if allowed, `None` if blocked or invalid.
     ///
     /// # Security Note
@@ -106,31 +108,32 @@ impl SandboxConfig {
             return Some(PathBuf::from(path));
         }
 
-        let allowed_dir = self.allowed_root()?;
-
-        let path_buf = PathBuf::from(path);
-        let Ok(canonical) = path_buf.canonicalize() else {
-            if let Some(parent) = path_buf.parent() {
-                if let Ok(canonical_parent) = parent.canonicalize() {
-                    if canonical_parent.starts_with(&allowed_dir) {
-                        return Some(canonical_parent.join(path_buf.file_name()?));
-                    }
-                }
-            }
-            // Fallback: string prefix check when neither path nor parent can be canonicalized
-            let allowed_str = allowed_dir.to_string_lossy();
-            let path_str = path_buf.to_string_lossy();
-            if path_str.starts_with(allowed_str.as_ref()) {
-                return Some(path_buf);
-            }
-            return None;
+        // Sandbox enabled but no allowed_dir configured — allow all paths
+        let Some(allowed_dir) = self.allowed_root() else {
+            return Some(PathBuf::from(path));
         };
 
-        if canonical.starts_with(allowed_dir) {
-            Some(canonical)
-        } else {
-            None
+        let path_buf = PathBuf::from(path);
+
+        // Try to canonicalize the path directly
+        if let Ok(canonical) = path_buf.canonicalize() {
+            if canonical.starts_with(&allowed_dir) {
+                return Some(canonical);
+            }
+            return None;
         }
+
+        // File doesn't exist — try canonicalizing the parent
+        if let Some(parent) = path_buf.parent() {
+            if let Ok(canonical_parent) = parent.canonicalize() {
+                if canonical_parent.starts_with(&allowed_dir) {
+                    return Some(canonical_parent.join(path_buf.file_name()?));
+                }
+            }
+        }
+
+        // Cannot canonicalize path or parent — reject (no string-prefix fallback)
+        None
     }
 
     /// Check if a command is allowed via `io.popen`.
@@ -264,6 +267,8 @@ pub use executor_core::ExecutorCore;
 #[cfg(feature = "nse")]
 pub use executor_core::SandboxMetrics;
 #[cfg(feature = "nse")]
+pub use executor_core::{default_module_policy, default_script_policy};
+#[cfg(feature = "nse")]
 pub use limits::{
     NseCancellationToken, NseExecutionLimits, NseExecutionStats, NseLimitViolation,
     NseResourceCounters,
@@ -279,6 +284,12 @@ pub use resolver::{
     NseScriptSource, ResolvedNseModule, ResolvedNseScript, ScriptResolver,
 };
 
+/// Compatibility wrapper that defaults to `ManualPermissive` profile.
+///
+/// # Manual-only
+///
+/// This function is unused in production. Prefer [`run_cli_with_profile`]
+/// with an explicit profile for all surfaces.
 #[cfg(feature = "nse")]
 pub async fn run_cli(config: NseConfig) -> anyhow::Result<()> {
     run_cli_with_profile(config, None).await
@@ -334,8 +345,14 @@ pub async fn run_cli_with_profile(
     let cancellation = crate::limits::NseCancellationToken::new();
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-        let mut executor = NseExecutor::with_policy(sandbox, limits, cancellation)
-            .map_err(|e| anyhow::anyhow!("Failed to create NSE executor: {}", e))?;
+        let mut executor = NseExecutor::with_policy(
+            sandbox,
+            limits,
+            cancellation,
+            resolved_profile.script_policy.clone(),
+            resolved_profile.module_policy.clone(),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create NSE executor: {}", e))?;
         executor
             .set_target(&target)
             .map_err(|e| anyhow::anyhow!("Failed to set target: {}", e))?;

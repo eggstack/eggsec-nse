@@ -9,6 +9,7 @@ use tokio::runtime::Runtime;
 
 use crate::executor_core::ExecutorCore;
 use crate::limits::{NseCancellationToken, NseExecutionLimits, NseExecutionStats};
+use crate::profile::{NseModulePolicy, NseScriptPolicy};
 use crate::SandboxMetrics;
 
 /// Async NSE Executor with tokio runtime support.
@@ -70,12 +71,14 @@ impl AsyncNseExecutor {
         sandbox: crate::SandboxConfig,
         limits: NseExecutionLimits,
         cancellation: NseCancellationToken,
+        script_policy: NseScriptPolicy,
+        module_policy: NseModulePolicy,
     ) -> LuaResult<Self> {
         let runtime = Runtime::new().map_err(|e| {
             mlua::Error::RuntimeError(format!("Failed to create tokio runtime: {}", e))
         })?;
         Ok(Self {
-            core: ExecutorCore::with_policy(sandbox, limits, cancellation)?,
+            core: ExecutorCore::with_policy(sandbox, limits, cancellation, script_policy, module_policy)?,
             runtime: Some(runtime),
             owns_runtime: true,
         })
@@ -86,10 +89,12 @@ impl AsyncNseExecutor {
         sandbox: crate::SandboxConfig,
         limits: NseExecutionLimits,
         cancellation: NseCancellationToken,
+        script_policy: NseScriptPolicy,
+        module_policy: NseModulePolicy,
         runtime: Runtime,
     ) -> LuaResult<Self> {
         Ok(Self {
-            core: ExecutorCore::with_policy(sandbox, limits, cancellation)?,
+            core: ExecutorCore::with_policy(sandbox, limits, cancellation, script_policy, module_policy)?,
             runtime: Some(runtime),
             owns_runtime: false,
         })

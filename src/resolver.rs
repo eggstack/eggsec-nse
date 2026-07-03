@@ -310,9 +310,17 @@ fn has_allowed_extension(path: &Path, allowed: &[&str]) -> bool {
 // Path containment
 // ---------------------------------------------------------------------------
 
-/// Canonicalize a root path and return it, or fall back to the original.
-fn canonicalize_root(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+/// Canonicalize a path. Returns `None` if the path cannot be canonicalized
+/// (e.g., does not exist and parent cannot be resolved).
+fn try_canonicalize(path: &Path) -> Option<PathBuf> {
+    path.canonicalize().ok()
+}
+
+/// Canonicalize a root path. Returns `Some(canonical)` only if the path
+/// can be fully resolved. Roots that cannot be canonicalized are rejected
+/// to prevent string-prefix fallback authorization.
+fn canonicalize_root(path: &Path) -> Option<PathBuf> {
+    path.canonicalize().ok()
 }
 
 /// Check whether a canonical path is under an approved root using
@@ -326,41 +334,47 @@ fn is_under_root(canonical_path: &Path, canonical_root: &Path) -> bool {
 
 /// Validate that a file path is under one of the approved roots.
 /// Returns the canonical path if allowed, or an error.
+///
+/// For existing files, the full canonical path is checked against canonical roots
+/// using path-component semantics (`Path::strip_prefix`).
+///
+/// For non-existent files, the parent directory is canonicalized and checked.
+/// If the parent is under a root, the constructed child path is returned.
+/// If neither the file nor its parent can be canonicalized, the path is rejected.
 fn validate_path_under_roots(
     path: &Path,
     approved_roots: &[PathBuf],
 ) -> Result<PathBuf, NseLoadError> {
-    // Try to canonicalize the path
-    let canonical = match path.canonicalize() {
-        Ok(c) => c,
-        Err(_) => {
-            // If the file doesn't exist yet, try canonicalizing the parent
-            if let Some(parent) = path.parent() {
-                if let Ok(canonical_parent) = parent.canonicalize() {
-                    let candidate = canonical_parent.join(path.file_name().unwrap_or_default());
-                    // For non-existent files, check if parent is under root
-                    for root in approved_roots {
-                        let canonical_root = canonicalize_root(root);
-                        if is_under_root(&canonical_parent, &canonical_root) {
-                            return Ok(candidate);
-                        }
+    // Try to canonicalize the path directly
+    if let Some(canonical) = try_canonicalize(path) {
+        for root in approved_roots {
+            if let Some(canonical_root) = canonicalize_root(root) {
+                if is_under_root(&canonical, &canonical_root) {
+                    return Ok(canonical);
+                }
+            }
+        }
+        return Err(NseLoadError::OutsideRoot {
+            path: path.to_path_buf(),
+            approved_roots: approved_roots.to_vec(),
+        });
+    }
+
+    // File doesn't exist — try canonicalizing the parent
+    if let Some(parent) = path.parent() {
+        if let Some(canonical_parent) = try_canonicalize(parent) {
+            let candidate = canonical_parent.join(path.file_name().unwrap_or_default());
+            for root in approved_roots {
+                if let Some(canonical_root) = canonicalize_root(root) {
+                    if is_under_root(&canonical_parent, &canonical_root) {
+                        return Ok(candidate);
                     }
                 }
             }
-            return Err(NseLoadError::OutsideRoot {
-                path: path.to_path_buf(),
-                approved_roots: approved_roots.to_vec(),
-            });
-        }
-    };
-
-    for root in approved_roots {
-        let canonical_root = canonicalize_root(root);
-        if is_under_root(&canonical, &canonical_root) {
-            return Ok(canonical);
         }
     }
 
+    // Neither file nor parent could be authorized
     Err(NseLoadError::OutsideRoot {
         path: path.to_path_buf(),
         approved_roots: approved_roots.to_vec(),
@@ -378,9 +392,10 @@ fn validate_symlink_containment(
     })?;
 
     for root in approved_roots {
-        let canonical_root = canonicalize_root(root);
-        if is_under_root(&canonical, &canonical_root) {
-            return Ok(canonical);
+        if let Some(canonical_root) = canonicalize_root(root) {
+            if is_under_root(&canonical, &canonical_root) {
+                return Ok(canonical);
+            }
         }
     }
 
@@ -682,7 +697,10 @@ impl ScriptResolver {
 
         // 4. Try to find the module in approved roots
         for root in &self.module_policy.allowed_module_roots {
-            let canonical_root = canonicalize_root(root);
+            let Some(canonical_root) = canonicalize_root(root) else {
+                // Root cannot be canonicalized — skip it (do not fall back to string prefix)
+                continue;
+            };
 
             for ext in ALLOWED_MODULE_EXTENSIONS {
                 let candidate = canonical_root.join(format!("{}.{}", validated_name.as_str(), ext));
@@ -1071,5 +1089,125 @@ mod tests {
 
         let diags = resolver.take_diagnostics();
         assert!(!diags.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // WS2: Canonical root containment tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_is_under_root_component_semantics() {
+        // /tmp/root2 must NOT match /tmp/root (sibling-prefix bypass)
+        let root = PathBuf::from("/tmp/root");
+        let child = PathBuf::from("/tmp/root2/file.nse");
+        assert!(!is_under_root(&child, &root));
+
+        // /tmp/root/file.nse DOES match /tmp/root
+        let child = PathBuf::from("/tmp/root/file.nse");
+        assert!(is_under_root(&child, &root));
+
+        // /tmp/root/sub/file.nse DOES match /tmp/root
+        let child = PathBuf::from("/tmp/root/sub/file.nse");
+        assert!(is_under_root(&child, &root));
+    }
+
+    #[test]
+    fn test_validate_path_under_roots_rejects_sibling_prefix() {
+        let roots = vec![PathBuf::from("/tmp/root")];
+        // /tmp/root2/file.nse should NOT be allowed under /tmp/root
+        let result = validate_path_under_roots(Path::new("/tmp/root2/file.nse"), &roots);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            NseLoadError::OutsideRoot { .. } => {}
+            other => panic!("Expected OutsideRoot, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_validate_path_under_roots_rejects_nonexistent_path_outside_root() {
+        let roots = vec![PathBuf::from("/tmp/root")];
+        // Non-existent file outside root should be rejected
+        let result = validate_path_under_roots(Path::new("/tmp/outside/secret.lua"), &roots);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_symlink_containment_rejects_escape() {
+        // Create a temp directory structure with a symlink
+        let tmp = std::env::temp_dir().join("eggsec-nse-symlink-test");
+        let allowed = tmp.join("allowed");
+        let outside = tmp.join("outside");
+        let _ = std::fs::create_dir_all(&allowed);
+        let _ = std::fs::create_dir_all(&outside);
+
+        // Create a file outside the allowed root
+        std::fs::write(outside.join("secret.txt"), "secret").unwrap();
+
+        // Create a symlink inside allowed pointing to the outside file
+        let link = allowed.join("escape.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.join("secret.txt"), &link).unwrap();
+
+        // The symlink should be rejected
+        let result = validate_symlink_containment(&link, &[allowed.clone()]);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            NseLoadError::SymlinkEscape { path, resolved } => {
+                assert_eq!(path, link);
+                assert!(resolved.starts_with(&outside));
+            }
+            other => panic!("Expected SymlinkEscape, got {:?}", other),
+        }
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_validate_symlink_containment_allows_internal_symlink() {
+        // Create a temp directory with a symlink to another file inside the root
+        let tmp = std::env::temp_dir().join("eggsec-nse-symlink-ok-test");
+        let allowed = tmp.join("allowed");
+        let _ = std::fs::create_dir_all(allowed.join("sub"));
+
+        // Create a real file inside the root
+        std::fs::write(allowed.join("real.txt"), "content").unwrap();
+
+        // Create a symlink inside allowed pointing to the real file
+        let link = allowed.join("sub").join("link.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(allowed.join("real.txt"), &link).unwrap();
+
+        // The symlink should be allowed (resolves inside root)
+        let result = validate_symlink_containment(&link, &[allowed.clone()]);
+        assert!(result.is_ok());
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_validate_path_under_roots_rejects_absolute_traversal() {
+        let roots = vec![PathBuf::from("/tmp/root")];
+        // Absolute path outside root should be rejected
+        let result = validate_path_under_roots(Path::new("/etc/passwd"), &roots);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_canonicalize_root_rejects_nonexistent() {
+        // A root that doesn't exist should return None
+        let result = canonicalize_root(Path::new("/tmp/nonexistent-root-eggsec-nse"));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_canonicalize_root_accepts_existing() {
+        // An existing root should return Some
+        let tmp = std::env::temp_dir().join("eggsec-nse-root-test");
+        let _ = std::fs::create_dir_all(&tmp);
+        let result = canonicalize_root(&tmp);
+        assert!(result.is_some());
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
