@@ -107,12 +107,8 @@ fn test_script_size_rejection() {
 fn test_cancellation_token_stops_execution() {
     let cancellation = NseCancellationToken::new();
     let limits = NseExecutionLimits::unlimited();
-    let executor = NseExecutor::with_policy(
-        SandboxConfig::default(),
-        limits,
-        cancellation.clone(),
-    )
-    .unwrap();
+    let executor =
+        NseExecutor::with_policy(SandboxConfig::default(), limits, cancellation.clone()).unwrap();
 
     // Cancel before running
     cancellation.cancel();

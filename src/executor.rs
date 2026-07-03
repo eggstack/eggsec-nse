@@ -116,11 +116,7 @@ impl NseExecutor {
             ..NseExecutionLimits::default()
         };
         let cancellation = self.core.cancellation_token().clone();
-        let mut exec = NseExecutor::with_policy(
-            self.core.sandbox.clone(),
-            limits,
-            cancellation,
-        )?;
+        let mut exec = NseExecutor::with_policy(self.core.sandbox.clone(), limits, cancellation)?;
         if let Err(e) = exec.set_target(self.target()) {
             tracing::warn!("Failed to set NSE target '{}': {}", self.target(), e);
         }

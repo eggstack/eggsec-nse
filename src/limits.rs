@@ -47,7 +47,7 @@ impl Default for NseExecutionLimits {
             wall_clock_timeout: Some(Duration::from_secs(30)),
             lua_instruction_budget: Some(10_000_000),
             max_output_bytes: Some(10 * 1024 * 1024), // 10 MiB
-            max_script_bytes: Some(5 * 1024 * 1024),   // 5 MiB
+            max_script_bytes: Some(5 * 1024 * 1024),  // 5 MiB
             max_required_module_bytes: Some(2 * 1024 * 1024), // 2 MiB
             max_network_operations: None,
             max_network_bytes_read: None,
@@ -67,7 +67,7 @@ impl NseExecutionLimits {
             wall_clock_timeout: Some(Duration::from_secs(120)),
             lua_instruction_budget: Some(100_000_000),
             max_output_bytes: Some(50 * 1024 * 1024), // 50 MiB
-            max_script_bytes: Some(10 * 1024 * 1024),  // 10 MiB
+            max_script_bytes: Some(10 * 1024 * 1024), // 10 MiB
             max_required_module_bytes: Some(5 * 1024 * 1024),
             max_network_operations: None,
             max_network_bytes_read: None,
@@ -84,7 +84,7 @@ impl NseExecutionLimits {
             wall_clock_timeout: Some(Duration::from_secs(15)),
             lua_instruction_budget: Some(5_000_000),
             max_output_bytes: Some(2 * 1024 * 1024), // 2 MiB
-            max_script_bytes: Some(1024 * 1024),      // 1 MiB
+            max_script_bytes: Some(1024 * 1024),     // 1 MiB
             max_required_module_bytes: Some(512 * 1024),
             max_network_operations: Some(100),
             max_network_bytes_read: Some(10 * 1024 * 1024),
@@ -270,10 +270,7 @@ mod tests {
     #[test]
     fn test_manual_defaults_are_permissive() {
         let limits = NseExecutionLimits::manual_defaults();
-        assert_eq!(
-            limits.wall_clock_timeout,
-            Some(Duration::from_secs(120))
-        );
+        assert_eq!(limits.wall_clock_timeout, Some(Duration::from_secs(120)));
         assert_eq!(limits.lua_instruction_budget, Some(100_000_000));
         assert!(limits.max_network_operations.is_none());
     }
@@ -337,12 +334,8 @@ mod tests {
     #[test]
     fn test_resource_counters_snapshot() {
         let counters = NseResourceCounters::new();
-        counters
-            .network_operations
-            .store(5, Ordering::Relaxed);
-        counters
-            .network_bytes_read
-            .store(1024, Ordering::Relaxed);
+        counters.network_operations.store(5, Ordering::Relaxed);
+        counters.network_bytes_read.store(1024, Ordering::Relaxed);
         let stats = counters.snapshot(Duration::from_millis(100), 42);
         assert_eq!(stats.network_operations, 5);
         assert_eq!(stats.network_bytes_read, 1024);

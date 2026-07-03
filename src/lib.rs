@@ -245,9 +245,9 @@ pub mod cve;
 pub mod executor;
 #[cfg(feature = "nse")]
 pub mod executor_core;
-#[cfg(feature = "nse")]
 pub mod limits;
 pub mod output;
+pub mod profile;
 #[cfg(feature = "nse")]
 pub mod public_api;
 
@@ -268,8 +268,21 @@ pub use limits::{
     NseResourceCounters,
 };
 
+pub use profile::{
+    NseExecutionProfileKind, NseModulePolicy, NseNetworkPolicy, NseScriptPolicy,
+    ResolvedNseExecutionProfile, ScopeInput,
+};
+
 #[cfg(feature = "nse")]
 pub async fn run_cli(config: NseConfig) -> anyhow::Result<()> {
+    run_cli_with_profile(config, None).await
+}
+
+#[cfg(feature = "nse")]
+pub async fn run_cli_with_profile(
+    config: NseConfig,
+    profile: Option<ResolvedNseExecutionProfile>,
+) -> anyhow::Result<()> {
     let target = config.target.clone();
     let script = config.script.clone();
     let script_args = config.script_args.clone().unwrap_or_default();
@@ -277,12 +290,51 @@ pub async fn run_cli(config: NseConfig) -> anyhow::Result<()> {
     let script_file = config.script_file.clone();
     let json = config.json;
 
-    println!("Running NSE script '{}' against '{}'", script, target);
+    // Log profile diagnostics
+    let resolved_profile =
+        profile.unwrap_or_else(|| ResolvedNseExecutionProfile::manual_permissive(Some(&target)));
 
-    // Run the blocking executor in a separate thread to avoid runtime conflicts
+    tracing::info!(
+        profile = %resolved_profile.kind,
+        sandbox_enabled = resolved_profile.sandbox.enabled,
+        audit_label = %resolved_profile.audit_label,
+        "NSE execution profile resolved"
+    );
+
+    for warning in &resolved_profile.warnings {
+        tracing::warn!("{}", warning);
+    }
+
+    // Validate script file against profile policy
+    if let Some(ref sf) = script_file {
+        if !resolved_profile.script_policy.allow_script_files {
+            anyhow::bail!(
+                "Profile '{}' does not allow arbitrary script files. \
+                 Use built-in scripts only.",
+                resolved_profile.kind
+            );
+        }
+    }
+
+    println!("Running NSE script '{}' against '{}'", script, target);
+    if resolved_profile
+        .warnings
+        .iter()
+        .any(|w| w.contains("sandbox"))
+    {
+        println!("Warning: sandbox enforcement is disabled (feature not compiled)");
+    }
+
+    let sandbox = resolved_profile.sandbox.clone();
+    let limits = resolved_profile.limits.clone();
+    let cancellation = crate::limits::NseCancellationToken::new();
+
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
-        let mut executor = NseExecutor::with_target(&target)
+        let mut executor = NseExecutor::with_policy(sandbox, limits, cancellation)
             .map_err(|e| anyhow::anyhow!("Failed to create NSE executor: {}", e))?;
+        executor
+            .set_target(&target)
+            .map_err(|e| anyhow::anyhow!("Failed to set target: {}", e))?;
         executor
             .set_script_args(&script_args)
             .map_err(|e| anyhow::anyhow!("Invalid script args: {}", e))?;
@@ -307,6 +359,10 @@ pub async fn run_cli(config: NseConfig) -> anyhow::Result<()> {
             "target": config.target,
             "script": config.script,
             "script_args": script_args_display,
+            "profile": resolved_profile.kind.to_string(),
+            "sandbox_enabled": resolved_profile.sandbox.enabled,
+            "audit_label": resolved_profile.audit_label,
+            "warnings": resolved_profile.warnings,
             "output": result,
             "success": true
         });
@@ -314,6 +370,7 @@ pub async fn run_cli(config: NseConfig) -> anyhow::Result<()> {
     } else {
         println!("Target: {}", config.target);
         println!("Script: {}", config.script);
+        println!("Profile: {}", resolved_profile.kind);
         println!("Result: {}", result);
     }
 
@@ -322,6 +379,14 @@ pub async fn run_cli(config: NseConfig) -> anyhow::Result<()> {
 
 #[cfg(not(feature = "nse"))]
 pub async fn run_cli(_config: NseConfig) -> anyhow::Result<()> {
+    anyhow::bail!("NSE support requires the 'nse' feature. Build with: cargo build --features nse")
+}
+
+#[cfg(not(feature = "nse"))]
+pub async fn run_cli_with_profile(
+    _config: NseConfig,
+    _profile: Option<ResolvedNseExecutionProfile>,
+) -> anyhow::Result<()> {
     anyhow::bail!("NSE support requires the 'nse' feature. Build with: cargo build --features nse")
 }
 

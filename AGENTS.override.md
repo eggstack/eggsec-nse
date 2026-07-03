@@ -48,6 +48,8 @@ All NSE library files now use `rustc_hash::FxHashMap`/`FxHashSet` for consistenc
 - **Resource counters**: `NseResourceCounters` tracks network/filesystem operations and bytes. Updated by library wrappers; snapshot via `execution_stats()`.
 - **Hook API**: mlua 0.11.6 uses Luau — `set_interrupt()` for interrupt hooks, NOT `set_hook()`. `remove_hook()` is `#[cfg(not(feature = "luau"))]` — unavailable for Luau.
 - **parking_lot::Mutex**: Returns `MutexGuard` directly from `lock()`, no `Result` wrapping.
+- **Execution Profiles**: `profile.rs` provides `NseExecutionProfileKind` (5 variants), `ResolvedNseExecutionProfile`, `ScopeInput`, and policy types. Profiles resolve into `SandboxConfig`, `NseExecutionLimits`, script/module/network policy, and audit metadata. Constructors: `manual_permissive`, `manual_strict`, `agent_safe`, `ci_safe`, `compatibility_lab`. CLI handler uses `ManualPermissive` by default.
+- **Profile-Aware Execution**: `run_cli_with_profile(config, Option<ResolvedNseExecutionProfile>)` in `lib.rs` is the profile-aware entry point. Falls back to `manual_permissive` when `None`. Validates script file policy, creates executor via `NseExecutor::with_policy()`, includes profile metadata in JSON output.
 
 ## Known Issues (Pending Fix)
 

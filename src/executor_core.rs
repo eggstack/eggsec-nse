@@ -8,13 +8,13 @@ use mlua::{Lua, Result as LuaResult, Table, Value};
 use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::libraries::shared;
 use crate::limits::{
-    NseCancellationToken, NseExecutionLimits, NseLimitViolation, NseExecutionStats,
+    NseCancellationToken, NseExecutionLimits, NseExecutionStats, NseLimitViolation,
     NseResourceCounters,
 };
 
@@ -52,7 +52,11 @@ impl ExecutorCore {
     }
 
     pub fn with_sandbox(sandbox: crate::SandboxConfig) -> LuaResult<Self> {
-        Self::with_policy(sandbox, NseExecutionLimits::default(), NseCancellationToken::new())
+        Self::with_policy(
+            sandbox,
+            NseExecutionLimits::default(),
+            NseCancellationToken::new(),
+        )
     }
 
     /// Create an executor core with explicit execution limits and cancellation token.
@@ -162,10 +166,7 @@ impl ExecutorCore {
 
         // Check output size limit
         if let Some(max_output) = self.limits.max_output_bytes {
-            let current = self
-                .resource_counters
-                .output_bytes
-                .load(Ordering::Relaxed) as usize;
+            let current = self.resource_counters.output_bytes.load(Ordering::Relaxed) as usize;
             if current + output_bytes > max_output {
                 *self.limit_violation.lock() = Some(NseLimitViolation::OutputLimitExceeded);
                 return Err(format!(
@@ -245,8 +246,7 @@ impl ExecutorCore {
 
         // Reset counters and record start time
         *self.execution_start.lock() = Some(Instant::now());
-        self.lua_instruction_count
-            .store(0, Ordering::Relaxed);
+        self.lua_instruction_count.store(0, Ordering::Relaxed);
         self.resource_counters
             .network_operations
             .store(0, Ordering::Relaxed);
