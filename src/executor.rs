@@ -72,7 +72,13 @@ impl NseExecutor {
         module_policy: NseModulePolicy,
     ) -> LuaResult<Self> {
         Ok(Self {
-            core: ExecutorCore::with_policy(sandbox, limits, cancellation, script_policy, module_policy)?,
+            core: ExecutorCore::with_policy(
+                sandbox,
+                limits,
+                cancellation,
+                script_policy,
+                module_policy,
+            )?,
         })
     }
 
@@ -385,9 +391,9 @@ impl NseExecutor {
             let source = crate::resolver::NseScriptSource::File {
                 path: path.to_path_buf(),
             };
-            resolver.resolve_script(source).map_err(|e| {
-                mlua::Error::RuntimeError(format!("Script file rejected: {}", e))
-            })?;
+            resolver
+                .resolve_script(source)
+                .map_err(|e| mlua::Error::RuntimeError(format!("Script file rejected: {}", e)))?;
         }
         let script = std::fs::read_to_string(path)?;
         self.run_script(&script)
@@ -407,9 +413,9 @@ impl NseExecutor {
             let source = crate::resolver::NseScriptSource::File {
                 path: path.to_path_buf(),
             };
-            resolver.resolve_script(source).map_err(|e| {
-                mlua::Error::RuntimeError(format!("Script file rejected: {}", e))
-            })?;
+            resolver
+                .resolve_script(source)
+                .map_err(|e| mlua::Error::RuntimeError(format!("Script file rejected: {}", e)))?;
         }
         let script = std::fs::read_to_string(path)?;
         self.run_script_with_output(&script)

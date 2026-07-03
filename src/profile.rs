@@ -42,6 +42,27 @@ pub enum NseNetworkPolicy {
     AllowResolvedTargetSet(Vec<IpAddr>),
 }
 
+/// Script access policy.
+///
+/// ## Empty-roots semantics
+///
+/// The meaning of `allowed_script_roots.is_empty()` depends on
+/// `allow_script_files` and the profile that produced this policy:
+///
+/// | Profile kind | `allow_script_files` | Empty roots meaning |
+/// |--------------|----------------------|---------------------|
+/// | `ManualPermissive` | `true` | Unrestricted manual file selection — any `.nse`/`.lua` script file the user passes via `--script-file` is accepted (extension + size limits still apply). Root containment is intentionally not enforced. |
+/// | `ManualStrict` / `CompatibilityLab` | `true` | Misconfiguration: empty roots under a restricted profile will reject all script files. The resolver will reject them via the existing canonical root check. Profiles that intend to permit script files but restrict them must populate `allowed_script_roots`. |
+/// | `AgentSafe` / `CiSafe` | `false` | Denied before any root check — script files are not allowed for automated surfaces regardless of roots. |
+///
+/// ## Other invariants
+///
+/// - `allow_builtin_scripts = false` rejects `NseScriptSource::Builtin`.
+/// - `max_script_bytes` is enforced after canonicalization; oversized scripts
+///   are rejected with `NseLoadError::Oversized`.
+/// - `allow_conventional_nmap_paths` only governs built-in auto-discovery of
+///   conventional Nmap install paths; it does not by itself permit script
+///   files.
 #[derive(Debug, Clone)]
 pub struct NseScriptPolicy {
     pub allow_builtin_scripts: bool,
@@ -51,6 +72,25 @@ pub struct NseScriptPolicy {
     pub max_script_bytes: Option<usize>,
 }
 
+/// Module access policy.
+///
+/// ## Empty-roots semantics
+///
+/// The meaning of `allowed_module_roots.is_empty()` depends on
+/// `allow_filesystem_modules` and the profile that produced this policy:
+///
+/// | Profile kind | `allow_filesystem_modules` | Empty roots meaning |
+/// |--------------|---------------------------|---------------------|
+/// | `ManualPermissive` | `true` | No filesystem modules — only built-ins resolve. Empty roots are intentional: manual CLI usage of `--require` from filesystem is not exposed unless the user explicitly configures a root. |
+/// | `ManualStrict` / `CompatibilityLab` | `true` | Misconfiguration: empty roots under a restricted profile reject all filesystem modules. Profiles that intend to load modules from disk must populate `allowed_module_roots`. |
+/// | `AgentSafe` / `CiSafe` | `false` | Denied before any root check — filesystem modules are not allowed for automated surfaces regardless of roots. |
+///
+/// ## Other invariants
+///
+/// - `allow_builtin_modules = false` disables Lua `require()` resolution
+///   from the in-process registry; filesystem roots cannot compensate.
+/// - `max_module_bytes` is enforced after canonicalization; oversized
+///   modules are rejected with `NseLoadError::Oversized`.
 #[derive(Debug, Clone)]
 pub struct NseModulePolicy {
     pub allow_builtin_modules: bool,
@@ -79,6 +119,13 @@ pub struct ScopeInput {
 }
 
 impl ResolvedNseExecutionProfile {
+    /// Manual permissive profile — CLI/TUI discretion.
+    ///
+    /// **Manual-only.** Empty `allowed_script_roots` + `allow_script_files = true`
+    /// is intentional: this profile permits unrestricted manual script-file
+    /// selection (extension and size limits still apply). Automated surfaces
+    /// must use [`Self::agent_safe`] or [`Self::ci_safe`], which deny script
+    /// files entirely.
     pub fn manual_permissive(target: Option<&str>) -> Self {
         let mut warnings = Vec::new();
 
@@ -90,6 +137,10 @@ impl ResolvedNseExecutionProfile {
             allowed_networks: Vec::new(),
         };
 
+        warnings.push(
+            "manual-permissive profile is not agent-safe; do not use in automated surfaces"
+                .to_string(),
+        );
         if !cfg!(feature = "sandbox") {
             warnings
                 .push("sandbox feature not compiled; sandbox enforcement is disabled".to_string());

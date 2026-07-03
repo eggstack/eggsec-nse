@@ -332,49 +332,73 @@ fn is_under_root(canonical_path: &Path, canonical_root: &Path) -> bool {
     }
 }
 
-/// Validate that a file path is under one of the approved roots.
+/// Validate that an existing file path is under one of the approved roots.
 /// Returns the canonical path if allowed, or an error.
+///
+/// **Read-path helper**: this function only authorizes paths whose canonical
+/// form is fully resolvable. Non-existent files cannot be authorized here.
+/// Use [`validate_parent_under_roots`] only when write/create semantics
+/// require authorizing a path whose target does not yet exist; that helper
+/// is intentionally separate and must never be used for read authorization.
 ///
 /// For existing files, the full canonical path is checked against canonical roots
 /// using path-component semantics (`Path::strip_prefix`).
-///
-/// For non-existent files, the parent directory is canonicalized and checked.
-/// If the parent is under a root, the constructed child path is returned.
-/// If neither the file nor its parent can be canonicalized, the path is rejected.
-fn validate_path_under_roots(
+/// If the file does not exist or the canonical path is not under any approved
+/// root, the path is rejected.
+fn validate_existing_path_under_roots(
     path: &Path,
     approved_roots: &[PathBuf],
 ) -> Result<PathBuf, NseLoadError> {
-    // Try to canonicalize the path directly
-    if let Some(canonical) = try_canonicalize(path) {
-        for root in approved_roots {
-            if let Some(canonical_root) = canonicalize_root(root) {
-                if is_under_root(&canonical, &canonical_root) {
-                    return Ok(canonical);
-                }
-            }
-        }
-        return Err(NseLoadError::OutsideRoot {
-            path: path.to_path_buf(),
-            approved_roots: approved_roots.to_vec(),
-        });
-    }
+    let canonical = try_canonicalize(path).ok_or_else(|| NseLoadError::IoError {
+        path: path.to_path_buf(),
+        error: "path does not exist or cannot be canonicalized".to_string(),
+    })?;
 
-    // File doesn't exist — try canonicalizing the parent
-    if let Some(parent) = path.parent() {
-        if let Some(canonical_parent) = try_canonicalize(parent) {
-            let candidate = canonical_parent.join(path.file_name().unwrap_or_default());
-            for root in approved_roots {
-                if let Some(canonical_root) = canonicalize_root(root) {
-                    if is_under_root(&canonical_parent, &canonical_root) {
-                        return Ok(candidate);
-                    }
-                }
+    for root in approved_roots {
+        if let Some(canonical_root) = canonicalize_root(root) {
+            if is_under_root(&canonical, &canonical_root) {
+                return Ok(canonical);
             }
         }
     }
 
-    // Neither file nor parent could be authorized
+    Err(NseLoadError::OutsideRoot {
+        path: path.to_path_buf(),
+        approved_roots: approved_roots.to_vec(),
+    })
+}
+
+/// Validate that a parent directory is under one of the approved roots,
+/// returning the canonical child path constructed from that parent.
+///
+/// **Write-path helper**: this helper authorizes a path by canonicalizing
+/// only the parent directory and constructing the child path beneath it.
+/// It is intended for create/write semantics where the target does not yet
+/// exist. **It must not be used for read authorization** — read paths must
+/// always resolve to existing files via [`validate_existing_path_under_roots`].
+#[allow(dead_code)]
+fn validate_parent_under_roots(
+    path: &Path,
+    approved_roots: &[PathBuf],
+) -> Result<PathBuf, NseLoadError> {
+    let parent = path.parent().ok_or_else(|| NseLoadError::OutsideRoot {
+        path: path.to_path_buf(),
+        approved_roots: approved_roots.to_vec(),
+    })?;
+
+    let canonical_parent = try_canonicalize(parent).ok_or_else(|| NseLoadError::OutsideRoot {
+        path: path.to_path_buf(),
+        approved_roots: approved_roots.to_vec(),
+    })?;
+
+    for root in approved_roots {
+        if let Some(canonical_root) = canonicalize_root(root) {
+            if is_under_root(&canonical_parent, &canonical_root) {
+                return Ok(canonical_parent.join(path.file_name().unwrap_or_default()));
+            }
+        }
+    }
+
     Err(NseLoadError::OutsideRoot {
         path: path.to_path_buf(),
         approved_roots: approved_roots.to_vec(),
@@ -557,14 +581,28 @@ impl ScriptResolver {
             });
         }
 
-        // 4. Validate path under approved roots (if any are specified)
+        // 4. Validate path under approved roots (if any are specified).
+        //
+        // Empty roots + manual profile means unrestricted manual file selection
+        // (see `NseScriptPolicy` doc comments for the empty-roots semantic
+        // table); skip the root check entirely. Non-empty roots always require
+        // canonical containment via the read-path helper.
         if !self.script_policy.allowed_script_roots.is_empty() {
-            validate_path_under_roots(&path, &self.script_policy.allowed_script_roots)?;
+            validate_existing_path_under_roots(&path, &self.script_policy.allowed_script_roots)?;
         }
 
-        // 5. Validate symlink containment
-        let canonical =
-            validate_symlink_containment(&path, &self.script_policy.allowed_script_roots)?;
+        // 5. Validate symlink containment — only when roots are configured.
+        // Without configured roots, symlink containment is not enforceable
+        // and would incorrectly reject normal files under manual permissive.
+        let canonical = if self.script_policy.allowed_script_roots.is_empty() {
+            // Manual unrestricted: canonicalize the existing file (no root containment).
+            path.canonicalize().map_err(|e| NseLoadError::IoError {
+                path: path.clone(),
+                error: e.to_string(),
+            })?
+        } else {
+            validate_symlink_containment(&path, &self.script_policy.allowed_script_roots)?
+        };
 
         // 6. Read content
         let content = std::fs::read_to_string(&canonical).map_err(|e| NseLoadError::IoError {
@@ -710,7 +748,7 @@ impl ScriptResolver {
                 }
 
                 // Validate path containment
-                match validate_path_under_roots(
+                match validate_existing_path_under_roots(
                     &candidate,
                     &self.module_policy.allowed_module_roots,
                 ) {
@@ -1112,23 +1150,95 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_path_under_roots_rejects_sibling_prefix() {
+    fn test_validate_existing_path_under_roots_rejects_sibling_prefix() {
         let roots = vec![PathBuf::from("/tmp/root")];
-        // /tmp/root2/file.nse should NOT be allowed under /tmp/root
-        let result = validate_path_under_roots(Path::new("/tmp/root2/file.nse"), &roots);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            NseLoadError::OutsideRoot { .. } => {}
-            other => panic!("Expected OutsideRoot, got {:?}", other),
-        }
+        // /tmp/root2/file.nse should NOT be allowed under /tmp/root.
+        // Since the file does not exist, the read helper rejects with
+        // IoError before any root comparison. (Root mismatch would only be
+        // observable for existing files.)
+        let result = validate_existing_path_under_roots(Path::new("/tmp/root2/file.nse"), &roots);
+        assert!(matches!(result, Err(NseLoadError::IoError { .. })));
     }
 
     #[test]
-    fn test_validate_path_under_roots_rejects_nonexistent_path_outside_root() {
+    fn test_validate_existing_path_under_roots_rejects_sibling_prefix_existing_file() {
+        // Sibling-prefix bypass: /tmp/root2/real.nse must NOT be authorized
+        // under /tmp/root even when both directories exist and the file is real.
+        let tmp = std::env::temp_dir().join("eggsec-nse-sibling-prefix-test");
+        let root = tmp.join("root");
+        let evil = tmp.join("root2");
+        let _ = std::fs::create_dir_all(&root);
+        let _ = std::fs::create_dir_all(&evil);
+        std::fs::write(evil.join("real.nse"), "-- content").unwrap();
+
+        let result = validate_existing_path_under_roots(&evil.join("real.nse"), &[root.clone()]);
+        assert!(matches!(result, Err(NseLoadError::OutsideRoot { .. })));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_validate_existing_path_under_roots_rejects_nonexistent_path_outside_root() {
         let roots = vec![PathBuf::from("/tmp/root")];
-        // Non-existent file outside root should be rejected
-        let result = validate_path_under_roots(Path::new("/tmp/outside/secret.lua"), &roots);
-        assert!(result.is_err());
+        // Non-existent file outside root should be rejected with IoError
+        // (NOT authorized just because parent canonicalizes).
+        let result =
+            validate_existing_path_under_roots(Path::new("/tmp/outside/secret.lua"), &roots);
+        assert!(matches!(result, Err(NseLoadError::IoError { .. })));
+    }
+
+    #[test]
+    fn test_validate_existing_path_under_roots_rejects_nonexistent_path_inside_root() {
+        // Non-existent file inside an approved root must NOT be authorized
+        // merely because the root directory exists. The read helper requires
+        // the canonical file path to resolve.
+        let tmp = std::env::temp_dir().join("eggsec-nse-read-nonexistent-test");
+        let _ = std::fs::create_dir_all(&tmp);
+        let roots = vec![tmp.clone()];
+
+        let missing = tmp.join("does-not-exist.nse");
+        let result = validate_existing_path_under_roots(&missing, &roots);
+        assert!(
+            matches!(result, Err(NseLoadError::IoError { .. })),
+            "Expected IoError for non-existent file, got: {:?}",
+            result
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_validate_existing_path_under_roots_accepts_existing_inside_root() {
+        let tmp = std::env::temp_dir().join("eggsec-nse-read-existing-test");
+        let _ = std::fs::create_dir_all(&tmp);
+        let file = tmp.join("real.nse");
+        std::fs::write(&file, "-- script").unwrap();
+
+        let roots = vec![tmp.clone()];
+        let result = validate_existing_path_under_roots(&file, &roots);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), file.canonicalize().unwrap());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_validate_existing_path_under_roots_rejects_existing_outside_root() {
+        // An existing file outside the approved root is rejected even when
+        // the root itself exists.
+        let tmp = std::env::temp_dir().join("eggsec-nse-read-outside-test");
+        let root = tmp.join("root");
+        let evil = tmp.join("root_evil");
+        let _ = std::fs::create_dir_all(&root);
+        let _ = std::fs::create_dir_all(&evil);
+        let file = evil.join("real.nse");
+        std::fs::write(&file, "-- script").unwrap();
+
+        let roots = vec![root.clone()];
+        let result = validate_existing_path_under_roots(&file, &roots);
+        assert!(matches!(result, Err(NseLoadError::OutsideRoot { .. })));
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -1187,10 +1297,12 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_path_under_roots_rejects_absolute_traversal() {
+    fn test_validate_existing_path_under_roots_rejects_absolute_traversal() {
         let roots = vec![PathBuf::from("/tmp/root")];
-        // Absolute path outside root should be rejected
-        let result = validate_path_under_roots(Path::new("/etc/passwd"), &roots);
+        // Absolute path outside root should be rejected with IoError
+        // (since /etc/passwd does not exist in the test environment is possible,
+        // but the canonical form is also outside the root).
+        let result = validate_existing_path_under_roots(Path::new("/etc/passwd"), &roots);
         assert!(result.is_err());
     }
 

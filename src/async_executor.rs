@@ -78,7 +78,13 @@ impl AsyncNseExecutor {
             mlua::Error::RuntimeError(format!("Failed to create tokio runtime: {}", e))
         })?;
         Ok(Self {
-            core: ExecutorCore::with_policy(sandbox, limits, cancellation, script_policy, module_policy)?,
+            core: ExecutorCore::with_policy(
+                sandbox,
+                limits,
+                cancellation,
+                script_policy,
+                module_policy,
+            )?,
             runtime: Some(runtime),
             owns_runtime: true,
         })
@@ -94,7 +100,13 @@ impl AsyncNseExecutor {
         runtime: Runtime,
     ) -> LuaResult<Self> {
         Ok(Self {
-            core: ExecutorCore::with_policy(sandbox, limits, cancellation, script_policy, module_policy)?,
+            core: ExecutorCore::with_policy(
+                sandbox,
+                limits,
+                cancellation,
+                script_policy,
+                module_policy,
+            )?,
             runtime: Some(runtime),
             owns_runtime: false,
         })
