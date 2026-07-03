@@ -43,6 +43,11 @@ All NSE library files now use `rustc_hash::FxHashMap`/`FxHashSet` for consistenc
 - **Sandbox enforcement**: UDP sendto is sandboxed via `connect_udp()` host check
 - **Mutex poisoning**: Use `.unwrap_or_else(|e| e.into_inner())` for graceful handling
 - **Async on sync RwLock**: parking_lot RwLock is synchronous - don't use `.await`
+- **Execution limits**: `NseExecutionLimits` in `limits.rs` bounds wall-clock time, instruction count, output size, script size, and resource usage. Luau `set_interrupt` hook enforces limits cooperatively during execution.
+- **Cancellation**: `NseCancellationToken` wraps `Arc<AtomicBool>` for cooperative cancellation. Check `is_cancelled()` in hooks and before starting work.
+- **Resource counters**: `NseResourceCounters` tracks network/filesystem operations and bytes. Updated by library wrappers; snapshot via `execution_stats()`.
+- **Hook API**: mlua 0.11.6 uses Luau — `set_interrupt()` for interrupt hooks, NOT `set_hook()`. `remove_hook()` is `#[cfg(not(feature = "luau"))]` — unavailable for Luau.
+- **parking_lot::Mutex**: Returns `MutexGuard` directly from `lock()`, no `Result` wrapping.
 
 ## Known Issues (Pending Fix)
 

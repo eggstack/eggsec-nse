@@ -245,6 +245,8 @@ pub mod cve;
 pub mod executor;
 #[cfg(feature = "nse")]
 pub mod executor_core;
+#[cfg(feature = "nse")]
+pub mod limits;
 pub mod output;
 #[cfg(feature = "nse")]
 pub mod public_api;
@@ -260,6 +262,11 @@ pub use executor::NseExecutor;
 pub use executor_core::ExecutorCore;
 #[cfg(feature = "nse")]
 pub use executor_core::SandboxMetrics;
+#[cfg(feature = "nse")]
+pub use limits::{
+    NseCancellationToken, NseExecutionLimits, NseExecutionStats, NseLimitViolation,
+    NseResourceCounters,
+};
 
 #[cfg(feature = "nse")]
 pub async fn run_cli(config: NseConfig) -> anyhow::Result<()> {

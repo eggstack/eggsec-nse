@@ -8,6 +8,7 @@ use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 
 use crate::executor_core::ExecutorCore;
+use crate::limits::{NseCancellationToken, NseExecutionLimits, NseExecutionStats};
 use crate::SandboxMetrics;
 
 pub struct NseExecutor {
@@ -33,6 +34,21 @@ impl NseExecutor {
             tracing::warn!("Failed to set NSE target '{}': {}", target, e);
         }
         Ok(exec)
+    }
+
+    /// Create an executor with explicit execution limits and cancellation token.
+    ///
+    /// This is the preferred constructor for all surfaces. Use
+    /// `NseExecutionLimits::manual_defaults()` for interactive use or
+    /// `NseExecutionLimits::automated_defaults()` for MCP/agent/REST/daemon.
+    pub fn with_policy(
+        sandbox: crate::SandboxConfig,
+        limits: NseExecutionLimits,
+        cancellation: NseCancellationToken,
+    ) -> LuaResult<Self> {
+        Ok(Self {
+            core: ExecutorCore::with_policy(sandbox, limits, cancellation)?,
+        })
     }
 
     // Delegate core accessors
@@ -66,43 +82,67 @@ impl NseExecutor {
     pub fn run_script(&self, script: &str) -> LuaResult<String> {
         self.core.run_script(script)
     }
+
+    /// Run a script with the configured execution limits.
+    ///
+    /// This is the primary execution method. Limits are enforced during
+    /// execution via a Lua debug hook (instruction budget, wall-clock)
+    /// and pre-execution checks (script size, cancellation).
+    pub fn run_script_with_limits(&self, script: &str) -> LuaResult<String> {
+        self.core.run_script(script)
+    }
+
+    /// Run a script with a wall-clock timeout.
+    ///
+    /// This method is **deprecated** in favor of `run_script_with_limits()`.
+    /// The timeout is now enforced via the execution limits model, which
+    /// actually interrupts the Lua VM when the timeout expires (unlike the
+    /// old behavior where a spawned thread continued running).
+    ///
+    /// For new code, use `NseExecutor::with_policy()` with
+    /// `NseExecutionLimits { wall_clock_timeout: Some(timeout), .. }` and
+    /// call `run_script_with_limits()`.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use with_policy() + run_script_with_limits() for real cancellation"
+    )]
     pub fn run_script_with_timeout(
         &self,
         script: &str,
         timeout: std::time::Duration,
     ) -> LuaResult<String> {
-        let script = script.to_string();
-        let sandbox = self.core.sandbox.clone();
-        let target = self.target().to_string();
-        let script_paths = self.core.scripts_path.lock().clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        std::thread::spawn(move || {
-            let result = (|| -> LuaResult<String> {
-                let mut exec = NseExecutor::with_sandbox(sandbox)?;
-                if let Err(e) = exec.set_target(&target) {
-                    tracing::warn!("Failed to set NSE target '{}': {}", target, e);
-                }
-                for path in script_paths {
-                    exec.add_scripts_path(path);
-                }
-                exec.run_script(&script)
-            })();
-            if let Err(e) = tx.send(result.map(|v| v.to_string()).map_err(|e| e.to_string())) {
-                tracing::warn!("Failed to send NSE script result: {}", e);
-            }
-        });
-
-        match rx.recv_timeout(timeout) {
-            Ok(Ok(result)) => Ok(result),
-            Ok(Err(e)) => Err(mlua::Error::RuntimeError(e)),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(mlua::Error::RuntimeError(
-                "Script execution timed out".into(),
-            )),
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(mlua::Error::RuntimeError(
-                "Script execution thread crashed".into(),
-            )),
+        let limits = NseExecutionLimits {
+            wall_clock_timeout: Some(timeout),
+            ..NseExecutionLimits::default()
+        };
+        let cancellation = self.core.cancellation_token().clone();
+        let mut exec = NseExecutor::with_policy(
+            self.core.sandbox.clone(),
+            limits,
+            cancellation,
+        )?;
+        if let Err(e) = exec.set_target(self.target()) {
+            tracing::warn!("Failed to set NSE target '{}': {}", self.target(), e);
         }
+        for path in self.core.scripts_path.lock().iter() {
+            exec.add_scripts_path(path.clone());
+        }
+        exec.run_script_with_limits(script)
+    }
+
+    /// Get the execution stats from the last `run_script` or `run_script_with_limits` call.
+    pub fn execution_stats(&self) -> NseExecutionStats {
+        self.core.execution_stats()
+    }
+
+    /// Get a reference to the cancellation token.
+    pub fn cancellation_token(&self) -> &NseCancellationToken {
+        self.core.cancellation_token()
+    }
+
+    /// Get a reference to the execution limits.
+    pub fn limits(&self) -> &NseExecutionLimits {
+        self.core.limits()
     }
     pub fn load_script(&self, name: &str) -> LuaResult<String> {
         self.core.load_script(name)

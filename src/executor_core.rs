@@ -9,8 +9,14 @@ use parking_lot::Mutex;
 use rustc_hash::FxHashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use std::time::Instant;
 
 use crate::libraries::shared;
+use crate::limits::{
+    NseCancellationToken, NseExecutionLimits, NseLimitViolation, NseExecutionStats,
+    NseResourceCounters,
+};
 
 #[derive(Debug, Clone, Default)]
 pub struct SandboxMetrics {
@@ -32,6 +38,12 @@ pub struct ExecutorCore {
     pub(crate) output: Mutex<Vec<String>>,
     pub(crate) registry: Mutex<FxHashMap<String, Value>>,
     pub(crate) sandbox: crate::SandboxConfig,
+    pub(crate) limits: NseExecutionLimits,
+    pub(crate) cancellation: NseCancellationToken,
+    pub(crate) resource_counters: Arc<NseResourceCounters>,
+    pub(crate) execution_start: Arc<Mutex<Option<Instant>>>,
+    pub(crate) lua_instruction_count: Arc<std::sync::atomic::AtomicU64>,
+    pub(crate) limit_violation: Arc<Mutex<Option<NseLimitViolation>>>,
 }
 
 impl ExecutorCore {
@@ -40,10 +52,24 @@ impl ExecutorCore {
     }
 
     pub fn with_sandbox(sandbox: crate::SandboxConfig) -> LuaResult<Self> {
+        Self::with_policy(sandbox, NseExecutionLimits::default(), NseCancellationToken::new())
+    }
+
+    /// Create an executor core with explicit execution limits and cancellation token.
+    ///
+    /// This is the canonical constructor. Automated surfaces (MCP, agent, REST)
+    /// should use `NseExecutionLimits::automated_defaults()` or stricter.
+    /// Manual/interactive use should use `NseExecutionLimits::manual_defaults()`.
+    pub fn with_policy(
+        sandbox: crate::SandboxConfig,
+        limits: NseExecutionLimits,
+        cancellation: NseCancellationToken,
+    ) -> LuaResult<Self> {
         let lua = Lua::new();
         let scripts_path = Arc::new(Mutex::new(vec![]));
         let output = Mutex::new(vec![]);
         let registry = Mutex::new(FxHashMap::default());
+        let resource_counters = Arc::new(NseResourceCounters::new());
 
         let core = Self {
             lua,
@@ -52,6 +78,12 @@ impl ExecutorCore {
             output,
             registry,
             sandbox,
+            limits,
+            cancellation,
+            resource_counters,
+            execution_start: Arc::new(Mutex::new(None)),
+            lua_instruction_count: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            limit_violation: Arc::new(Mutex::new(None)),
         };
 
         core.setup_globals()?;
@@ -126,6 +158,27 @@ impl ExecutorCore {
     }
 
     pub fn add_output(&self, output: String) -> Result<(), String> {
+        let output_bytes = output.len();
+
+        // Check output size limit
+        if let Some(max_output) = self.limits.max_output_bytes {
+            let current = self
+                .resource_counters
+                .output_bytes
+                .load(Ordering::Relaxed) as usize;
+            if current + output_bytes > max_output {
+                *self.limit_violation.lock() = Some(NseLimitViolation::OutputLimitExceeded);
+                return Err(format!(
+                    "Output limit exceeded: {} + {} > {} bytes",
+                    current, output_bytes, max_output
+                ));
+            }
+        }
+
+        self.resource_counters
+            .output_bytes
+            .fetch_add(output_bytes as u64, Ordering::Relaxed);
+
         let mut out = self.output.lock();
         out.push(output.clone());
         if let Ok(script_output) = self.lua.globals().get::<Table>("_SCRIPT_OUTPUT") {
@@ -173,7 +226,60 @@ impl ExecutorCore {
     }
 
     pub fn run_script(&self, script: &str) -> LuaResult<String> {
-        match self.lua.load(script).eval::<Value>() {
+        // Pre-check script size limit
+        if let Err(violation) = self.limits.check_script_size(script.len()) {
+            *self.limit_violation.lock() = Some(violation.clone());
+            return Err(mlua::Error::RuntimeError(format!(
+                "NSE limit violated: {}",
+                violation
+            )));
+        }
+
+        // Check cancellation before starting
+        if self.cancellation.is_cancelled() {
+            *self.limit_violation.lock() = Some(NseLimitViolation::ExplicitCancellation);
+            return Err(mlua::Error::RuntimeError(
+                "Script execution cancelled".into(),
+            ));
+        }
+
+        // Reset counters and record start time
+        *self.execution_start.lock() = Some(Instant::now());
+        self.lua_instruction_count
+            .store(0, Ordering::Relaxed);
+        self.resource_counters
+            .network_operations
+            .store(0, Ordering::Relaxed);
+        self.resource_counters
+            .network_bytes_read
+            .store(0, Ordering::Relaxed);
+        self.resource_counters
+            .network_bytes_written
+            .store(0, Ordering::Relaxed);
+        self.resource_counters
+            .filesystem_operations
+            .store(0, Ordering::Relaxed);
+        self.resource_counters
+            .filesystem_bytes_read
+            .store(0, Ordering::Relaxed);
+        self.resource_counters
+            .output_bytes
+            .store(0, Ordering::Relaxed);
+
+        // Install debug hook for cooperative limit enforcement
+        self.setup_execution_hook();
+
+        let result = self.lua.load(script).eval::<Value>();
+
+        // Check if a limit was violated during execution
+        if let Some(violation) = self.limit_violation.lock().take() {
+            return Err(mlua::Error::RuntimeError(format!(
+                "NSE limit violated: {}",
+                violation
+            )));
+        }
+
+        match result {
             Ok(result) => {
                 if let Ok(output) = self.get_script_output() {
                     if !output.is_empty() {
@@ -190,6 +296,83 @@ impl ExecutorCore {
                 e
             ))),
         }
+    }
+
+    /// Install a Luau interrupt that periodically checks execution limits.
+    ///
+    /// The interrupt fires periodically (Luau guarantees "eventually", typically
+    /// at function calls or loop iterations). On each firing it checks:
+    /// - Cancellation token
+    /// - Wall-clock deadline
+    /// - Lua instruction budget
+    fn setup_execution_hook(&self) {
+        let cancellation = self.cancellation.clone();
+        let deadline = self.limits.wall_clock_timeout.map(|d| {
+            let guard = self.execution_start.lock();
+            (*guard).unwrap_or_else(Instant::now) + d
+        });
+        let instruction_budget = self.limits.lua_instruction_budget;
+        let instruction_counter = self.lua_instruction_count.clone();
+        let violation = self.limit_violation.clone();
+
+        self.lua.set_interrupt(move |_lua| {
+            let count = instruction_counter.fetch_add(1, Ordering::Relaxed) + 1;
+
+            // Check cancellation
+            if cancellation.is_cancelled() {
+                *violation.lock() = Some(NseLimitViolation::ExplicitCancellation);
+                return Err(mlua::Error::RuntimeError(
+                    "Script execution cancelled".into(),
+                ));
+            }
+
+            // Check wall-clock deadline
+            if let Some(deadline) = deadline {
+                if Instant::now() >= deadline {
+                    *violation.lock() = Some(NseLimitViolation::WallClockTimeout);
+                    return Err(mlua::Error::RuntimeError(
+                        "Script execution timed out".into(),
+                    ));
+                }
+            }
+
+            // Check instruction budget
+            if let Some(budget) = instruction_budget {
+                if count >= budget {
+                    *violation.lock() = Some(NseLimitViolation::LuaInstructionBudgetExceeded);
+                    return Err(mlua::Error::RuntimeError(
+                        "Lua instruction budget exceeded".into(),
+                    ));
+                }
+            }
+
+            Ok(mlua::VmState::Continue)
+        });
+    }
+
+    /// Get the current execution stats snapshot.
+    pub fn execution_stats(&self) -> NseExecutionStats {
+        let guard = self.execution_start.lock();
+        let elapsed = (*guard).map(|s| s.elapsed()).unwrap_or_default();
+        let instructions = self.lua_instruction_count.load(Ordering::Relaxed);
+        let mut stats = self.resource_counters.snapshot(elapsed, instructions);
+        stats.limit_violation = self.limit_violation.lock().clone();
+        stats
+    }
+
+    /// Get a reference to the execution limits.
+    pub fn limits(&self) -> &NseExecutionLimits {
+        &self.limits
+    }
+
+    /// Get a reference to the cancellation token.
+    pub fn cancellation_token(&self) -> &NseCancellationToken {
+        &self.cancellation
+    }
+
+    /// Get a reference to the resource counters.
+    pub fn resource_counters(&self) -> &NseResourceCounters {
+        &self.resource_counters
     }
 
     pub fn load_script(&self, name: &str) -> LuaResult<String> {

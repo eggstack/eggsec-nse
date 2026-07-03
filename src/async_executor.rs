@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use tokio::runtime::Runtime;
 
 use crate::executor_core::ExecutorCore;
+use crate::limits::{NseCancellationToken, NseExecutionLimits, NseExecutionStats};
 use crate::SandboxMetrics;
 
 /// Async NSE Executor with tokio runtime support.
@@ -62,6 +63,38 @@ impl AsyncNseExecutor {
         })
     }
 
+    /// Create an async executor with explicit execution limits and cancellation token.
+    ///
+    /// This is the preferred constructor for automated surfaces.
+    pub fn with_policy(
+        sandbox: crate::SandboxConfig,
+        limits: NseExecutionLimits,
+        cancellation: NseCancellationToken,
+    ) -> LuaResult<Self> {
+        let runtime = Runtime::new().map_err(|e| {
+            mlua::Error::RuntimeError(format!("Failed to create tokio runtime: {}", e))
+        })?;
+        Ok(Self {
+            core: ExecutorCore::with_policy(sandbox, limits, cancellation)?,
+            runtime: Some(runtime),
+            owns_runtime: true,
+        })
+    }
+
+    /// Create async executor with policy on an externally-managed runtime.
+    pub fn with_policy_and_runtime(
+        sandbox: crate::SandboxConfig,
+        limits: NseExecutionLimits,
+        cancellation: NseCancellationToken,
+        runtime: Runtime,
+    ) -> LuaResult<Self> {
+        Ok(Self {
+            core: ExecutorCore::with_policy(sandbox, limits, cancellation)?,
+            runtime: Some(runtime),
+            owns_runtime: false,
+        })
+    }
+
     /// Set the target host.
     pub fn set_target(&mut self, target: &str) {
         self.core.set_target(target).ok();
@@ -80,6 +113,26 @@ impl AsyncNseExecutor {
     /// Run an NSE script synchronously.
     pub fn run_script(&self, script: &str) -> LuaResult<String> {
         self.core.run_script(script)
+    }
+
+    /// Run a script with the configured execution limits.
+    pub fn run_script_with_limits(&self, script: &str) -> LuaResult<String> {
+        self.core.run_script(script)
+    }
+
+    /// Get the execution stats from the last run.
+    pub fn execution_stats(&self) -> NseExecutionStats {
+        self.core.execution_stats()
+    }
+
+    /// Get a reference to the cancellation token.
+    pub fn cancellation_token(&self) -> &NseCancellationToken {
+        self.core.cancellation_token()
+    }
+
+    /// Get a reference to the execution limits.
+    pub fn limits(&self) -> &NseExecutionLimits {
+        self.core.limits()
     }
 
     /// Get access to the underlying Lua VM.
