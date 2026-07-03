@@ -50,6 +50,7 @@ All NSE library files now use `rustc_hash::FxHashMap`/`FxHashSet` for consistenc
 - **parking_lot::Mutex**: Returns `MutexGuard` directly from `lock()`, no `Result` wrapping.
 - **Execution Profiles**: `profile.rs` provides `NseExecutionProfileKind` (5 variants), `ResolvedNseExecutionProfile`, `ScopeInput`, and policy types. Profiles resolve into `SandboxConfig`, `NseExecutionLimits`, script/module/network policy, and audit metadata. Constructors: `manual_permissive`, `manual_strict`, `agent_safe`, `ci_safe`, `compatibility_lab`. CLI handler uses `ManualPermissive` by default.
 - **Profile-Aware Execution**: `run_cli_with_profile(config, Option<ResolvedNseExecutionProfile>)` in `lib.rs` is the profile-aware entry point. Falls back to `manual_permissive` when `None`. Validates script file policy, creates executor via `NseExecutor::with_policy()`, includes profile metadata in JSON output.
+- **Script/Module Resolver**: `resolver.rs` provides `ScriptResolver` which enforces profile-derived script/module policies, strict module-name grammar, canonical path validation, symlink-aware containment, file extension allowlists, size limits, and structured diagnostics. All script and module loading flows through the resolver. Types: `NseScriptSource`, `NseModuleName`, `ResolvedNseScript`, `ResolvedNseModule`, `NseLoadError`, `NseLoadDiagnostic`. Validation function: `validate_nse_module_name()`.
 
 ## Known Issues (Pending Fix)
 
@@ -62,6 +63,7 @@ All NSE library files now use `rustc_hash::FxHashMap`/`FxHashSet` for consistenc
 4. **LazyLock Initialization Contention**: `WAF_SIGNATURES` LazyLock in the main eggsec crate may have thread contention during first access in multi-threaded context.
 
 5. **Dead Code Files**: `peg_parser.rs` and `pest_bridge.rs` exist in `src/libraries/` but are not declared in `mod.rs` and never compiled. They may be leftover from development or intended for future use.
+6. ~~**Direct filesystem reads in NSE execution paths**~~ FIXED - Phase 03: All script/module loading now flows through `ScriptResolver` which enforces policy, path containment, size limits, and module name grammar. Direct `std::fs::read_to_string` in execution paths has been eliminated.
 
 ## Dependencies
 

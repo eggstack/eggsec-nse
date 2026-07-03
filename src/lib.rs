@@ -250,6 +250,7 @@ pub mod output;
 pub mod profile;
 #[cfg(feature = "nse")]
 pub mod public_api;
+pub mod resolver;
 
 #[cfg(feature = "nse")]
 pub mod libraries;
@@ -271,6 +272,11 @@ pub use limits::{
 pub use profile::{
     NseExecutionProfileKind, NseModulePolicy, NseNetworkPolicy, NseScriptPolicy,
     ResolvedNseExecutionProfile, ScopeInput,
+};
+
+pub use resolver::{
+    is_builtin_script, validate_nse_module_name, NseLoadDiagnostic, NseLoadError, NseModuleName,
+    NseScriptSource, ResolvedNseModule, ResolvedNseScript, ScriptResolver,
 };
 
 #[cfg(feature = "nse")]
@@ -306,14 +312,12 @@ pub async fn run_cli_with_profile(
     }
 
     // Validate script file against profile policy
-    if let Some(ref sf) = script_file {
-        if !resolved_profile.script_policy.allow_script_files {
-            anyhow::bail!(
-                "Profile '{}' does not allow arbitrary script files. \
-                 Use built-in scripts only.",
-                resolved_profile.kind
-            );
-        }
+    if script_file.is_some() && !resolved_profile.script_policy.allow_script_files {
+        anyhow::bail!(
+            "Profile '{}' does not allow arbitrary script files. \
+             Use built-in scripts only.",
+            resolved_profile.kind
+        );
     }
 
     println!("Running NSE script '{}' against '{}'", script, target);
@@ -339,10 +343,37 @@ pub async fn run_cli_with_profile(
             .set_script_args(&script_args)
             .map_err(|e| anyhow::anyhow!("Invalid script args: {}", e))?;
 
-        let script_content = if let Some(ref script_file) = script_file {
-            std::fs::read_to_string(script_file)?
-        } else {
-            get_builtin_script(&script)
+        let script_content = {
+            let mut resolver = crate::resolver::ScriptResolver::new(
+                resolved_profile.script_policy.clone(),
+                resolved_profile.module_policy.clone(),
+                resolved_profile.limits.clone(),
+            );
+            if let Some(ref script_file) = script_file {
+                let source = crate::resolver::NseScriptSource::File {
+                    path: std::path::PathBuf::from(script_file),
+                };
+                match resolver.resolve_script(source) {
+                    Ok(resolved) => resolved.content,
+                    Err(e) => {
+                        tracing::error!(error = %e, "Script file resolution failed");
+                        anyhow::bail!("{}", e);
+                    }
+                }
+            } else {
+                let content = get_builtin_script(&script);
+                let source = crate::resolver::NseScriptSource::InlineManual {
+                    label: script.clone(),
+                    content: content.clone(),
+                };
+                match resolver.resolve_script(source) {
+                    Ok(_) => content,
+                    Err(e) => {
+                        tracing::error!(error = %e, "Built-in script resolution failed");
+                        anyhow::bail!("{}", e);
+                    }
+                }
+            }
         };
 
         let result = executor

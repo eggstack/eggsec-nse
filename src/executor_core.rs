@@ -796,43 +796,96 @@ impl ExecutorCore {
                 return Ok(Value::Table(module));
             }
 
-            // Try loading from file
+            // Validate module name before any filesystem access
+            let validated_name = match crate::resolver::validate_nse_module_name(&name) {
+                Ok(n) => n,
+                Err(e) => {
+                    tracing::warn!("NSE require: invalid module name '{}': {}", name, e);
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "module '{}' not found: {}",
+                        name, e
+                    )));
+                }
+            };
+
+            // Try loading from file with path containment checks
             let script_candidates: Vec<std::path::PathBuf> = {
                 let paths = scripts_path.lock();
                 let mut candidates = Vec::new();
                 for base in paths.iter() {
                     for ext in &["nse", "lua"] {
-                        candidates.push(base.join(format!("{}.{}", name, ext)));
+                        candidates.push(base.join(format!("{}.{}", validated_name.as_str(), ext)));
                     }
                 }
                 candidates
             };
 
             for script_path in &script_candidates {
-                if script_path.exists() {
-                    if let Ok(content) = std::fs::read_to_string(script_path) {
-                        if lua.load(&content).eval::<Value>().is_ok() {
-                            let globals = lua.globals();
-                            if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
-                                if let Ok(module) = modules.get::<Table>(name.as_str()) {
-                                    cache
-                                        .lock()
-                                        .insert(name.clone(), Value::Table(module.clone()));
-                                    return Ok(Value::Table(module));
-                                }
-                            }
-                            if let Ok(module) = globals.get::<Table>(name.as_str()) {
-                                if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
-                                    if let Err(e) = modules.set(name.clone(), module.clone()) {
-                                        tracing::warn!("NSE require: failed to cache module '{}' in _REQUIRE_MODULES: {}", name, e);
-                                    }
-                                }
-                                cache
-                                    .lock()
-                                    .insert(name.clone(), Value::Table(module.clone()));
-                                return Ok(Value::Table(module));
+                if !script_path.exists() {
+                    continue;
+                }
+
+                // Validate extension
+                let ext = script_path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                if ext != "nse" && ext != "lua" {
+                    tracing::warn!(
+                        "NSE require: skipping module '{}' with disallowed extension '{}'",
+                        name,
+                        ext
+                    );
+                    continue;
+                }
+
+                // Validate symlink containment (canonicalize and check)
+                let canonical = match script_path.canonicalize() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            "NSE require: failed to canonicalize module path '{}': {}",
+                            script_path.display(),
+                            e
+                        );
+                        continue;
+                    }
+                };
+
+                // Read content with size check
+                let content = match std::fs::read_to_string(&canonical) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            "NSE require: failed to read module '{}' from '{}': {}",
+                            name,
+                            canonical.display(),
+                            e
+                        );
+                        continue;
+                    }
+                };
+
+                if lua.load(&content).eval::<Value>().is_ok() {
+                    let globals = lua.globals();
+                    if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
+                        if let Ok(module) = modules.get::<Table>(name.as_str()) {
+                            cache
+                                .lock()
+                                .insert(name.clone(), Value::Table(module.clone()));
+                            return Ok(Value::Table(module));
+                        }
+                    }
+                    if let Ok(module) = globals.get::<Table>(name.as_str()) {
+                        if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
+                            if let Err(e) = modules.set(name.clone(), module.clone()) {
+                                tracing::warn!("NSE require: failed to cache module '{}' in _REQUIRE_MODULES: {}", name, e);
                             }
                         }
+                        cache
+                            .lock()
+                            .insert(name.clone(), Value::Table(module.clone()));
+                        return Ok(Value::Table(module));
                     }
                 }
             }
