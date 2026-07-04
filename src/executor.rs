@@ -469,6 +469,39 @@ impl NseExecutor {
 
         categories
     }
+
+    /// Build a structured run report from post-execution state.
+    ///
+    /// Call this after `run_script_with_limits()` or `run_script_with_rules()`
+    /// to assemble a machine-readable report. The caller provides the profile,
+    /// script source, output, and resolver diagnostics that were used during
+    /// execution.
+    pub fn build_report(
+        &self,
+        profile: &crate::profile::ResolvedNseExecutionProfile,
+        script_source: &crate::resolver::NseScriptSource,
+        output: &str,
+        diagnostics: &[crate::resolver::NseLoadDiagnostic],
+    ) -> crate::report::NseRunReport {
+        let stats = self.execution_stats();
+        let script_name = match script_source {
+            crate::resolver::NseScriptSource::Builtin { name } => name.clone(),
+            crate::resolver::NseScriptSource::TrustedRegistry { name } => name.clone(),
+            crate::resolver::NseScriptSource::File { path } => path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("unknown")
+                .to_string(),
+            crate::resolver::NseScriptSource::InlineManual { label, .. } => label.clone(),
+        };
+        crate::report::NseRunReport::new(self.target(), &script_name)
+            .with_profile(profile)
+            .with_script_source(script_source)
+            .with_stats(&stats)
+            .with_resolver_diagnostics(diagnostics)
+            .with_output(output)
+            .compute_compatibility()
+    }
 }
 
 fn parse_nse_categories(path: &std::path::Path) -> Vec<String> {

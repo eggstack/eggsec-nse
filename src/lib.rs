@@ -253,6 +253,8 @@ pub mod output;
 pub mod profile;
 #[cfg(feature = "nse")]
 pub mod public_api;
+#[cfg(feature = "nse")]
+pub mod report;
 pub mod resolver;
 
 #[cfg(feature = "nse")]
@@ -290,6 +292,14 @@ pub use resolver::registry::{
     NseLibraryCategory, NseLibraryDescriptor, NseSandboxSideEffect,
 };
 
+#[cfg(feature = "nse")]
+pub use report::{
+    NseCompatibilitySummary, NseExecutionStatsSummary, NseLibraryUseReport, NseLimitsSummary,
+    NseOutputSummary, NseProfileSummary, NseResolverDiagnosticSummary, NseResolverSummary,
+    NseRuleEvaluationReport, NseRunCompatibilityStatus, NseRunFidelity, NseRunReport,
+    NseSandboxSummary, NseScriptSourceSummary,
+};
+
 /// Compatibility wrapper that defaults to `ManualPermissive` profile.
 ///
 /// # Manual-only
@@ -309,7 +319,6 @@ pub async fn run_cli_with_profile(
     let target = config.target.clone();
     let script = config.script.clone();
     let script_args = config.script_args.clone().unwrap_or_default();
-    let script_args_display = script_args.clone();
     let script_file = config.script_file.clone();
     let json = config.json;
 
@@ -349,8 +358,9 @@ pub async fn run_cli_with_profile(
     let sandbox = resolved_profile.sandbox.clone();
     let limits = resolved_profile.limits.clone();
     let cancellation = crate::limits::NseCancellationToken::new();
+    let report_profile = resolved_profile.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<String> {
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, crate::resolver::NseScriptSource, Vec<crate::resolver::NseLoadDiagnostic>)> {
         let mut executor = NseExecutor::with_policy(
             sandbox,
             limits,
@@ -366,66 +376,65 @@ pub async fn run_cli_with_profile(
             .set_script_args(&script_args)
             .map_err(|e| anyhow::anyhow!("Invalid script args: {}", e))?;
 
-        let script_content = {
-            let mut resolver = crate::resolver::ScriptResolver::new(
-                resolved_profile.script_policy.clone(),
-                resolved_profile.module_policy.clone(),
-                resolved_profile.limits.clone(),
-            );
-            if let Some(ref script_file) = script_file {
-                let source = crate::resolver::NseScriptSource::File {
-                    path: std::path::PathBuf::from(script_file),
-                };
-                match resolver.resolve_script(source) {
-                    Ok(resolved) => resolved.content,
-                    Err(e) => {
-                        tracing::error!(error = %e, "Script file resolution failed");
-                        anyhow::bail!("{}", e);
-                    }
+        let mut resolver = crate::resolver::ScriptResolver::new(
+            resolved_profile.script_policy.clone(),
+            resolved_profile.module_policy.clone(),
+            resolved_profile.limits.clone(),
+        );
+        let (script_content, script_source) = if let Some(ref script_file) = script_file {
+            let source = crate::resolver::NseScriptSource::File {
+                path: std::path::PathBuf::from(script_file),
+            };
+            let src = source.clone();
+            match resolver.resolve_script(source) {
+                Ok(resolved) => (resolved.content, src),
+                Err(e) => {
+                    tracing::error!(error = %e, "Script file resolution failed");
+                    anyhow::bail!("{}", e);
                 }
-            } else {
-                let content = get_builtin_script(&script);
-                let source = crate::resolver::NseScriptSource::InlineManual {
-                    label: script.clone(),
-                    content: content.clone(),
-                };
-                match resolver.resolve_script(source) {
-                    Ok(_) => content,
-                    Err(e) => {
-                        tracing::error!(error = %e, "Built-in script resolution failed");
-                        anyhow::bail!("{}", e);
-                    }
+            }
+        } else {
+            let content = get_builtin_script(&script);
+            let source = crate::resolver::NseScriptSource::InlineManual {
+                label: script.clone(),
+                content: content.clone(),
+            };
+            let src = source.clone();
+            match resolver.resolve_script(source) {
+                Ok(_) => (content, src),
+                Err(e) => {
+                    tracing::error!(error = %e, "Built-in script resolution failed");
+                    anyhow::bail!("{}", e);
                 }
             }
         };
+
+        let diagnostics = resolver.take_diagnostics();
 
         let result = executor
             .run_script(&script_content)
             .map_err(|e| anyhow::anyhow!("Script execution failed: {}", e))?;
 
-        Ok(result)
+        Ok((result, script_source, diagnostics))
     })
     .await
     .map_err(|e| anyhow::anyhow!("Task execution failed: {}", e))??;
 
+    let (output, script_source, diagnostics) = result;
+
     if json {
-        let output = serde_json::json!({
-            "target": config.target,
-            "script": config.script,
-            "script_args": script_args_display,
-            "profile": resolved_profile.kind.to_string(),
-            "sandbox_enabled": resolved_profile.sandbox.enabled,
-            "audit_label": resolved_profile.audit_label,
-            "warnings": resolved_profile.warnings,
-            "output": result,
-            "success": true
-        });
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        let report = crate::report::NseRunReport::new(&config.target, &config.script)
+            .with_profile(&report_profile)
+            .with_script_source(&script_source)
+            .with_resolver_diagnostics(&diagnostics)
+            .with_output(&output)
+            .compute_compatibility();
+        println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
         println!("Target: {}", config.target);
         println!("Script: {}", config.script);
-        println!("Profile: {}", resolved_profile.kind);
-        println!("Result: {}", result);
+        println!("Profile: {}", report_profile.kind);
+        println!("Result: {}", output);
     }
 
     Ok(())
