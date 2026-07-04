@@ -139,8 +139,11 @@ end"#,
     );
 
     let profile = make_profile(ProfileKind::CompatibilityLab, vec![tmp.clone()]);
-    let mut resolver =
-        ScriptResolver::new(profile.script_policy.clone(), profile.module_policy.clone(), profile.limits.clone());
+    let mut resolver = ScriptResolver::new(
+        profile.script_policy.clone(),
+        profile.module_policy.clone(),
+        profile.limits.clone(),
+    );
 
     let source = NseScriptSource::File {
         path: fixture.clone(),
@@ -152,7 +155,9 @@ end"#,
 
     let diagnostics = resolver.take_diagnostics();
     assert!(
-        diagnostics.iter().any(|d| matches!(d, NseLoadDiagnostic::Resolved { .. })),
+        diagnostics
+            .iter()
+            .any(|d| matches!(d, NseLoadDiagnostic::Resolved { .. })),
         "expected Resolved diagnostic"
     );
 
@@ -163,7 +168,10 @@ end"#,
         .with_output("portrule success")
         .compute_compatibility();
 
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Compatible);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Compatible
+    );
     assert_eq!(report.compatibility.fidelity, NseRunFidelity::Full);
     assert!(report.compatibility.unsupported_features.is_empty());
     assert!(report.compatibility.approximations.is_empty());
@@ -197,8 +205,11 @@ end"#,
     );
 
     let profile = make_profile(ProfileKind::CompatibilityLab, vec![tmp.clone()]);
-    let mut resolver =
-        ScriptResolver::new(profile.script_policy.clone(), profile.module_policy.clone(), profile.limits.clone());
+    let mut resolver = ScriptResolver::new(
+        profile.script_policy.clone(),
+        profile.module_policy.clone(),
+        profile.limits.clone(),
+    );
 
     let source = NseScriptSource::File { path: fixture };
     let result = resolver.resolve_script(source.clone());
@@ -212,7 +223,10 @@ end"#,
         .with_output("test-output: value")
         .compute_compatibility();
 
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Compatible);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Compatible
+    );
     assert_eq!(report.compatibility.fidelity, NseRunFidelity::Full);
     assert_eq!(report.resolver.resolved_count, 1);
 
@@ -245,8 +259,11 @@ end"#,
     );
 
     let profile = make_profile(ProfileKind::CompatibilityLab, vec![tmp.clone()]);
-    let mut resolver =
-        ScriptResolver::new(profile.script_policy.clone(), profile.module_policy.clone(), profile.limits.clone());
+    let mut resolver = ScriptResolver::new(
+        profile.script_policy.clone(),
+        profile.module_policy.clone(),
+        profile.limits.clone(),
+    );
 
     let source = NseScriptSource::File { path: fixture };
     let result = resolver.resolve_script(source.clone());
@@ -260,7 +277,10 @@ end"#,
         .with_output("builtin module loaded")
         .compute_compatibility();
 
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Compatible);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Compatible
+    );
     assert_eq!(report.compatibility.fidelity, NseRunFidelity::Full);
     assert_eq!(report.resolver.resolved_count, 1);
 
@@ -288,8 +308,11 @@ end"#,
     );
 
     let profile = make_profile(ProfileKind::CompatibilityLab, vec![tmp.clone()]);
-    let mut resolver =
-        ScriptResolver::new(profile.script_policy.clone(), profile.module_policy.clone(), profile.limits.clone());
+    let mut resolver = ScriptResolver::new(
+        profile.script_policy.clone(),
+        profile.module_policy.clone(),
+        profile.limits.clone(),
+    );
 
     let source = NseScriptSource::File { path: fixture };
     let result = resolver.resolve_script(source.clone());
@@ -303,7 +326,10 @@ end"#,
         .with_output("hostrule success")
         .compute_compatibility();
 
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Compatible);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Compatible
+    );
     assert_eq!(report.compatibility.fidelity, NseRunFidelity::Full);
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -330,8 +356,11 @@ end"#,
     );
 
     let profile = make_profile(ProfileKind::AgentSafe, vec![]);
-    let mut resolver =
-        ScriptResolver::new(profile.script_policy.clone(), profile.module_policy.clone(), profile.limits.clone());
+    let mut resolver = ScriptResolver::new(
+        profile.script_policy.clone(),
+        profile.module_policy.clone(),
+        profile.limits.clone(),
+    );
 
     let source = NseScriptSource::File { path: fixture };
     let result = resolver.resolve_script(source.clone());
@@ -346,7 +375,9 @@ end"#,
 
     let diagnostics = resolver.take_diagnostics();
     assert!(
-        diagnostics.iter().any(|d| matches!(d, NseLoadDiagnostic::Blocked { .. })),
+        diagnostics
+            .iter()
+            .any(|d| matches!(d, NseLoadDiagnostic::Blocked { .. })),
         "expected Blocked diagnostic"
     );
 
@@ -357,7 +388,10 @@ end"#,
         .with_error("script blocked by policy: file scripts not allowed")
         .compute_compatibility();
 
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Failed);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Failed
+    );
     assert_eq!(report.resolver.blocked_count, 1);
 
     let _ = std::fs::remove_dir_all(&tmp);
@@ -370,8 +404,11 @@ end"#,
 #[test]
 fn compatibility_corpus_file_not_found() {
     let profile = make_profile(ProfileKind::CompatibilityLab, vec![]);
-    let mut resolver =
-        ScriptResolver::new(profile.script_policy.clone(), profile.module_policy.clone(), profile.limits.clone());
+    let mut resolver = ScriptResolver::new(
+        profile.script_policy.clone(),
+        profile.module_policy.clone(),
+        profile.limits.clone(),
+    );
 
     let source = NseScriptSource::File {
         path: PathBuf::from("/nonexistent/path/to/script.nse"),
@@ -394,7 +431,10 @@ fn compatibility_corpus_file_not_found() {
         .with_error("script file not found")
         .compute_compatibility();
 
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Failed);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Failed
+    );
     assert_eq!(report.compatibility.fidelity, NseRunFidelity::Full);
     assert!(report.errors.iter().any(|e| e.contains("not found")));
 }
@@ -406,8 +446,11 @@ fn compatibility_corpus_file_not_found() {
 #[test]
 fn compatibility_corpus_invalid_module_name() {
     let profile = make_profile(ProfileKind::ManualPermissive, vec![]);
-    let mut resolver =
-        ScriptResolver::new(profile.script_policy.clone(), profile.module_policy.clone(), profile.limits.clone());
+    let mut resolver = ScriptResolver::new(
+        profile.script_policy.clone(),
+        profile.module_policy.clone(),
+        profile.limits.clone(),
+    );
 
     let result = resolver.resolve_module("../../../etc/passwd");
     assert!(result.is_err());
@@ -431,7 +474,10 @@ fn compatibility_corpus_invalid_module_name() {
         .with_resolver_diagnostics(&diagnostics)
         .compute_compatibility();
 
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Partial);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Partial
+    );
     assert_eq!(report.compatibility.fidelity, NseRunFidelity::Minimal);
     assert!(
         !report.compatibility.unsupported_features.is_empty(),
@@ -447,8 +493,11 @@ fn compatibility_corpus_invalid_module_name() {
 #[test]
 fn compatibility_corpus_approximate_rule() {
     let profile = make_profile(ProfileKind::ManualPermissive, vec![]);
-    let mut resolver =
-        ScriptResolver::new(profile.script_policy.clone(), profile.module_policy.clone(), profile.limits.clone());
+    let mut resolver = ScriptResolver::new(
+        profile.script_policy.clone(),
+        profile.module_policy.clone(),
+        profile.limits.clone(),
+    );
 
     let source = NseScriptSource::InlineManual {
         label: "approx-test".to_string(),
@@ -505,8 +554,11 @@ return M"#,
     );
 
     let profile = make_profile(ProfileKind::CompatibilityLab, vec![tmp.clone()]);
-    let mut resolver =
-        ScriptResolver::new(profile.script_policy.clone(), profile.module_policy.clone(), profile.limits.clone());
+    let mut resolver = ScriptResolver::new(
+        profile.script_policy.clone(),
+        profile.module_policy.clone(),
+        profile.limits.clone(),
+    );
 
     let result = resolver.resolve_module("custom_module");
     assert!(result.is_ok(), "resolve_module failed: {:?}", result.err());
@@ -518,7 +570,9 @@ return M"#,
 
     let diagnostics = resolver.take_diagnostics();
     assert!(
-        diagnostics.iter().any(|d| matches!(d, NseLoadDiagnostic::Resolved { .. })),
+        diagnostics
+            .iter()
+            .any(|d| matches!(d, NseLoadDiagnostic::Resolved { .. })),
         "expected Resolved diagnostic for module"
     );
 
@@ -552,7 +606,10 @@ fn compatibility_corpus_library_use_report() {
     assert_eq!(report.libraries[0].name, "stdnse");
     assert!(report.libraries[0].registered);
     assert!(report.libraries[0].loaded);
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Compatible);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Compatible
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +624,10 @@ fn compatibility_corpus_unsupported_behavior() {
         .with_error("unsupported feature: script uses unimplemented API")
         .compute_compatibility();
 
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Failed);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Failed
+    );
     assert!(report.errors.iter().any(|e| e.contains("unsupported")));
 }
 
@@ -578,8 +638,11 @@ fn compatibility_corpus_unsupported_behavior() {
 #[test]
 fn compatibility_corpus_builtin_script() {
     let profile = make_profile(ProfileKind::ManualPermissive, vec![]);
-    let mut resolver =
-        ScriptResolver::new(profile.script_policy.clone(), profile.module_policy.clone(), profile.limits.clone());
+    let mut resolver = ScriptResolver::new(
+        profile.script_policy.clone(),
+        profile.module_policy.clone(),
+        profile.limits.clone(),
+    );
 
     let source = NseScriptSource::Builtin {
         name: "ssl-cert".to_string(),
@@ -588,7 +651,9 @@ fn compatibility_corpus_builtin_script() {
     assert!(result.is_ok(), "builtin resolve failed: {:?}", result.err());
     let diagnostics = resolver.take_diagnostics();
     assert!(
-        diagnostics.iter().any(|d| matches!(d, NseLoadDiagnostic::Resolved { .. })),
+        diagnostics
+            .iter()
+            .any(|d| matches!(d, NseLoadDiagnostic::Resolved { .. })),
         "expected Resolved diagnostic for builtin"
     );
 
@@ -598,7 +663,10 @@ fn compatibility_corpus_builtin_script() {
         .with_resolver_diagnostics(&diagnostics)
         .compute_compatibility();
 
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Compatible);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Compatible
+    );
     assert_eq!(report.script_source.kind, "builtin");
 }
 
@@ -609,8 +677,11 @@ fn compatibility_corpus_builtin_script() {
 #[test]
 fn compatibility_corpus_inline_script() {
     let profile = make_profile(ProfileKind::ManualPermissive, vec![]);
-    let mut resolver =
-        ScriptResolver::new(profile.script_policy.clone(), profile.module_policy.clone(), profile.limits.clone());
+    let mut resolver = ScriptResolver::new(
+        profile.script_policy.clone(),
+        profile.module_policy.clone(),
+        profile.limits.clone(),
+    );
 
     let source = NseScriptSource::InlineManual {
         label: "inline-test".to_string(),
@@ -623,7 +694,9 @@ fn compatibility_corpus_inline_script() {
 
     let diagnostics = resolver.take_diagnostics();
     assert!(
-        diagnostics.iter().any(|d| matches!(d, NseLoadDiagnostic::Resolved { .. })),
+        diagnostics
+            .iter()
+            .any(|d| matches!(d, NseLoadDiagnostic::Resolved { .. })),
         "expected Resolved diagnostic for inline"
     );
 
@@ -633,7 +706,10 @@ fn compatibility_corpus_inline_script() {
         .with_resolver_diagnostics(&diagnostics)
         .compute_compatibility();
 
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Compatible);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Compatible
+    );
     assert_eq!(report.script_source.kind, "inline");
 }
 
@@ -647,8 +723,11 @@ fn compatibility_corpus_module_not_found() {
     let _ = std::fs::create_dir_all(&tmp);
 
     let profile = make_profile(ProfileKind::CompatibilityLab, vec![tmp.clone()]);
-    let mut resolver =
-        ScriptResolver::new(profile.script_policy.clone(), profile.module_policy.clone(), profile.limits.clone());
+    let mut resolver = ScriptResolver::new(
+        profile.script_policy.clone(),
+        profile.module_policy.clone(),
+        profile.limits.clone(),
+    );
 
     let result = resolver.resolve_module("nonexistent_module_xyz");
     assert!(result.is_ok(), "should return Ok(None) for missing module");
@@ -689,7 +768,10 @@ fn compatibility_corpus_mixed_diagnostics() {
     assert_eq!(report.resolver.blocked_count, 1);
     assert_eq!(report.resolver.total_diagnostics, 2);
     // No errors and no rejected → Compatible
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Compatible);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Compatible
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -714,8 +796,14 @@ fn compatibility_corpus_serialization_roundtrip() {
 
     assert_eq!(deserialized.target, report.target);
     assert_eq!(deserialized.script_name, report.script_name);
-    assert_eq!(deserialized.compatibility.status, report.compatibility.status);
-    assert_eq!(deserialized.compatibility.fidelity, report.compatibility.fidelity);
+    assert_eq!(
+        deserialized.compatibility.status,
+        report.compatibility.status
+    );
+    assert_eq!(
+        deserialized.compatibility.fidelity,
+        report.compatibility.fidelity
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -739,7 +827,10 @@ fn compatibility_corpus_exact_rule() {
         .with_rules(rules)
         .compute_compatibility();
 
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Compatible);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Compatible
+    );
     assert_eq!(report.compatibility.fidelity, NseRunFidelity::Full);
     assert!(report.compatibility.approximations.is_empty());
 }
@@ -766,6 +857,9 @@ fn compatibility_corpus_rule_error() {
         .with_error("rule evaluation panicked")
         .compute_compatibility();
 
-    assert_eq!(report.compatibility.status, NseRunCompatibilityStatus::Failed);
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Failed
+    );
     assert!(report.errors.iter().any(|e| e.contains("panicked")));
 }

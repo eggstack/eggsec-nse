@@ -423,10 +423,14 @@ pub async fn run_cli_with_profile(
     let (output, script_source, diagnostics) = result;
 
     if json {
+        let library_reports: Vec<crate::report::NseLibraryUseReport> = Vec::new();
+        let rule_reports: Vec<crate::report::NseRuleEvaluationReport> = Vec::new();
         let report = crate::report::NseRunReport::new(&config.target, &config.script)
             .with_profile(&report_profile)
             .with_script_source(&script_source)
             .with_resolver_diagnostics(&diagnostics)
+            .with_libraries(library_reports)
+            .with_rules(rule_reports)
             .with_output(&output)
             .compute_compatibility();
         println!("{}", serde_json::to_string_pretty(&report)?);
