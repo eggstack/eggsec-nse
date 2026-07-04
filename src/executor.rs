@@ -381,44 +381,43 @@ impl NseExecutor {
     }
 
     pub fn run_script_file(&self, path: &std::path::Path) -> LuaResult<String> {
-        // Validate path against script policy roots if configured
-        if !self.core.script_policy.allowed_script_roots.is_empty() {
-            let mut resolver = crate::resolver::ScriptResolver::new(
-                self.core.script_policy.clone(),
-                self.core.module_policy.clone(),
-                self.core.limits.clone(),
-            );
-            let source = crate::resolver::NseScriptSource::File {
-                path: path.to_path_buf(),
-            };
-            resolver
-                .resolve_script(source)
-                .map_err(|e| mlua::Error::RuntimeError(format!("Script file rejected: {}", e)))?;
-        }
-        let script = std::fs::read_to_string(path)?;
-        self.run_script(&script)
+        // Route script-file loading through ScriptResolver. The resolver
+        // enforces policy (including empty-roots ManualPermissive semantics),
+        // existence, extension, and (when configured) canonical root
+        // containment with symlink-escape rejection. Use the resolver's
+        // loaded content so checks and reads stay in one place.
+        let mut resolver = crate::resolver::ScriptResolver::new(
+            self.core.script_policy.clone(),
+            self.core.module_policy.clone(),
+            self.core.limits.clone(),
+        );
+        let source = crate::resolver::NseScriptSource::File {
+            path: path.to_path_buf(),
+        };
+        let resolved = resolver
+            .resolve_script(source)
+            .map_err(|e| mlua::Error::RuntimeError(format!("Script file rejected: {}", e)))?;
+        self.run_script(&resolved.content)
     }
 
     pub fn run_script_file_with_output(
         &self,
         path: &std::path::Path,
     ) -> LuaResult<(String, Vec<String>)> {
-        // Validate path against script policy roots if configured
-        if !self.core.script_policy.allowed_script_roots.is_empty() {
-            let mut resolver = crate::resolver::ScriptResolver::new(
-                self.core.script_policy.clone(),
-                self.core.module_policy.clone(),
-                self.core.limits.clone(),
-            );
-            let source = crate::resolver::NseScriptSource::File {
-                path: path.to_path_buf(),
-            };
-            resolver
-                .resolve_script(source)
-                .map_err(|e| mlua::Error::RuntimeError(format!("Script file rejected: {}", e)))?;
-        }
-        let script = std::fs::read_to_string(path)?;
-        self.run_script_with_output(&script)
+        // See `run_script_file`: route through ScriptResolver and use the
+        // resolver's loaded content so policy and read paths stay aligned.
+        let mut resolver = crate::resolver::ScriptResolver::new(
+            self.core.script_policy.clone(),
+            self.core.module_policy.clone(),
+            self.core.limits.clone(),
+        );
+        let source = crate::resolver::NseScriptSource::File {
+            path: path.to_path_buf(),
+        };
+        let resolved = resolver
+            .resolve_script(source)
+            .map_err(|e| mlua::Error::RuntimeError(format!("Script file rejected: {}", e)))?;
+        self.run_script_with_output(&resolved.content)
     }
 
     pub fn check_script_category(&self, script_name: &str, category: &str) -> bool {

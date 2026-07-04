@@ -4,6 +4,8 @@
 
 The NSE (Nmap Scripting Engine) module (`crates/eggsec-nse/`) provides Lua VM integration, NSE libraries, sandbox enforcement, and CVE integration.
 
+> **Milestone 1 (loader/profile) is closed.** Canonical implementation, tests, policy contract, and deferred work are listed in the [Milestone 1 Closure Index](../../architecture/nse_integration.md#milestone-1-closure-index). Future work should treat that index as the authoritative pointer; do not duplicate its content.
+
 ## Recent Bug Fixes (2026-05-28)
 
 | Component | Issue | Fix |
