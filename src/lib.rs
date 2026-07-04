@@ -284,6 +284,12 @@ pub use resolver::{
     NseScriptSource, ResolvedNseModule, ResolvedNseScript, ScriptResolver,
 };
 
+pub use resolver::registry::{
+    all_libraries, find_library, libraries_by_category, libraries_missing_from_nmap,
+    libraries_with_side_effects, registry_count, sandbox_policy_for_library, NseFallbackBehavior,
+    NseLibraryCategory, NseLibraryDescriptor, NseSandboxSideEffect,
+};
+
 /// Compatibility wrapper that defaults to `ManualPermissive` profile.
 ///
 /// # Manual-only

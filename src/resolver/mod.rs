@@ -10,6 +10,8 @@
 //! - Maximum script and module sizes
 //! - Structured diagnostics for load behavior
 
+pub mod registry;
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -220,6 +222,7 @@ impl fmt::Display for NseLoadError {
 
 impl std::error::Error for NseLoadError {}
 
+#[cfg(feature = "nse")]
 impl From<NseLoadError> for mlua::Error {
     fn from(e: NseLoadError) -> Self {
         mlua::Error::RuntimeError(e.to_string())
