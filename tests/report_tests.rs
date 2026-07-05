@@ -339,6 +339,7 @@ fn test_compatibility_with_approximations() {
         exactness: "approximate".to_string(),
         error: None,
         summary: "port state approximated".to_string(),
+        unsupported: None,
     }];
 
     let report = NseRunReport::new("10.0.0.1", "test")
@@ -464,6 +465,7 @@ fn test_rule_evaluation_report_fields() {
         exactness: "exact".to_string(),
         error: None,
         summary: "host not matched".to_string(),
+        unsupported: None,
     };
 
     let report = NseRunReport::new("10.0.0.1", "test")

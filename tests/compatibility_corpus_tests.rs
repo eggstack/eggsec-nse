@@ -514,6 +514,7 @@ fn compatibility_corpus_approximate_rule() {
         exactness: "approximate".to_string(),
         error: None,
         summary: "portrule matched with approximate port handling".to_string(),
+        unsupported: None,
     }];
 
     let report = NseRunReport::new("127.0.0.1", "approximate-rule")
@@ -820,6 +821,7 @@ fn compatibility_corpus_exact_rule() {
         exactness: "exact".to_string(),
         error: None,
         summary: "portrule matched exactly".to_string(),
+        unsupported: None,
     }];
 
     let report = NseRunReport::new("127.0.0.1", "exact-rule")
@@ -849,6 +851,7 @@ fn compatibility_corpus_rule_error() {
         exactness: "exact".to_string(),
         error: Some("rule evaluation panicked".to_string()),
         summary: "portrule failed".to_string(),
+        unsupported: None,
     }];
 
     let report = NseRunReport::new("127.0.0.1", "rule-error")

@@ -108,6 +108,8 @@ pub struct NseRuleEvaluationReport {
     pub exactness: String,
     pub error: Option<String>,
     pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsupported: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -399,6 +401,81 @@ impl NseRunReport {
             approximations,
         };
         self
+    }
+}
+
+/// Evaluate a Lua rule result into a structured report.
+///
+/// Handles errors, nil, boolean true/false, and non-boolean return values,
+/// producing a truthful `NseRuleEvaluationReport` instead of collapsing
+/// all non-true cases into `false`.
+pub fn evaluate_rule(
+    kind: &str,
+    lua_result: Result<mlua::Value, mlua::Error>,
+) -> NseRuleEvaluationReport {
+    match lua_result {
+        Ok(mlua::Value::Nil) => NseRuleEvaluationReport {
+            kind: kind.to_string(),
+            evaluated: true,
+            matched: false,
+            exactness: "exact".to_string(),
+            error: None,
+            summary: "rule returned nil".to_string(),
+            unsupported: None,
+        },
+        Ok(mlua::Value::Boolean(true)) => NseRuleEvaluationReport {
+            kind: kind.to_string(),
+            evaluated: true,
+            matched: true,
+            exactness: "exact".to_string(),
+            error: None,
+            summary: "rule matched".to_string(),
+            unsupported: None,
+        },
+        Ok(mlua::Value::Boolean(false)) => NseRuleEvaluationReport {
+            kind: kind.to_string(),
+            evaluated: true,
+            matched: false,
+            exactness: "exact".to_string(),
+            error: None,
+            summary: "rule did not match".to_string(),
+            unsupported: None,
+        },
+        Ok(other) => {
+            let type_name = match &other {
+                mlua::Value::String(_) => "string",
+                mlua::Value::Integer(_) => "integer",
+                mlua::Value::Number(_) => "number",
+                mlua::Value::Table(_) => "table",
+                mlua::Value::Function(_) => "function",
+                mlua::Value::Thread(_) => "thread",
+                mlua::Value::UserData(_) => "userdata",
+                mlua::Value::LightUserData(_) => "lightuserdata",
+                mlua::Value::Vector(_) => "vector",
+                mlua::Value::Buffer(_) => "buffer",
+                mlua::Value::Error(_) => "error",
+                mlua::Value::Nil | mlua::Value::Boolean(_) => unreachable!(),
+                _ => "unknown",
+            };
+            NseRuleEvaluationReport {
+                kind: kind.to_string(),
+                evaluated: false,
+                matched: false,
+                exactness: "unsupported".to_string(),
+                error: None,
+                summary: format!("expected boolean, got {}", type_name),
+                unsupported: Some(format!("expected boolean, got {}", type_name)),
+            }
+        }
+        Err(e) => NseRuleEvaluationReport {
+            kind: kind.to_string(),
+            evaluated: false,
+            matched: false,
+            exactness: "exact".to_string(),
+            error: Some(e.to_string()),
+            summary: format!("rule error: {}", e),
+            unsupported: None,
+        },
     }
 }
 

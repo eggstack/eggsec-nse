@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use crate::executor_core::ExecutorCore;
 use crate::limits::{NseCancellationToken, NseExecutionLimits, NseExecutionStats};
 use crate::profile::{NseModulePolicy, NseScriptPolicy};
+use crate::report::NseRuleEvaluationReport;
 use crate::SandboxMetrics;
 
 pub struct NseExecutor {
@@ -213,39 +214,43 @@ impl NseExecutor {
 
     // Executor-specific: rule execution
 
-    pub fn run_script_with_rules(&mut self, script: &str) -> LuaResult<(String, Vec<String>)> {
+    pub fn run_script_with_rules(
+        &mut self,
+        script: &str,
+    ) -> LuaResult<(String, Vec<String>, Vec<NseRuleEvaluationReport>)> {
         self.lua().load(script).eval::<Value>()?;
         let globals = self.lua().globals();
         let mut outputs = Vec::new();
+        let mut rule_reports = Vec::new();
 
         // prerule
         if let Ok(prerule) = globals.get::<mlua::Function>("prerule") {
-            match prerule.call::<Value>(()) {
-                Ok(r) if !r.is_nil() => outputs.push(format!("prerule: {:?}", r)),
-                Err(e) => outputs.push(format!("prerule error: {}", e)),
-                _ => {}
+            let report = crate::report::evaluate_rule("prerule", prerule.call::<Value>(()));
+            if report.evaluated || report.error.is_some() {
+                rule_reports.push(report);
             }
         }
 
         // hostrule
         let hostrule_matched = if let Ok(hostrule) = globals.get::<mlua::Function>("hostrule") {
             let host = globals.get::<Table>("nmap")?;
-            match hostrule.call::<Value>(host.clone()) {
-                Ok(r) if r.as_boolean().unwrap_or(false) => {
-                    if let Ok(action) = globals.get::<mlua::Function>("action") {
-                        match action.call::<Value>((host.clone(), self.lua().create_table()?)) {
-                            Ok(v) if !v.is_nil() => outputs.push(format!("action: {:?}", v)),
-                            Err(e) => outputs.push(format!("action error: {}", e)),
-                            _ => {}
-                        }
+            let result = hostrule.call::<Value>(host.clone());
+            let report = crate::report::evaluate_rule("hostrule", result);
+            let matched = report.matched;
+            if report.evaluated || report.error.is_some() {
+                rule_reports.push(report);
+            }
+            if matched {
+                if let Ok(action) = globals.get::<mlua::Function>("action") {
+                    match action.call::<Value>((host.clone(), self.lua().create_table()?)) {
+                        Ok(v) if !v.is_nil() => outputs.push(format!("action: {:?}", v)),
+                        Err(e) => outputs.push(format!("action error: {}", e)),
+                        _ => {}
                     }
-                    true
                 }
-                Err(e) => {
-                    outputs.push(format!("hostrule error: {}", e));
-                    false
-                }
-                _ => false,
+                true
+            } else {
+                false
             }
         } else {
             false
@@ -257,31 +262,32 @@ impl NseExecutor {
 
         for (_, port_info) in ports.pairs::<String, Table>().flatten() {
             if let Ok(portrule) = globals.get::<mlua::Function>("portrule") {
-                match portrule.call::<Value>(port_info.clone()) {
-                    Ok(r) if r.as_boolean().unwrap_or(false) => {
-                        if let Ok(action) = globals.get::<mlua::Function>("action") {
-                            let host = globals.get::<Table>("nmap")?;
-                            match action.call::<Value>((host.clone(), port_info.clone())) {
-                                Ok(v) if !v.is_nil() => outputs.push(format!("action: {:?}", v)),
-                                Err(e) => outputs.push(format!("action error: {}", e)),
-                                _ => {}
-                            }
+                let result = portrule.call::<Value>(port_info.clone());
+                let report = crate::report::evaluate_rule("portrule", result);
+                let matched = report.matched;
+                if report.evaluated || report.error.is_some() {
+                    rule_reports.push(report);
+                }
+                if matched {
+                    if let Ok(action) = globals.get::<mlua::Function>("action") {
+                        let host = globals.get::<Table>("nmap")?;
+                        match action.call::<Value>((host.clone(), port_info.clone())) {
+                            Ok(v) if !v.is_nil() => outputs.push(format!("action: {:?}", v)),
+                            Err(e) => outputs.push(format!("action error: {}", e)),
+                            _ => {}
                         }
-                        portrule_matched = true;
-                        break;
                     }
-                    Err(e) => outputs.push(format!("portrule error: {}", e)),
-                    _ => {}
+                    portrule_matched = true;
+                    break;
                 }
             }
         }
 
         // postrule
         if let Ok(postrule) = globals.get::<mlua::Function>("postrule") {
-            match postrule.call::<Value>(()) {
-                Ok(r) if !r.is_nil() => outputs.push(format!("postrule: {:?}", r)),
-                Err(e) => outputs.push(format!("postrule error: {}", e)),
-                _ => {}
+            let report = crate::report::evaluate_rule("postrule", postrule.call::<Value>(()));
+            if report.evaluated || report.error.is_some() {
+                rule_reports.push(report);
             }
         }
 
@@ -295,7 +301,38 @@ impl NseExecutor {
             outputs.push("No rules matched or no output generated".to_string());
         }
 
-        Ok((outputs.join("\n"), outputs))
+        Ok((outputs.join("\n"), outputs, rule_reports))
+    }
+
+    pub fn evaluate_rule_value(
+        &mut self,
+        kind: &str,
+        rule_source: Option<&str>,
+        arg: Value,
+    ) -> NseRuleEvaluationReport {
+        let globals = self.lua().globals();
+
+        if let Some(rule) = rule_source {
+            if !rule.is_empty() {
+                if let Ok(f) = self.lua().load(rule).eval::<mlua::Function>() {
+                    return crate::report::evaluate_rule(kind, f.call::<Value>(arg.clone()));
+                }
+            }
+        }
+
+        if let Ok(f) = globals.get::<mlua::Function>(kind) {
+            return crate::report::evaluate_rule(kind, f.call::<Value>(arg));
+        }
+
+        NseRuleEvaluationReport {
+            kind: kind.to_string(),
+            evaluated: false,
+            matched: false,
+            exactness: "not_present".to_string(),
+            error: None,
+            summary: format!("{} function not defined", kind),
+            unsupported: None,
+        }
     }
 
     pub fn check_portrule(
@@ -306,7 +343,6 @@ impl NseExecutor {
         state: &str,
         service: Option<&str>,
     ) -> LuaResult<bool> {
-        let globals = self.lua().globals();
         let port_table = self.lua().create_table()?;
         port_table.set("number", port)?;
         port_table.set("protocol", protocol)?;
@@ -314,23 +350,8 @@ impl NseExecutor {
         if let Some(svc) = service {
             port_table.set("service", svc)?;
         }
-
-        if let Some(rule) = portrule {
-            if !rule.is_empty() {
-                if let Ok(f) = self.lua().load(rule).eval::<mlua::Function>() {
-                    if let Ok(r) = f.call::<Value>(port_table.clone()) {
-                        return Ok(r.as_boolean().unwrap_or(false));
-                    }
-                }
-            }
-        }
-
-        if let Ok(f) = globals.get::<mlua::Function>("portrule") {
-            if let Ok(r) = f.call::<Value>(port_table) {
-                return Ok(r.as_boolean().unwrap_or(false));
-            }
-        }
-        Ok(false)
+        let report = self.evaluate_rule_value("portrule", portrule, Value::Table(port_table));
+        Ok(report.matched)
     }
 
     pub fn check_hostrule(&mut self, hostrule: Option<&str>) -> LuaResult<bool> {
@@ -339,23 +360,8 @@ impl NseExecutor {
             Ok(t) => t,
             Err(_) => return Ok(false),
         };
-
-        if let Some(rule) = hostrule {
-            if !rule.is_empty() {
-                if let Ok(f) = self.lua().load(rule).eval::<mlua::Function>() {
-                    if let Ok(r) = f.call::<Value>(host.clone()) {
-                        return Ok(r.as_boolean().unwrap_or(false));
-                    }
-                }
-            }
-        }
-
-        if let Ok(f) = globals.get::<mlua::Function>("hostrule") {
-            if let Ok(r) = f.call::<Value>(host) {
-                return Ok(r.as_boolean().unwrap_or(false));
-            }
-        }
-        Ok(false)
+        let report = self.evaluate_rule_value("hostrule", hostrule, Value::Table(host));
+        Ok(report.matched)
     }
 
     pub fn get_prerule_result(&self) -> Option<String> {
@@ -494,13 +500,40 @@ impl NseExecutor {
                 .to_string(),
             crate::resolver::NseScriptSource::InlineManual { label, .. } => label.clone(),
         };
+        let library_reports = self.build_library_reports();
         crate::report::NseRunReport::new(self.target(), &script_name)
             .with_profile(profile)
             .with_script_source(script_source)
             .with_stats(&stats)
             .with_resolver_diagnostics(diagnostics)
+            .with_libraries(library_reports)
             .with_output(output)
             .compute_compatibility()
+    }
+
+    fn build_library_reports(&self) -> Vec<crate::report::NseLibraryUseReport> {
+        use crate::resolver::registry;
+
+        registry::all_libraries()
+            .iter()
+            .map(|desc| {
+                let side_effects: Vec<String> = desc
+                    .sandbox_side_effects
+                    .iter()
+                    .map(|se| se.to_string())
+                    .collect();
+                crate::report::NseLibraryUseReport {
+                    name: desc.name.to_string(),
+                    category: desc.category.to_string(),
+                    registered: true,
+                    side_effects,
+                    fallback_behavior: desc.fallback_behavior.to_string(),
+                    notes: desc.notes.to_string(),
+                    loaded: true,
+                    warnings: Vec::new(),
+                }
+            })
+            .collect()
     }
 }
 

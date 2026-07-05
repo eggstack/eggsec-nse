@@ -322,7 +322,6 @@ pub async fn run_cli_with_profile(
     let script_file = config.script_file.clone();
     let json = config.json;
 
-    // Log profile diagnostics
     let resolved_profile =
         profile.unwrap_or_else(|| ResolvedNseExecutionProfile::manual_permissive(Some(&target)));
 
@@ -337,8 +336,19 @@ pub async fn run_cli_with_profile(
         tracing::warn!("{}", warning);
     }
 
-    // Validate script file against profile policy
     if script_file.is_some() && !resolved_profile.script_policy.allow_script_files {
+        let report = build_failure_report(
+            &config.target,
+            &config.script,
+            &resolved_profile,
+            &format!(
+                "Profile '{}' does not allow arbitrary script files.",
+                resolved_profile.kind
+            ),
+        );
+        if json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        }
         anyhow::bail!(
             "Profile '{}' does not allow arbitrary script files. \
              Use built-in scripts only.",
@@ -360,7 +370,9 @@ pub async fn run_cli_with_profile(
     let cancellation = crate::limits::NseCancellationToken::new();
     let report_profile = resolved_profile.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, crate::resolver::NseScriptSource, Vec<crate::resolver::NseLoadDiagnostic>)> {
+    let library_reports = build_library_reports();
+
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, crate::resolver::NseScriptSource, Vec<crate::resolver::NseLoadDiagnostic>, Vec<crate::report::NseRuleEvaluationReport>)> {
         let mut executor = NseExecutor::with_policy(
             sandbox,
             limits,
@@ -411,20 +423,18 @@ pub async fn run_cli_with_profile(
 
         let diagnostics = resolver.take_diagnostics();
 
-        let result = executor
-            .run_script(&script_content)
+        let (output, _raw_outputs, rule_reports) = executor
+            .run_script_with_rules(&script_content)
             .map_err(|e| anyhow::anyhow!("Script execution failed: {}", e))?;
 
-        Ok((result, script_source, diagnostics))
+        Ok((output, script_source, diagnostics, rule_reports))
     })
     .await
     .map_err(|e| anyhow::anyhow!("Task execution failed: {}", e))??;
 
-    let (output, script_source, diagnostics) = result;
+    let (output, script_source, diagnostics, rule_reports) = result;
 
     if json {
-        let library_reports: Vec<crate::report::NseLibraryUseReport> = Vec::new();
-        let rule_reports: Vec<crate::report::NseRuleEvaluationReport> = Vec::new();
         let report = crate::report::NseRunReport::new(&config.target, &config.script)
             .with_profile(&report_profile)
             .with_script_source(&script_source)
@@ -442,6 +452,48 @@ pub async fn run_cli_with_profile(
     }
 
     Ok(())
+}
+
+fn build_library_reports() -> Vec<crate::report::NseLibraryUseReport> {
+    use crate::resolver::registry;
+
+    registry::all_libraries()
+        .iter()
+        .map(|desc| {
+            let side_effects: Vec<String> = desc
+                .sandbox_side_effects
+                .iter()
+                .map(|se| se.to_string())
+                .collect();
+            crate::report::NseLibraryUseReport {
+                name: desc.name.to_string(),
+                category: desc.category.to_string(),
+                registered: true,
+                side_effects,
+                fallback_behavior: desc.fallback_behavior.to_string(),
+                notes: desc.notes.to_string(),
+                loaded: true,
+                warnings: Vec::new(),
+            }
+        })
+        .collect()
+}
+
+fn build_failure_report(
+    target: &str,
+    script: &str,
+    profile: &ResolvedNseExecutionProfile,
+    error: &str,
+) -> crate::report::NseRunReport {
+    let source = crate::resolver::NseScriptSource::Builtin {
+        name: script.to_string(),
+    };
+    crate::report::NseRunReport::new(target, script)
+        .with_profile(profile)
+        .with_script_source(&source)
+        .with_libraries(build_library_reports())
+        .with_error(error)
+        .compute_compatibility()
 }
 
 #[cfg(not(feature = "nse"))]
