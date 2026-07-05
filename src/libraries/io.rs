@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
 use crate::SandboxConfig;
+use crate::capabilities::NseCapabilityContext;
 
 struct FileHandle {
     file: File,
@@ -38,16 +39,35 @@ pub fn get_io_sandbox_metrics() -> (usize, usize) {
     (handles, violations)
 }
 
-pub fn register_io_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> {
+pub fn register_io_library(
+    lua: &Lua,
+    sandbox: &SandboxConfig,
+    capability_ctx: &NseCapabilityContext,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let io = lua.create_table()?;
 
     let sandbox_enabled = sandbox.enabled;
     let sandbox_for_open = sandbox.clone();
+    let cap_ctx_for_open = capability_ctx.clone();
 
     io.set(
         "open",
         lua.create_function(move |lua, (filename, mode): (String, Option<String>)| {
+            // Route through capability context (primary enforcement)
+            use crate::wrappers;
+            let check_decision = wrappers::check_fs_read(
+                &cap_ctx_for_open,
+                &filename,
+                "io.open",
+            );
+            if check_decision.is_denied() {
+                IO_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+                let result = lua.create_table()?;
+                result.set("error", check_decision.deny_reason().unwrap_or("access denied"))?;
+                return Ok(result);
+            }
+            // Secondary: sandbox path check
             if sandbox_enabled && sandbox_for_open.get_allowed_path(&filename).is_none() {
                 IO_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
                 let result = lua.create_table()?;
@@ -56,6 +76,21 @@ pub fn register_io_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
             }
 
             let mode_str = mode.unwrap_or_else(|| "r".to_string());
+
+            // For write modes, also check write capability
+            if mode_str.contains('w') || mode_str.contains('a') {
+                let write_decision = wrappers::check_fs_write(
+                    &cap_ctx_for_open,
+                    &filename,
+                    "io.open",
+                );
+                if write_decision.is_denied() {
+                    IO_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+                    let result = lua.create_table()?;
+                    result.set("error", write_decision.deny_reason().unwrap_or("write denied"))?;
+                    return Ok(result);
+                }
+            }
 
             let file = match mode_str.as_str() {
                 "r" => File::open(&filename),
@@ -237,9 +272,24 @@ pub fn register_io_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
     )?;
 
     let sandbox_for_lines = sandbox.clone();
+    let cap_ctx_for_lines = capability_ctx.clone();
     io.set(
         "lines",
         lua.create_function(move |lua, filename: String| {
+            // Route through capability context
+            use crate::wrappers;
+            let check_decision = wrappers::check_fs_read(
+                &cap_ctx_for_lines,
+                &filename,
+                "io.lines",
+            );
+            if check_decision.is_denied() {
+                IO_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+                let result = lua.create_table()?;
+                result.set("error", check_decision.deny_reason().unwrap_or("access denied"))?;
+                return Ok(result);
+            }
+            // Secondary: sandbox path check
             if sandbox_enabled && sandbox_for_lines.get_allowed_path(&filename).is_none() {
                 IO_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
                 let result = lua.create_table()?;
@@ -260,9 +310,23 @@ pub fn register_io_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
     )?;
 
     let sandbox_for_popen = sandbox.clone();
+    let cap_ctx_for_popen = capability_ctx.clone();
     io.set(
         "popen",
         lua.create_function(move |lua, (cmd, mode): (String, Option<String>)| {
+            // Route through capability context (primary enforcement)
+            use crate::wrappers;
+            let decision = wrappers::check_process_exec(
+                &cap_ctx_for_popen,
+                &cmd,
+                "io.popen",
+            );
+            if decision.is_denied() {
+                let result = lua.create_table()?;
+                result.set("error", decision.deny_reason().unwrap_or("process exec denied"))?;
+                return Ok(result);
+            }
+            // Secondary: sandbox command check
             if sandbox_for_popen.enabled && !sandbox_for_popen.is_command_allowed(&cmd) {
                 if sandbox_for_popen.log_violations {
                     tracing::warn!(
@@ -359,10 +423,12 @@ pub fn register_io_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
     )?;
 
     let sandbox_for_tmpfile = sandbox.clone();
+    let cap_ctx_for_tmpfile = capability_ctx.clone();
     io.set(
         "tmpfile",
         lua.create_function(move |lua, _: ()| {
             use std::fs;
+            use crate::wrappers;
             let temp_dir = if sandbox_for_tmpfile.enabled {
                 sandbox_for_tmpfile
                     .allowed_dir
@@ -374,6 +440,7 @@ pub fn register_io_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
 
             let filename = format!("eggsec_tmp_{}.tmp", std::process::id());
             let path = temp_dir.join(&filename);
+            let path_str = path.to_string_lossy();
 
             if sandbox_for_tmpfile.enabled {
                 if let Some(ref allowed) = sandbox_for_tmpfile.allowed_dir {
@@ -383,6 +450,18 @@ pub fn register_io_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
                         return Ok(result);
                     }
                 }
+            }
+
+            // Check write capability for temp file creation
+            let write_decision = wrappers::check_fs_write(
+                &cap_ctx_for_tmpfile,
+                &path_str,
+                "io.tmpfile",
+            );
+            if write_decision.is_denied() {
+                let result = lua.create_table()?;
+                result.set("error", write_decision.deny_reason().unwrap_or("write denied"))?;
+                return Ok(result);
             }
 
             match fs::File::create(&path) {

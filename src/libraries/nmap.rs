@@ -11,6 +11,7 @@ use std::sync::RwLock;
 use std::time::Duration;
 
 use super::helpers::fallback_lua_table;
+use crate::capabilities::NseCapabilityContext;
 
 struct ConnectionEntry {
     stream: TcpStream,
@@ -102,8 +103,10 @@ fn reconnect_stream(host: &str, port: u16, timeout_secs: i64) -> Option<TcpStrea
     Some(stream)
 }
 
-pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
+    // Clone for use in closures (NseCapabilityContext is Clone)
+    let capability_ctx = capability_ctx.clone();
 
     let nmap = lua.create_table()?;
 
@@ -712,18 +715,30 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
 
     nmap.set(
         "is_admin",
-        lua.create_function(|_lua, _: ()| {
-            #[cfg(unix)]
-            {
-                Ok(std::process::Command::new("id")
-                    .arg("-u")
-                    .output()
-                    .map(|o| o.stdout == b"0\n")
-                    .unwrap_or(false))
-            }
-            #[cfg(not(unix))]
-            {
-                Ok(false)
+        lua.create_function({
+            let cap = capability_ctx.clone();
+            move |_lua, _: ()| {
+                #[cfg(unix)]
+                {
+                    use crate::wrappers;
+                    let decision = wrappers::check_process_exec(
+                        &cap,
+                        "id",
+                        "nmap.is_admin",
+                    );
+                    if decision.is_denied() {
+                        return Ok(false);
+                    }
+                    Ok(std::process::Command::new("id")
+                        .arg("-u")
+                        .output()
+                        .map(|o| o.stdout == b"0\n")
+                        .unwrap_or(false))
+                }
+                #[cfg(not(unix))]
+                {
+                    Ok(false)
+                }
             }
         })?,
     )?;
@@ -889,7 +904,7 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
 
     nmap.set(
         "list_interfaces",
-        lua.create_function(|lua, _: ()| {
+        lua.create_function(move |lua, _: ()| {
             let interfaces = lua.create_table()?;
 
             let lo = lua.create_table()?;
@@ -1122,18 +1137,30 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
 
     nmap.set(
         "is_privileged",
-        lua.create_function(|_lua, _: ()| {
-            #[cfg(unix)]
-            {
-                Ok(std::process::Command::new("id")
-                    .arg("-u")
-                    .output()
-                    .map(|o| o.stdout == b"0\n")
-                    .unwrap_or(false))
-            }
-            #[cfg(not(unix))]
-            {
-                Ok(false)
+        lua.create_function({
+            let cap = capability_ctx.clone();
+            move |_lua, _: ()| {
+                #[cfg(unix)]
+                {
+                    use crate::wrappers;
+                    let decision = wrappers::check_process_exec(
+                        &cap,
+                        "id",
+                        "nmap.is_privileged",
+                    );
+                    if decision.is_denied() {
+                        return Ok(false);
+                    }
+                    Ok(std::process::Command::new("id")
+                        .arg("-u")
+                        .output()
+                        .map(|o| o.stdout == b"0\n")
+                        .unwrap_or(false))
+                }
+                #[cfg(not(unix))]
+                {
+                    Ok(false)
+                }
             }
         })?,
     )?;
@@ -1485,29 +1512,47 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
 
     nmap.set(
         "list_interfaces",
-        lua.create_function(|_lua, ()| {
-            let interfaces = _lua.create_table()?;
+        lua.create_function({
+            let cap = capability_ctx.clone();
+            move |_lua, ()| {
+                let interfaces = _lua.create_table()?;
 
-            #[cfg(unix)]
-            {
-                use std::process::Command;
-                if let Ok(output) = Command::new("ip").arg("addr").output() {
-                    let output_str = String::from_utf8_lossy(&output.stdout);
-                    let mut idx = 1;
-                    for line in output_str.lines() {
-                        if line.starts_with(|c: char| c.is_ascii_digit())
-                            || line.starts_with("inet ")
-                        {
-                            let iface = _lua.create_table()?;
-                            let name = line.split(':').next().unwrap_or("unknown").trim();
-                            iface.set("device", name)?;
-                            iface.set("addresses", _lua.create_table()?)?;
-                            interfaces.set(idx, iface)?;
-                            idx += 1;
+                #[cfg(unix)]
+                {
+                    use crate::wrappers;
+                    let decision = wrappers::check_process_exec(
+                        &cap,
+                        "ip",
+                        "nmap.list_interfaces",
+                    );
+                    if decision.is_denied() {
+                        // Return empty/fallback list when process exec is denied
+                        let iface = _lua.create_table()?;
+                        iface.set("device", "lo")?;
+                        let addrs = _lua.create_table()?;
+                        addrs.set(1, "127.0.0.1")?;
+                        iface.set("addresses", addrs)?;
+                        interfaces.set(1, iface)?;
+                        return Ok(interfaces);
+                    }
+                    use std::process::Command;
+                    if let Ok(output) = Command::new("ip").arg("addr").output() {
+                        let output_str = String::from_utf8_lossy(&output.stdout);
+                        let mut idx = 1;
+                        for line in output_str.lines() {
+                            if line.starts_with(|c: char| c.is_ascii_digit())
+                                || line.starts_with("inet ")
+                            {
+                                let iface = _lua.create_table()?;
+                                let name = line.split(':').next().unwrap_or("unknown").trim();
+                                iface.set("device", name)?;
+                                iface.set("addresses", _lua.create_table()?)?;
+                                interfaces.set(idx, iface)?;
+                                idx += 1;
+                            }
                         }
                     }
                 }
-            }
 
             #[cfg(windows)]
             {
@@ -1545,33 +1590,46 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             }
 
             Ok(interfaces)
+            }
         })?,
     )?;
 
     nmap.set(
         "get_interface",
-        lua.create_function(|_lua, (name,): (Option<String>,)| {
-            let iface = _lua.create_table()?;
+        lua.create_function({
+            let cap = capability_ctx.clone();
+            move |_lua, (name,): (Option<String>,)| {
+                let iface = _lua.create_table()?;
 
-            if let Some(iface_name) = name {
-                if !iface_name
-                    .chars()
-                    .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-                {
-                    return Err(mlua::Error::RuntimeError(
-                        "Invalid interface name".to_string(),
-                    ));
-                }
-                iface.set("device", iface_name.clone())?;
+                if let Some(iface_name) = name {
+                    if !iface_name
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+                    {
+                        return Err(mlua::Error::RuntimeError(
+                            "Invalid interface name".to_string(),
+                        ));
+                    }
+                    iface.set("device", iface_name.clone())?;
 
-                #[cfg(unix)]
-                {
-                    use std::process::Command;
-                    let output = Command::new("ip")
-                        .arg("addr")
-                        .arg("show")
-                        .arg(&iface_name)
-                        .output();
+                    #[cfg(unix)]
+                    {
+                        use crate::wrappers;
+                        let decision = wrappers::check_process_exec(
+                            &cap,
+                            "ip",
+                            "nmap.get_interface",
+                        );
+                        if decision.is_denied() {
+                            iface.set("addresses", _lua.create_table()?)?;
+                            return Ok(iface);
+                        }
+                        use std::process::Command;
+                        let output = Command::new("ip")
+                            .arg("addr")
+                            .arg("show")
+                            .arg(&iface_name)
+                            .output();
 
                     if let Ok(out) = output {
                         let output_str = String::from_utf8_lossy(&out.stdout);
@@ -1595,6 +1653,7 @@ pub fn register_nmap_library(lua: &Lua) -> LuaResult<()> {
             }
 
             Ok(iface)
+            }
         })?,
     )?;
 

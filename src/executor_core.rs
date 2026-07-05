@@ -871,7 +871,7 @@ impl ExecutorCore {
 
     fn register_libraries(&self) -> LuaResult<()> {
         crate::libraries::stdnse::register_stdlib(&self.lua)?;
-        crate::libraries::nmap::register_nmap_library(&self.lua)?;
+        crate::libraries::nmap::register_nmap_library(&self.lua, &self.capability_context)?;
         crate::libraries::http::register_http_library(&self.lua)?;
         crate::libraries::comm::register_comm_library(&self.lua)?;
         crate::libraries::sslcert::register_sslcert_library(&self.lua)?;
@@ -928,8 +928,8 @@ impl ExecutorCore {
         crate::libraries::creds::register_creds_library(&self.lua)?;
         crate::libraries::openssl::register_openssl_library(&self.lua)?;
         crate::libraries::pcre::register_pcre_library(&self.lua)?;
-        crate::libraries::io::register_io_library(&self.lua, &self.sandbox)?;
-        crate::libraries::os::register_os_library(&self.lua, &self.sandbox)?;
+        crate::libraries::io::register_io_library(&self.lua, &self.sandbox, &self.capability_context)?;
+        crate::libraries::os::register_os_library(&self.lua, &self.sandbox, &self.capability_context)?;
         crate::libraries::unittest::register_unittest_library(&self.lua)?;
         crate::libraries::target::register_target_library(&self.lua)?;
         crate::libraries::strbuf::register_strbuf_library(&self.lua)?;
@@ -1006,7 +1006,7 @@ impl ExecutorCore {
         crate::libraries::matchs::register_matchs_library(&self.lua)?;
         crate::libraries::lpeg_utility::register_lpeg_utility_library(&self.lua)?;
         crate::libraries::lpeg::register_lpeg_library(&self.lua)?;
-        crate::libraries::lfs::register_lfs_library(&self.lua, &self.sandbox)?;
+        crate::libraries::lfs::register_lfs_library(&self.lua, &self.sandbox, &self.capability_context)?;
         crate::libraries::libssh2::register_libssh2_library(&self.lua)?;
         crate::libraries::msrpcperformance::register_msrpcperformance_library(&self.lua)?;
         crate::libraries::msrpctypes::register_msrpctypes_library(&self.lua)?;

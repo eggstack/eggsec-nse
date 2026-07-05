@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::SandboxConfig;
+use crate::capabilities::NseCapabilityContext;
 
 thread_local! {
     static NSE_ENV: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
@@ -94,7 +95,11 @@ fn days_in_month_of(year: i32, month: i32) -> i64 {
     }
 }
 
-pub fn register_os_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> {
+pub fn register_os_library(
+    lua: &Lua,
+    sandbox: &SandboxConfig,
+    capability_ctx: &NseCapabilityContext,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let nse_os = lua.create_table()?;
 
@@ -156,7 +161,24 @@ pub fn register_os_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
     nse_os.set("execute", execute_fn)?;
 
     let sandbox_for_remove = sandbox.clone();
+    let cap_ctx_for_remove = capability_ctx.clone();
     let remove_fn = lua.create_function(move |_lua, filename: String| {
+        // Capability context check (write)
+        {
+            use crate::wrappers;
+            let decision = wrappers::check_fs_write(
+                &cap_ctx_for_remove,
+                &filename,
+                "os.remove",
+            );
+            if decision.is_denied() {
+                OS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+                if sandbox_for_remove.log_violations {
+                    tracing::warn!(path = %filename, "Capability: blocked os.remove call: {}", decision.deny_reason().unwrap_or("denied"));
+                }
+                return Ok(false);
+            }
+        }
         let file_path = if sandbox_for_remove.enabled {
             match sandbox_for_remove.get_allowed_path(&filename) {
                 Some(canonical) => canonical,
@@ -179,7 +201,24 @@ pub fn register_os_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> 
     nse_os.set("remove", remove_fn)?;
 
     let sandbox_for_rename = sandbox.clone();
+    let cap_ctx_for_rename = capability_ctx.clone();
     let rename_fn = lua.create_function(move |_lua, (oldname, newname): (String, String)| {
+        // Capability context check (write)
+        {
+            use crate::wrappers;
+            let decision = wrappers::check_fs_write(
+                &cap_ctx_for_rename,
+                &oldname,
+                "os.rename",
+            );
+            if decision.is_denied() {
+                OS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+                if sandbox_for_rename.log_violations {
+                    tracing::warn!(old = %oldname, new = %newname, "Capability: blocked os.rename call: {}", decision.deny_reason().unwrap_or("denied"));
+                }
+                return Ok(false);
+            }
+        }
         let (old_path, new_path) = if sandbox_for_rename.enabled {
             let Some(canonical_old) = sandbox_for_rename.get_allowed_path(&oldname) else {
                 OS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);

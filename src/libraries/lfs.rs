@@ -17,6 +17,7 @@ use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::SandboxConfig;
+use crate::capabilities::NseCapabilityContext;
 
 pub static LFS_SANDBOX_VIOLATIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -24,7 +25,11 @@ pub fn get_lfs_sandbox_metrics() -> usize {
     LFS_SANDBOX_VIOLATIONS.load(Ordering::SeqCst)
 }
 
-pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()> {
+pub fn register_lfs_library(
+    lua: &Lua,
+    sandbox: &SandboxConfig,
+    capability_ctx: &NseCapabilityContext,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let lfs = lua.create_table()?;
 
@@ -41,8 +46,35 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
         }
     };
 
+    // Helper: check capability context for filesystem operations
+    let check_cap = |ctx: &NseCapabilityContext,
+                     path: &str,
+                     is_write: bool,
+                     op: &'static str|
+     -> Result<(), mlua::Error> {
+        use crate::capabilities::{NseCapabilityKind, NseCapabilityRequest};
+        let kind = if is_write {
+            NseCapabilityKind::FilesystemWrite
+        } else {
+            NseCapabilityKind::FilesystemRead
+        };
+        let decision = ctx.check_capability(&NseCapabilityRequest {
+            kind,
+            target: Some(path.to_string()),
+            bytes_hint: None,
+            operation: op,
+        });
+        if decision.is_denied() {
+            return Err(mlua::Error::RuntimeError(
+                decision.deny_reason().unwrap_or("access denied").to_string(),
+            ));
+        }
+        Ok(())
+    };
+
     // lfs.attributes(path) - Get file attributes
     let check_path_for_closure = check_path.clone();
+    let cap_ctx_for_attributes = capability_ctx.clone();
     let attributes_fn = lua.create_function(move |lua, path: String| {
         let Some(canonical_path) = check_path_for_closure(&path) else {
             LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
@@ -51,6 +83,8 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
                 path
             )));
         };
+        // Capability context check (read)
+        check_cap(&cap_ctx_for_attributes, &path, false, "lfs.attributes")?;
 
         match fs::metadata(&canonical_path) {
             Ok(meta) => {
@@ -112,6 +146,7 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
 
     // lfs.dir(path) - Iterate over directory entries
     let check_path_dir = check_path.clone();
+    let cap_ctx_for_dir = capability_ctx.clone();
     let dir_fn = lua.create_function(move |lua, path: String| {
         let Some(canonical_path) = check_path_dir(&path) else {
             LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
@@ -120,6 +155,8 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
                 path
             )));
         };
+        // Capability context check (read)
+        check_cap(&cap_ctx_for_dir, &path, false, "lfs.dir")?;
         let entries = lua.create_table()?;
 
         match fs::read_dir(&canonical_path) {
@@ -143,6 +180,7 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
 
     // lfs.mkdir(path) - Create directory
     let check_path_mkdir = check_path.clone();
+    let cap_ctx_for_mkdir = capability_ctx.clone();
     let mkdir_fn = lua.create_function(move |_lua, path: String| {
         let Some(canonical_path) = check_path_mkdir(&path) else {
             LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
@@ -151,6 +189,8 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
                 path
             )));
         };
+        // Capability context check (write)
+        check_cap(&cap_ctx_for_mkdir, &path, true, "lfs.mkdir")?;
         match fs::create_dir_all(&canonical_path) {
             Ok(()) => Ok(true),
             Err(e) => Err(mlua::Error::RuntimeError(format!(
@@ -163,6 +203,7 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
 
     // lfs.rmdir(path) - Remove directory
     let check_path_rmdir = check_path.clone();
+    let cap_ctx_for_rmdir = capability_ctx.clone();
     let rmdir_fn = lua.create_function(move |_lua, path: String| {
         let Some(canonical_path) = check_path_rmdir(&path) else {
             LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
@@ -171,6 +212,8 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
                 path
             )));
         };
+        // Capability context check (write)
+        check_cap(&cap_ctx_for_rmdir, &path, true, "lfs.rmdir")?;
         match fs::remove_dir(&canonical_path) {
             Ok(()) => Ok(true),
             Err(e) => Err(mlua::Error::RuntimeError(format!(
@@ -183,6 +226,7 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
 
     // lfs.remove(path) - Remove file
     let check_path_remove = check_path.clone();
+    let cap_ctx_for_remove = capability_ctx.clone();
     let remove_fn = lua.create_function(move |_lua, path: String| {
         let Some(canonical_path) = check_path_remove(&path) else {
             LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
@@ -191,6 +235,8 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
                 path
             )));
         };
+        // Capability context check (write)
+        check_cap(&cap_ctx_for_remove, &path, true, "lfs.remove")?;
         match fs::remove_file(&canonical_path) {
             Ok(()) => Ok(true),
             Err(e) => Err(mlua::Error::RuntimeError(format!(
@@ -203,6 +249,7 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
 
     // lfs.rename(old, new) - Rename file/directory
     let check_path_rename = check_path.clone();
+    let cap_ctx_for_rename = capability_ctx.clone();
     let rename_fn = lua.create_function(move |_lua, (old_path, new_path): (String, String)| {
         let Some(canonical_old) = check_path_rename(&old_path) else {
             LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
@@ -216,6 +263,8 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
                 "Rename blocked by sandbox".to_string(),
             ));
         };
+        // Capability context check (write)
+        check_cap(&cap_ctx_for_rename, &old_path, true, "lfs.rename")?;
         match fs::rename(&canonical_old, &canonical_new) {
             Ok(()) => Ok(true),
             Err(e) => Err(mlua::Error::RuntimeError(format!(
@@ -228,6 +277,7 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
 
     // lfs.link(source, link, symbolic) - Create link
     let check_path_link = check_path.clone();
+    let cap_ctx_for_link = capability_ctx.clone();
     let link_fn = lua.create_function(
         move |_lua, (source, link, symbolic): (String, String, bool)| {
             let Some(canonical_source) = check_path_link(&source) else {
@@ -242,6 +292,8 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
                     "Link creation blocked by sandbox".to_string(),
                 ));
             };
+            // Capability context check (write)
+            check_cap(&cap_ctx_for_link, &source, true, "lfs.link")?;
             if symbolic {
                 match std::os::unix::fs::symlink(&canonical_source, &canonical_link) {
                     Ok(()) => Ok(true),
@@ -275,6 +327,7 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
 
     // lfs.chdir(path) - Change directory
     let check_path_chdir = check_path.clone();
+    let cap_ctx_for_chdir = capability_ctx.clone();
     let chdir_fn = lua.create_function(move |_lua, path: String| {
         let Some(canonical_path) = check_path_chdir(&path) else {
             LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
@@ -283,6 +336,8 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
                 path
             )));
         };
+        // Capability context check (read - chdir reads directory)
+        check_cap(&cap_ctx_for_chdir, &path, false, "lfs.chdir")?;
         match std::env::set_current_dir(&canonical_path) {
             Ok(()) => Ok(true),
             Err(e) => Err(mlua::Error::RuntimeError(format!(
@@ -295,6 +350,7 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
 
     // lfs.touch(path) - Touch file
     let check_path_touch = check_path.clone();
+    let cap_ctx_for_touch = capability_ctx.clone();
     let touch_fn = lua.create_function(
         move |_lua, (path, _access_time, _modification_time): (String, Option<u64>, Option<u64>)| {
             let Some(canonical_path) = check_path_touch(&path) else {
@@ -304,6 +360,8 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
                     path
                 )));
             };
+            // Capability context check (write)
+            check_cap(&cap_ctx_for_touch, &path, true, "lfs.touch")?;
 
             if canonical_path.exists() {
                 Ok(true)
@@ -333,6 +391,7 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
 
     // lfs.set_mode(path, mode) - Set file permissions
     let check_path_set_mode = check_path.clone();
+    let cap_ctx_for_set_mode = capability_ctx.clone();
     let set_mode_fn = lua.create_function(move |_lua, (path, mode): (String, String)| {
         let Some(canonical_path) = check_path_set_mode(&path) else {
             LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
@@ -341,6 +400,8 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
                 path
             )));
         };
+        // Capability context check (write)
+        check_cap(&cap_ctx_for_set_mode, &path, true, "lfs.set_mode")?;
         if let Ok(perms) = u32::from_str_radix(&mode, 8) {
             use std::os::unix::fs::PermissionsExt;
             let permissions = fs::Permissions::from_mode(perms);
@@ -359,6 +420,7 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
 
     // lfs.symlinkattributes(path) - Get symlink attributes
     let check_path_symlink = check_path.clone();
+    let cap_ctx_for_symlink = capability_ctx.clone();
     let symlinkattributes_fn = lua.create_function(move |lua, path: String| {
         let Some(canonical_path) = check_path_symlink(&path) else {
             LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
@@ -367,6 +429,8 @@ pub fn register_lfs_library(lua: &Lua, sandbox: &SandboxConfig) -> LuaResult<()>
                 path
             )));
         };
+        // Capability context check (read)
+        check_cap(&cap_ctx_for_symlink, &path, false, "lfs.symlinkattributes")?;
 
         match fs::symlink_metadata(&canonical_path) {
             Ok(meta) => {
