@@ -10,6 +10,8 @@ The NSE (Nmap Scripting Engine) module (`crates/eggsec-nse/`) provides Lua VM in
 
 > **Milestone 3 (capability wrappers) Phase 01 complete.** A complete capability inventory and risk classification exists at `architecture/nse_capability_inventory.md`. The inventory classifies all side-effecting NSE helper operations by capability class, blocking risk, profile policy, accounting needs, cancellation requirements, and report events. Key findings: 4 libraries sandboxed (socket, io, os, lfs), all protocol libraries (~100+) bypass sandbox, `nmap.socket_*()` bypasses socket sandbox, `stdnse.sleep()` blocks without cancellation checks. Migration priority: process execution → filesystem write → filesystem read → network TCP/UDP → DNS → compression → crypto/TLS → time/randomness → pure CPU.
 
+> **Milestone 3 Phase 02 complete.** `NseCapabilityContext` and decision engine (`capabilities.rs`) provide centralized policy enforcement. `NseCapabilityKind` covers 11 operation classes. Profile-specific checks: ManualPermissive allows all with warnings, ManualStrict enforces path/network policy, AgentSafe denies process exec + FS write, CiSafe denies all side effects. `NseCapabilityEvent` integration into `NseRunReport.capability_events`. Pilot wrappers in `wrappers.rs`. `ExecutorCore` stores capability context. Architecture guards detect direct high-risk ops in NSE libraries (informational).
+
 ## Recent Bug Fixes (2026-05-28)
 
 | Component | Issue | Fix |

@@ -2,6 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::capabilities::NseCapabilityEvent;
 use crate::limits::{NseExecutionLimits, NseExecutionStats};
 use crate::profile::ResolvedNseExecutionProfile;
 use crate::resolver::{registry, NseLoadDiagnostic, NseScriptSource};
@@ -22,6 +23,8 @@ pub struct NseRunReport {
     pub rules: Vec<NseRuleEvaluationReport>,
     pub output: NseOutputSummary,
     pub compatibility: NseCompatibilitySummary,
+    /// Capability events recorded during execution (denials, warnings, allowed ops).
+    pub capability_events: Vec<NseCapabilityEventSummary>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -231,6 +234,33 @@ pub struct NseCompatibilitySummary {
     pub approximations: Vec<String>,
 }
 
+/// Summary of a capability event for report integration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NseCapabilityEventSummary {
+    /// Kind of operation (filesystem_read, network_tcp, etc.).
+    pub kind: String,
+    /// Operation name (e.g., "io.popen", "socket.connect").
+    pub operation: String,
+    /// Optional target (host, path, command).
+    pub target: Option<String>,
+    /// Whether the operation was allowed.
+    pub allowed: bool,
+    /// Denial or warning reason if applicable.
+    pub reason: Option<String>,
+}
+
+impl From<&NseCapabilityEvent> for NseCapabilityEventSummary {
+    fn from(event: &NseCapabilityEvent) -> Self {
+        Self {
+            kind: event.kind.to_string(),
+            operation: event.operation.clone(),
+            target: event.target.clone(),
+            allowed: event.allowed,
+            reason: event.reason.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NseRunCompatibilityStatus {
     Compatible,
@@ -312,6 +342,7 @@ impl NseRunReport {
                 unsupported_features: Vec::new(),
                 approximations: Vec::new(),
             },
+            capability_events: Vec::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
         }
@@ -436,6 +467,11 @@ impl NseRunReport {
         self
     }
 
+    pub fn with_capability_events(mut self, events: Vec<NseCapabilityEvent>) -> Self {
+        self.capability_events = events.iter().map(NseCapabilityEventSummary::from).collect();
+        self
+    }
+
     pub fn with_output(mut self, output: &str) -> Self {
         let line_count = output.lines().count();
         let truncated = output.len() > 10000;
@@ -463,10 +499,11 @@ impl NseRunReport {
         let has_rejected = self.resolver.rejected_count > 0;
         let has_warnings = !self.warnings.is_empty();
         let has_approxs = self.rules.iter().any(|r| r.exactness == "approximate");
+        let has_capability_denials = self.capability_events.iter().any(|e| !e.allowed);
 
         let status = if has_errors {
             NseRunCompatibilityStatus::Failed
-        } else if has_rejected {
+        } else if has_rejected || has_capability_denials {
             NseRunCompatibilityStatus::Partial
         } else if has_approxs || has_warnings {
             NseRunCompatibilityStatus::CompatibleWithWarnings

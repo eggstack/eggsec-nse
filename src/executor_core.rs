@@ -12,12 +12,13 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::capabilities::NseCapabilityContext;
 use crate::libraries::shared;
 use crate::limits::{
     NseCancellationToken, NseExecutionLimits, NseExecutionStats, NseLimitViolation,
     NseResourceCounters,
 };
-use crate::profile::{NseModulePolicy, NseScriptPolicy};
+use crate::profile::{NseExecutionProfileKind, NseModulePolicy, NseNetworkPolicy, NseScriptPolicy};
 use crate::report::{NseLibraryUseReport, NseRequiredModuleReport, NseRequiredModuleSource};
 use crate::resolver::ScriptResolver;
 
@@ -50,6 +51,9 @@ pub struct ExecutorCore {
     pub(crate) limit_violation: Arc<Mutex<Option<NseLimitViolation>>>,
     pub(crate) script_policy: NseScriptPolicy,
     pub(crate) module_policy: NseModulePolicy,
+    pub(crate) profile_kind: NseExecutionProfileKind,
+    pub(crate) network_policy: NseNetworkPolicy,
+    pub(crate) capability_context: NseCapabilityContext,
 }
 
 impl ExecutorCore {
@@ -85,6 +89,20 @@ impl ExecutorCore {
         let registry = Mutex::new(FxHashMap::default());
         let resource_counters = Arc::new(NseResourceCounters::new());
 
+        let profile_kind = NseExecutionProfileKind::ManualPermissive;
+        let network_policy = NseNetworkPolicy::AllowAllManual;
+
+        let capability_context = NseCapabilityContext::new(
+            profile_kind,
+            network_policy.clone(),
+            script_policy.clone(),
+            module_policy.clone(),
+            sandbox.clone(),
+            limits.clone(),
+            cancellation.clone(),
+            resource_counters.clone(),
+        );
+
         let core = Self {
             lua,
             target: String::new(),
@@ -101,6 +119,9 @@ impl ExecutorCore {
             limit_violation: Arc::new(Mutex::new(None)),
             script_policy,
             module_policy,
+            profile_kind,
+            network_policy,
+            capability_context,
         };
 
         core.setup_globals()?;
@@ -114,13 +135,35 @@ impl ExecutorCore {
     ///
     /// This is the preferred constructor for surfaces that have an explicit profile.
     pub fn with_profile(profile: &crate::profile::ResolvedNseExecutionProfile) -> LuaResult<Self> {
-        Self::with_policy(
+        let core = Self::with_policy(
             profile.sandbox.clone(),
             profile.limits.clone(),
             NseCancellationToken::new(),
             profile.script_policy.clone(),
             profile.module_policy.clone(),
-        )
+        )?;
+        // Override profile_kind, network_policy, and capability_context from profile
+        let capability_context = NseCapabilityContext::new(
+            profile.kind,
+            profile.network_policy.clone(),
+            profile.script_policy.clone(),
+            profile.module_policy.clone(),
+            profile.sandbox.clone(),
+            profile.limits.clone(),
+            core.cancellation.clone(),
+            core.resource_counters.clone(),
+        );
+        Ok(Self {
+            profile_kind: profile.kind,
+            network_policy: profile.network_policy.clone(),
+            capability_context,
+            ..core
+        })
+    }
+
+    /// Get a reference to the capability context.
+    pub fn capability_context(&self) -> &NseCapabilityContext {
+        &self.capability_context
     }
 
     pub fn lua(&self) -> &Lua {

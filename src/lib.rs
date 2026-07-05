@@ -247,6 +247,8 @@ impl SandboxConfig {
 #[cfg(feature = "nse")]
 pub mod async_executor;
 #[cfg(feature = "nse")]
+pub mod capabilities;
+#[cfg(feature = "nse")]
 pub mod context;
 #[cfg(feature = "nse")]
 pub mod cve;
@@ -262,12 +264,19 @@ pub mod public_api;
 #[cfg(feature = "nse")]
 pub mod report;
 pub mod resolver;
+#[cfg(feature = "nse")]
+pub mod wrappers;
 
 #[cfg(feature = "nse")]
 pub mod libraries;
 
 #[cfg(feature = "nse")]
 pub use async_executor::AsyncNseExecutor;
+#[cfg(feature = "nse")]
+pub use capabilities::{
+    NseCapabilityContext, NseCapabilityDecision, NseCapabilityEvent, NseCapabilityKind,
+    NseCapabilityRequest,
+};
 #[cfg(feature = "nse")]
 pub use executor::NseExecutor;
 #[cfg(feature = "nse")]
