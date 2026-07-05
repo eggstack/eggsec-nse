@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::limits::{NseExecutionLimits, NseExecutionStats};
 use crate::profile::ResolvedNseExecutionProfile;
-use crate::resolver::{NseLoadDiagnostic, NseScriptSource};
+use crate::resolver::{registry, NseLoadDiagnostic, NseScriptSource};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NseRunReport {
@@ -16,6 +16,8 @@ pub struct NseRunReport {
     pub limits: NseLimitsSummary,
     pub stats: NseExecutionStatsSummary,
     pub resolver: NseResolverSummary,
+    /// Per-run libraries required or attempted during execution.
+    /// This is not a static capability inventory.
     pub libraries: Vec<NseLibraryUseReport>,
     pub rules: Vec<NseRuleEvaluationReport>,
     pub output: NseOutputSummary,
@@ -88,6 +90,39 @@ pub struct NseResolverDiagnosticSummary {
     pub detail: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Summary of a single observed `require()` attempt.
+pub enum NseRequiredModuleSource {
+    BuiltinGlobal,
+    Filesystem,
+    Missing,
+    BlockedByPolicy,
+    InvalidName,
+    Unknown,
+}
+
+impl fmt::Display for NseRequiredModuleSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BuiltinGlobal => write!(f, "builtin-global"),
+            Self::Filesystem => write!(f, "filesystem"),
+            Self::Missing => write!(f, "missing"),
+            Self::BlockedByPolicy => write!(f, "blocked-by-policy"),
+            Self::InvalidName => write!(f, "invalid-name"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// Internal per-run record of an observed `require()` attempt.
+pub struct NseRequiredModuleReport {
+    pub name: String,
+    pub loaded: bool,
+    pub source: NseRequiredModuleSource,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NseLibraryUseReport {
     pub name: String,
@@ -96,8 +131,76 @@ pub struct NseLibraryUseReport {
     pub side_effects: Vec<String>,
     pub fallback_behavior: String,
     pub notes: String,
+    /// `true` only when the runtime observed a successful load.
     pub loaded: bool,
     pub warnings: Vec<String>,
+}
+
+impl NseLibraryUseReport {
+    pub fn from_required_module(required: &NseRequiredModuleReport) -> Self {
+        let mut warnings = Vec::new();
+        if !required.loaded {
+            warnings.push(format!("require source: {}", required.source));
+        }
+        if let Some(error) = &required.error {
+            warnings.push(error.clone());
+        }
+
+        if let Some(desc) = registry::find_library(&required.name) {
+            let side_effects = desc
+                .sandbox_side_effects
+                .iter()
+                .map(|se| se.to_string())
+                .collect();
+            Self {
+                name: desc.name.to_string(),
+                category: desc.category.to_string(),
+                registered: true,
+                side_effects,
+                fallback_behavior: desc.fallback_behavior.to_string(),
+                notes: desc.notes.to_string(),
+                loaded: required.loaded,
+                warnings,
+            }
+        } else {
+            Self {
+                name: required.name.clone(),
+                category: "Unknown".to_string(),
+                registered: false,
+                side_effects: Vec::new(),
+                fallback_behavior: "Unknown".to_string(),
+                notes: "not present in NSE library registry".to_string(),
+                loaded: required.loaded,
+                warnings,
+            }
+        }
+    }
+}
+
+pub fn library_use_reports_from_required_modules(
+    required_modules: &[NseRequiredModuleReport],
+) -> Vec<NseLibraryUseReport> {
+    required_modules
+        .iter()
+        .map(NseLibraryUseReport::from_required_module)
+        .collect()
+}
+
+pub fn library_use_reports_from_static_requires(names: &[String]) -> Vec<NseLibraryUseReport> {
+    names
+        .iter()
+        .map(|name| {
+            let required = NseRequiredModuleReport {
+                name: name.clone(),
+                loaded: false,
+                source: NseRequiredModuleSource::Unknown,
+                error: Some(
+                    "detected statically; runtime require tracking did not complete".to_string(),
+                ),
+            };
+            NseLibraryUseReport::from_required_module(&required)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

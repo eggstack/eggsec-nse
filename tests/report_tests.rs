@@ -564,4 +564,5 @@ fn test_build_report_via_executor_method() {
     assert!(report.stats.elapsed_secs >= 0.0);
     assert!(report.output.has_output);
     assert_eq!(report.output.content, "hello");
+    assert!(report.libraries.is_empty());
 }

@@ -211,6 +211,12 @@ impl NseExecutor {
     pub fn get_sandbox_metrics(&self) -> SandboxMetrics {
         self.core.get_sandbox_metrics()
     }
+    pub fn required_modules(&self) -> Vec<crate::report::NseRequiredModuleReport> {
+        self.core.required_modules()
+    }
+    pub fn library_reports(&self) -> Vec<crate::report::NseLibraryUseReport> {
+        self.core.library_reports()
+    }
 
     // Executor-specific: rule execution
 
@@ -218,6 +224,7 @@ impl NseExecutor {
         &mut self,
         script: &str,
     ) -> LuaResult<(String, Vec<String>, Vec<NseRuleEvaluationReport>)> {
+        self.core.clear_library_reports();
         self.lua().load(script).eval::<Value>()?;
         let globals = self.lua().globals();
         let mut outputs = Vec::new();
@@ -500,40 +507,14 @@ impl NseExecutor {
                 .to_string(),
             crate::resolver::NseScriptSource::InlineManual { label, .. } => label.clone(),
         };
-        let library_reports = self.build_library_reports();
         crate::report::NseRunReport::new(self.target(), &script_name)
             .with_profile(profile)
             .with_script_source(script_source)
             .with_stats(&stats)
             .with_resolver_diagnostics(diagnostics)
-            .with_libraries(library_reports)
+            .with_libraries(self.library_reports())
             .with_output(output)
             .compute_compatibility()
-    }
-
-    fn build_library_reports(&self) -> Vec<crate::report::NseLibraryUseReport> {
-        use crate::resolver::registry;
-
-        registry::all_libraries()
-            .iter()
-            .map(|desc| {
-                let side_effects: Vec<String> = desc
-                    .sandbox_side_effects
-                    .iter()
-                    .map(|se| se.to_string())
-                    .collect();
-                crate::report::NseLibraryUseReport {
-                    name: desc.name.to_string(),
-                    category: desc.category.to_string(),
-                    registered: true,
-                    side_effects,
-                    fallback_behavior: desc.fallback_behavior.to_string(),
-                    notes: desc.notes.to_string(),
-                    loaded: true,
-                    warnings: Vec::new(),
-                }
-            })
-            .collect()
     }
 }
 

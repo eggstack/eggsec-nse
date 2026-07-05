@@ -106,7 +106,7 @@ fn multiple_rules_evaluated_in_sequence() {
 }
 
 #[test]
-fn library_reports_populated_from_registry() {
+fn library_reports_stay_empty_without_require_activity() {
     let executor = test_executor();
     let source = eggsec_nse::resolver::NseScriptSource::Builtin {
         name: "test".to_string(),
@@ -115,15 +115,55 @@ fn library_reports_populated_from_registry() {
         eggsec_nse::profile::ResolvedNseExecutionProfile::manual_permissive(Some("10.0.0.1"));
     let report = executor.build_report(&profile, &source, "output", &[]);
 
-    assert!(!report.libraries.is_empty());
     assert!(
-        report.libraries.iter().any(|l| l.name == "stdnse"),
-        "expected stdnse in library reports"
+        report.libraries.is_empty(),
+        "unused registered libraries should not be fabricated"
     );
-    assert!(
-        report.libraries.iter().all(|l| l.registered),
-        "all libraries should be registered"
-    );
+}
+
+#[test]
+fn library_reports_capture_runtime_require_attempts() {
+    let mut executor = test_executor();
+    executor.set_target("10.0.0.1").unwrap();
+
+    let output = executor
+        .run_script_with_limits(
+            r#"
+local stdnse = require "stdnse"
+local ok = pcall(require, "definitely_missing_module")
+return ok
+"#,
+        )
+        .unwrap();
+
+    let source = eggsec_nse::resolver::NseScriptSource::Builtin {
+        name: "require-truthfulness".to_string(),
+    };
+    let profile =
+        eggsec_nse::profile::ResolvedNseExecutionProfile::manual_permissive(Some("10.0.0.1"));
+    let report = executor.build_report(&profile, &source, &output, &[]);
+
+    assert_eq!(report.libraries.len(), 2);
+    let stdnse = report
+        .libraries
+        .iter()
+        .find(|l| l.name == "stdnse")
+        .expect("stdnse should be recorded");
+    assert!(stdnse.registered);
+    assert!(stdnse.loaded);
+
+    let missing = report
+        .libraries
+        .iter()
+        .find(|l| l.name == "definitely_missing_module")
+        .expect("missing module should be recorded");
+    assert!(!missing.registered);
+    assert!(!missing.loaded);
+    assert!(!missing.warnings.is_empty());
+    assert!(report
+        .libraries
+        .iter()
+        .all(|l| l.name == "stdnse" || l.name == "definitely_missing_module"));
 }
 
 #[test]

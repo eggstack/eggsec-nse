@@ -6,7 +6,7 @@ The NSE (Nmap Scripting Engine) module (`crates/eggsec-nse/`) provides Lua VM in
 
 > **Milestone 1 (loader/profile) is closed.** Canonical implementation, tests, policy contract, and deferred work are listed in the [Milestone 1 Closure Index](../../architecture/nse_integration.md#milestone-1-closure-index). Future work should treat that index as the authoritative pointer; do not duplicate its content.
 
-> **Milestone 2 (registry/report/corpus) is closed.** Library registry metadata (`NseLibraryDescriptor` / `LIBRARY_REGISTRY`) is the source of truth for library compatibility. Rule behavior is defined by `NseRuleEvaluationReport`. Run output truthfulness is defined by `NseRunReport`. The compatibility corpus is representative and local-only. See the [Milestone 2 Closure Note](../../architecture/nse_integration.md#milestone-2-closure-note).
+> **Milestone 2 (registry/report/corpus) is closed.** Library registry metadata (`NseLibraryDescriptor` / `LIBRARY_REGISTRY`) is the source of truth for library compatibility. `NseRunReport.libraries` records per-run required/attempted library usage, not a capability snapshot, and the later truthfulness follow-up refined that reporting without reopening Milestone 2. Rule behavior is defined by `NseRuleEvaluationReport`. Run output truthfulness is defined by `NseRunReport`. The compatibility corpus is representative and local-only. See the [Milestone 2 Closure Note](../../architecture/nse_integration.md#milestone-2-closure-note).
 
 ## Recent Bug Fixes (2026-05-28)
 

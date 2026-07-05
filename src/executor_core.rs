@@ -18,6 +18,7 @@ use crate::limits::{
     NseResourceCounters,
 };
 use crate::profile::{NseModulePolicy, NseScriptPolicy};
+use crate::report::{NseLibraryUseReport, NseRequiredModuleReport, NseRequiredModuleSource};
 use crate::resolver::ScriptResolver;
 
 #[derive(Debug, Clone, Default)]
@@ -39,6 +40,7 @@ pub struct ExecutorCore {
     pub(crate) scripts_path: Arc<Mutex<Vec<PathBuf>>>,
     pub(crate) output: Mutex<Vec<String>>,
     pub(crate) registry: Mutex<FxHashMap<String, Value>>,
+    pub(crate) required_modules: Arc<Mutex<Vec<NseRequiredModuleReport>>>,
     pub(crate) sandbox: crate::SandboxConfig,
     pub(crate) limits: NseExecutionLimits,
     pub(crate) cancellation: NseCancellationToken,
@@ -89,6 +91,7 @@ impl ExecutorCore {
             scripts_path: scripts_path.clone(),
             output,
             registry,
+            required_modules: Arc::new(Mutex::new(Vec::new())),
             sandbox,
             limits,
             cancellation,
@@ -217,6 +220,22 @@ impl ExecutorCore {
         self.output.lock().clone()
     }
 
+    pub fn required_modules(&self) -> Vec<NseRequiredModuleReport> {
+        self.required_modules.lock().clone()
+    }
+
+    pub fn library_reports(&self) -> Vec<NseLibraryUseReport> {
+        crate::report::library_use_reports_from_required_modules(&self.required_modules())
+    }
+
+    pub(crate) fn clear_required_modules(&self) {
+        self.required_modules.lock().clear();
+    }
+
+    pub(crate) fn clear_library_reports(&self) {
+        self.clear_required_modules();
+    }
+
     pub fn get_sandbox_metrics(&self) -> SandboxMetrics {
         let (io_handles, io_violations) = crate::libraries::io::get_io_sandbox_metrics();
         SandboxMetrics {
@@ -250,6 +269,8 @@ impl ExecutorCore {
     }
 
     pub fn run_script(&self, script: &str) -> LuaResult<String> {
+        self.clear_library_reports();
+
         // Pre-check script size limit
         if let Err(violation) = self.limits.check_script_size(script.len()) {
             *self.limit_violation.lock() = Some(violation.clone());
@@ -964,10 +985,28 @@ impl ExecutorCore {
     fn setup_require(&self, _scripts_path: Arc<Mutex<Vec<PathBuf>>>) -> LuaResult<()> {
         let cache: Arc<Mutex<FxHashMap<String, Value>>> =
             Arc::new(Mutex::new(FxHashMap::default()));
+        let required_modules = self.required_modules.clone();
         let script_policy = self.script_policy.clone();
         let module_policy = self.module_policy.clone();
         let limits = self.limits.clone();
         let cancellation = self.cancellation.clone();
+
+        fn record_required_module(
+            required_modules: &Arc<Mutex<Vec<NseRequiredModuleReport>>>,
+            report: NseRequiredModuleReport,
+        ) {
+            let mut modules = required_modules.lock();
+            if let Some(existing) = modules
+                .iter_mut()
+                .find(|existing| existing.name == report.name)
+            {
+                if !existing.loaded && report.loaded {
+                    *existing = report;
+                }
+                return;
+            }
+            modules.push(report);
+        }
 
         let require_fn = self.lua.create_function(move |lua, name: String| {
             if cancellation.is_cancelled() {
@@ -978,6 +1017,15 @@ impl ExecutorCore {
             {
                 let g = cache.lock();
                 if let Some(cached) = g.get(&name) {
+                    record_required_module(
+                        &required_modules,
+                        NseRequiredModuleReport {
+                            name: name.clone(),
+                            loaded: true,
+                            source: NseRequiredModuleSource::BuiltinGlobal,
+                            error: None,
+                        },
+                    );
                     return Ok(cached.clone());
                 }
             }
@@ -987,6 +1035,15 @@ impl ExecutorCore {
             // Check _REQUIRE_MODULES
             if let Ok(modules) = globals.get::<Table>("_REQUIRE_MODULES") {
                 if let Ok(module) = modules.get::<Table>(name.as_str()) {
+                    record_required_module(
+                        &required_modules,
+                        NseRequiredModuleReport {
+                            name: name.clone(),
+                            loaded: true,
+                            source: NseRequiredModuleSource::BuiltinGlobal,
+                            error: None,
+                        },
+                    );
                     cache
                         .lock()
                         .insert(name.clone(), Value::Table(module.clone()));
@@ -1001,6 +1058,15 @@ impl ExecutorCore {
                         tracing::warn!("NSE require: failed to cache module '{}' in _REQUIRE_MODULES: {}", name, e);
                     }
                 }
+                record_required_module(
+                    &required_modules,
+                    NseRequiredModuleReport {
+                        name: name.clone(),
+                        loaded: true,
+                        source: NseRequiredModuleSource::BuiltinGlobal,
+                        error: None,
+                    },
+                );
                 cache
                     .lock()
                     .insert(name.clone(), Value::Table(module.clone()));
@@ -1029,6 +1095,15 @@ impl ExecutorCore {
                                     tracing::warn!("NSE require: failed to cache module '{}' in _REQUIRE_MODULES: {}", name, e);
                                 }
                             }
+                            record_required_module(
+                                &required_modules,
+                                NseRequiredModuleReport {
+                                    name: name.clone(),
+                                    loaded: true,
+                                    source: NseRequiredModuleSource::Filesystem,
+                                    error: None,
+                                },
+                            );
                             cache.lock().insert(name.clone(), value.clone());
                             return Ok(value);
                         }
@@ -1038,6 +1113,15 @@ impl ExecutorCore {
                                 name,
                                 resolved.path.as_deref().map(|p| p.display().to_string()).unwrap_or_else(|| "unknown".to_string()),
                                 e
+                            );
+                            record_required_module(
+                                &required_modules,
+                                NseRequiredModuleReport {
+                                    name: name.clone(),
+                                    loaded: false,
+                                    source: NseRequiredModuleSource::Filesystem,
+                                    error: Some(e.to_string()),
+                                },
                             );
                             return Err(mlua::Error::RuntimeError(format!(
                                 "module '{}' eval error: {}",
@@ -1055,16 +1139,52 @@ impl ExecutorCore {
                         name,
                         module_policy.allow_filesystem_modules
                     );
+                    record_required_module(
+                        &required_modules,
+                        NseRequiredModuleReport {
+                            name: name.clone(),
+                            loaded: false,
+                            source: if !module_policy.allow_filesystem_modules
+                                || module_policy.allowed_module_roots.is_empty()
+                            {
+                                NseRequiredModuleSource::BlockedByPolicy
+                            } else {
+                                NseRequiredModuleSource::Missing
+                            },
+                            error: Some(if !module_policy.allow_filesystem_modules
+                                || module_policy.allowed_module_roots.is_empty()
+                            {
+                                "filesystem module loading blocked by policy".to_string()
+                            } else {
+                                "module not found".to_string()
+                            }),
+                        },
+                    );
                 }
                 Err(e) => {
                     tracing::warn!("NSE require: resolver rejected module '{}': {}", name, e);
+                    let error_text = e.to_string();
+                    let source = match &e {
+                        crate::resolver::NseLoadError::InvalidModuleName { .. } => {
+                            NseRequiredModuleSource::InvalidName
+                        }
+                        _ => NseRequiredModuleSource::Unknown,
+                    };
+                    record_required_module(
+                        &required_modules,
+                        NseRequiredModuleReport {
+                            name: name.clone(),
+                            loaded: false,
+                            source,
+                            error: Some(error_text.clone()),
+                        },
+                    );
                     return Err(mlua::Error::RuntimeError(format!(
                         "module '{}' not found: {}",
-                        name, e
+                        name, error_text
                     )));
                 }
             }
-
             Err(mlua::Error::RuntimeError(format!(
                 "module '{}' not found",
                 name
