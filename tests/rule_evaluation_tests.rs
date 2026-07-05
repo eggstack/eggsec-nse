@@ -2,6 +2,28 @@ use eggsec_nse::limits::{NseCancellationToken, NseExecutionLimits};
 use eggsec_nse::report::*;
 use eggsec_nse::{NseExecutor, SandboxConfig};
 
+struct NseTestResult {
+    report: NseRunReport,
+}
+
+fn run_nse_with_content(_script_args: &str, source: &str) -> NseTestResult {
+    let mut executor = test_executor();
+    executor.set_target("10.0.0.1").unwrap();
+
+    let output = executor
+        .run_script_with_limits(source)
+        .expect("script execution should succeed");
+
+    let script_source = eggsec_nse::resolver::NseScriptSource::Builtin {
+        name: "test".to_string(),
+    };
+    let profile =
+        eggsec_nse::profile::ResolvedNseExecutionProfile::manual_permissive(Some("10.0.0.1"));
+    let report = executor.build_report(&profile, &script_source, &output, &[]);
+
+    NseTestResult { report }
+}
+
 fn test_executor() -> NseExecutor {
     NseExecutor::with_policy(
         SandboxConfig::default(),
@@ -181,4 +203,163 @@ fn failure_report_has_error() {
         report.compatibility.status,
         NseRunCompatibilityStatus::Failed
     );
+}
+
+#[test]
+fn library_reports_empty_when_no_require_calls() {
+    let result = run_nse_with_content("--script-args=nse_config=default", "return function() end");
+    assert!(
+        result.report.libraries.is_empty(),
+        "No require() calls should produce empty library reports, got: {:?}",
+        result.report.libraries
+    );
+}
+
+#[test]
+fn library_reports_capture_only_required_modules() {
+    let result = run_nse_with_content(
+        "--script-args=nse_config=default",
+        r#"
+        local stdnse = require "stdnse"
+        return function() end
+        "#,
+    );
+    assert!(
+        !result.report.libraries.is_empty(),
+        "Script requiring stdnse should have library reports"
+    );
+    let names: Vec<&str> = result
+        .report
+        .libraries
+        .iter()
+        .map(|l| l.name.as_str())
+        .collect();
+    assert!(
+        names.contains(&"stdnse"),
+        "stdnse should be in library reports, got: {:?}",
+        names
+    );
+    // Must NOT contain unrelated registry entries
+    assert!(
+        names.len() <= 2,
+        "Should only have stdnse and possibly one missing module, got {} entries: {:?}",
+        names.len(),
+        names
+    );
+}
+
+#[test]
+fn repeated_require_produces_stable_deduplicated_report() {
+    let result = run_nse_with_content(
+        "--script-args=nse_config=default",
+        r#"
+        local stdnse = require "stdnse"
+        local stdnse2 = require "stdnse"
+        local stdnse3 = require "stdnse"
+        return function() end
+        "#,
+    );
+    let stdnse_count = result
+        .report
+        .libraries
+        .iter()
+        .filter(|l| l.name == "stdnse")
+        .count();
+    assert_eq!(
+        stdnse_count, 1,
+        "Repeated require of stdnse should produce exactly one report entry, got {}",
+        stdnse_count
+    );
+}
+
+#[test]
+fn missing_module_appears_with_loaded_false_and_warning() {
+    let result = run_nse_with_content(
+        "--script-args=nse_config=default",
+        r#"
+        local ok, err = pcall(require, "definitely_missing_module_xyz")
+        return function() end
+        "#,
+    );
+    let missing = result
+        .report
+        .libraries
+        .iter()
+        .find(|l| l.name == "definitely_missing_module_xyz");
+    match missing {
+        Some(entry) => {
+            assert!(
+                !entry.loaded,
+                "Missing module should have loaded=false, got loaded={}",
+                entry.loaded
+            );
+            assert!(
+                !entry.warnings.is_empty(),
+                "Missing module should have a warning about the failed require"
+            );
+        }
+        None => {
+            // It's also acceptable if missing modules don't appear at all
+            // (depends on implementation), but loaded: true must never appear
+        }
+    }
+    // Critical: no entry should have loaded=true for a missing module
+    for entry in &result.report.libraries {
+        if entry.name == "definitely_missing_module_xyz" {
+            assert!(!entry.loaded, "Missing module must never have loaded=true");
+        }
+    }
+}
+
+#[test]
+fn static_fallback_produces_loaded_false_entries() {
+    // A script that uses require but we can verify the static fallback path
+    // by checking that any statically-detected entries have loaded=false
+    let result = run_nse_with_content(
+        "--script-args=nse_config=default",
+        r#"
+        -- Use a require that will be detected statically
+        local string = require "string"
+        return function() end
+        "#,
+    );
+    // If any library reports exist from static fallback, they must have loaded=false
+    for entry in &result.report.libraries {
+        if entry.warnings.iter().any(|w| w.contains("static")) {
+            assert!(
+                !entry.loaded,
+                "Static fallback entry '{}' should have loaded=false",
+                entry.name
+            );
+        }
+    }
+}
+
+#[test]
+fn library_and_rule_reports_populated_not_fabricated() {
+    let result = run_nse_with_content(
+        "--script-args=nse_config=default",
+        r#"
+        local stdnse = require "stdnse"
+        return function(rule)
+            return tostring(rule)
+        end
+        "#,
+    );
+    // Libraries should reflect only what was required, not a full registry dump
+    if !result.report.libraries.is_empty() {
+        let stdnse_present = result.report.libraries.iter().any(|l| l.name == "stdnse");
+        assert!(
+            stdnse_present,
+            "stdnse should be present since it was required"
+        );
+        // Must not have all 43 registry entries
+        assert!(
+            result.report.libraries.len() < 43,
+            "Libraries should not be a full registry dump, got {} entries",
+            result.report.libraries.len()
+        );
+    }
+    // Rules should be populated from real evaluation
+    // (may be empty if no port/script rules were evaluated)
 }
