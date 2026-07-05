@@ -2,6 +2,8 @@
 //!
 //! Provides low-level socket communication for banner grabbing and data exchange.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
 use mlua::{Lua, Result as LuaResult, Table};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -10,15 +12,26 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream as AsyncTcpStream;
 use tokio::time::timeout;
 
-pub fn register_comm_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_comm_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
+
+    let capability_ctx = capability_ctx.clone();
 
     let comm = lua.create_table()?;
 
     comm.set(
         "get_banner",
-        lua.create_function(
-            |lua, (host, port, _options): (String, u16, Option<Table>)| {
+        lua.create_function({
+            let capability_ctx = capability_ctx.clone();
+            move |lua, (host, port, _options): (String, u16, Option<Table>)| {
+                let decision =
+                    wrappers::check_network_tcp(&capability_ctx, &host, "comm.get_banner");
+                if decision.is_denied() {
+                    let result = lua.create_table()?;
+                    result.set("data", "")?;
+                    return Ok(result);
+                }
+
                 let timeout = Duration::from_secs(5);
                 let addr = format!("{}:{}", host, port);
 
@@ -58,14 +71,22 @@ pub fn register_comm_library(lua: &Lua) -> LuaResult<()> {
                         Ok(result)
                     }
                 }
-            },
-        )?,
+            }
+        })?,
     )?;
 
     comm.set(
         "exchange",
-        lua.create_function(
-            |lua, (host, port, data, _options): (String, u16, String, Option<Table>)| {
+        lua.create_function({
+            let capability_ctx = capability_ctx.clone();
+            move |lua, (host, port, data, _options): (String, u16, String, Option<Table>)| {
+                let decision = wrappers::check_network_tcp(&capability_ctx, &host, "comm.exchange");
+                if decision.is_denied() {
+                    let result = lua.create_table()?;
+                    result.set("data", "")?;
+                    return Ok(result);
+                }
+
                 let timeout = Duration::from_secs(5);
                 let addr = format!("{}:{}", host, port);
 
@@ -114,14 +135,23 @@ pub fn register_comm_library(lua: &Lua) -> LuaResult<()> {
                         Ok(result)
                     }
                 }
-            },
-        )?,
+            }
+        })?,
     )?;
 
     comm.set(
         "tryssl",
-        lua.create_function(
-            |lua, (host, port, _data, _options): (String, u16, String, Option<Table>)| {
+        lua.create_function({
+            let capability_ctx = capability_ctx.clone();
+            move |lua, (host, port, _data, _options): (String, u16, String, Option<Table>)| {
+                let decision = wrappers::check_dns(&capability_ctx, &host, "comm.tryssl");
+                if decision.is_denied() {
+                    let result = lua.create_table()?;
+                    result.set("status", 0i32)?;
+                    result.set("data", "DNS resolution denied by capability policy")?;
+                    return Ok(result);
+                }
+
                 let url = format!("https://{}:{}", host, port);
 
                 let client = reqwest::blocking::Client::builder()
@@ -154,16 +184,25 @@ pub fn register_comm_library(lua: &Lua) -> LuaResult<()> {
                         Ok(result)
                     }
                 }
-            },
-        )?,
+            }
+        })?,
     )?;
 
     comm.set("close", lua.create_function(|_, _socket: Table| Ok(()))?)?;
 
     comm.set(
         "get_banner_async",
-        lua.create_function(
-            |lua, (host, port, _options): (String, u16, Option<Table>)| {
+        lua.create_function({
+            let capability_ctx = capability_ctx.clone();
+            move |lua, (host, port, _options): (String, u16, Option<Table>)| {
+                let decision =
+                    wrappers::check_network_tcp(&capability_ctx, &host, "comm.get_banner_async");
+                if decision.is_denied() {
+                    let result = lua.create_table()?;
+                    result.set("data", "")?;
+                    return Ok(result);
+                }
+
                 let runtime = tokio::runtime::Handle::current();
                 let host_clone = host.clone();
 
@@ -198,14 +237,23 @@ pub fn register_comm_library(lua: &Lua) -> LuaResult<()> {
                     }
                     Ok(result)
                 })
-            },
-        )?,
+            }
+        })?,
     )?;
 
     comm.set(
         "exchange_async",
-        lua.create_function(
-            |lua, (host, port, data, _options): (String, u16, String, Option<Table>)| {
+        lua.create_function({
+            let capability_ctx = capability_ctx.clone();
+            move |lua, (host, port, data, _options): (String, u16, String, Option<Table>)| {
+                let decision =
+                    wrappers::check_network_tcp(&capability_ctx, &host, "comm.exchange_async");
+                if decision.is_denied() {
+                    let result = lua.create_table()?;
+                    result.set("data", "")?;
+                    return Ok(result);
+                }
+
                 let runtime = tokio::runtime::Handle::current();
                 let host_clone = host.clone();
 
@@ -246,8 +294,8 @@ pub fn register_comm_library(lua: &Lua) -> LuaResult<()> {
                     }
                     Ok(result)
                 })
-            },
-        )?,
+            }
+        })?,
     )?;
 
     globals.set("comm", comm)?;

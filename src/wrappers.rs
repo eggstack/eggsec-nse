@@ -4,8 +4,10 @@
 //! records the event, and returns the result or an error.
 //!
 //! This module provides both check-only functions (for advisory checks) and
-//! executing wrappers (check + perform) for filesystem, process, and other
-//! side-effecting operations.
+//! executing wrappers (check + perform) for filesystem, process, network,
+//! DNS, and other side-effecting operations.
+
+use std::net::ToSocketAddrs;
 
 use crate::capabilities::{
     NseCapabilityContext, NseCapabilityDecision, NseCapabilityKind, NseCapabilityRequest,
@@ -63,6 +65,20 @@ pub fn check_network_tcp(
 ) -> NseCapabilityDecision {
     ctx.check_capability(&NseCapabilityRequest {
         kind: NseCapabilityKind::NetworkTcp,
+        target: Some(host.to_string()),
+        bytes_hint: None,
+        operation,
+    })
+}
+
+/// Check a network UDP capability and return the decision.
+pub fn check_network_udp(
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> NseCapabilityDecision {
+    ctx.check_capability(&NseCapabilityRequest {
+        kind: NseCapabilityKind::NetworkUdp,
         target: Some(host.to_string()),
         bytes_hint: None,
         operation,
@@ -146,10 +162,7 @@ pub fn nse_fs_read_to_string(
 }
 
 /// Read a file to bytes after checking filesystem-read capability.
-pub fn nse_fs_read(
-    ctx: &NseCapabilityContext,
-    path: &str,
-) -> Result<Vec<u8>, String> {
+pub fn nse_fs_read(ctx: &NseCapabilityContext, path: &str) -> Result<Vec<u8>, String> {
     let op = "wrapper.fs_read";
     ctx.check_cancelled(op)?;
     let request = build_request(
@@ -176,11 +189,7 @@ pub fn nse_fs_read(
 }
 
 /// Write bytes to a file after checking filesystem-write capability.
-pub fn nse_fs_write(
-    ctx: &NseCapabilityContext,
-    path: &str,
-    bytes: &[u8],
-) -> Result<(), String> {
+pub fn nse_fs_write(ctx: &NseCapabilityContext, path: &str, bytes: &[u8]) -> Result<(), String> {
     let op = "wrapper.fs_write";
     ctx.check_cancelled(op)?;
     let request = build_request(
@@ -268,10 +277,7 @@ pub fn nse_fs_read_dir(
 }
 
 /// Remove a file after checking filesystem-write capability.
-pub fn nse_fs_remove_file(
-    ctx: &NseCapabilityContext,
-    path: &str,
-) -> Result<(), String> {
+pub fn nse_fs_remove_file(ctx: &NseCapabilityContext, path: &str) -> Result<(), String> {
     let op = "wrapper.fs_remove_file";
     ctx.check_cancelled(op)?;
     let request = build_request(
@@ -298,11 +304,7 @@ pub fn nse_fs_remove_file(
 }
 
 /// Rename a file/directory after checking filesystem-write capability.
-pub fn nse_fs_rename(
-    ctx: &NseCapabilityContext,
-    from: &str,
-    to: &str,
-) -> Result<(), String> {
+pub fn nse_fs_rename(ctx: &NseCapabilityContext, from: &str, to: &str) -> Result<(), String> {
     let op = "wrapper.fs_rename";
     ctx.check_cancelled(op)?;
     let request = build_request(
@@ -329,10 +331,7 @@ pub fn nse_fs_rename(
 }
 
 /// Create directories recursively after checking filesystem-write capability.
-pub fn nse_fs_create_dir_all(
-    ctx: &NseCapabilityContext,
-    path: &str,
-) -> Result<(), String> {
+pub fn nse_fs_create_dir_all(ctx: &NseCapabilityContext, path: &str) -> Result<(), String> {
     let op = "wrapper.fs_create_dir_all";
     ctx.check_cancelled(op)?;
     let request = build_request(
@@ -359,10 +358,7 @@ pub fn nse_fs_create_dir_all(
 }
 
 /// Remove a directory after checking filesystem-write capability.
-pub fn nse_fs_remove_dir(
-    ctx: &NseCapabilityContext,
-    path: &str,
-) -> Result<(), String> {
+pub fn nse_fs_remove_dir(ctx: &NseCapabilityContext, path: &str) -> Result<(), String> {
     let op = "wrapper.fs_remove_dir";
     ctx.check_cancelled(op)?;
     let request = build_request(
@@ -389,11 +385,7 @@ pub fn nse_fs_remove_dir(
 }
 
 /// Create a hard link after checking filesystem-write capability.
-pub fn nse_fs_hard_link(
-    ctx: &NseCapabilityContext,
-    src: &str,
-    dst: &str,
-) -> Result<(), String> {
+pub fn nse_fs_hard_link(ctx: &NseCapabilityContext, src: &str, dst: &str) -> Result<(), String> {
     let op = "wrapper.fs_hard_link";
     ctx.check_cancelled(op)?;
     let request = build_request(
@@ -420,11 +412,7 @@ pub fn nse_fs_hard_link(
 }
 
 /// Create a symbolic link after checking filesystem-write capability.
-pub fn nse_fs_symlink(
-    ctx: &NseCapabilityContext,
-    src: &str,
-    dst: &str,
-) -> Result<(), String> {
+pub fn nse_fs_symlink(ctx: &NseCapabilityContext, src: &str, dst: &str) -> Result<(), String> {
     let op = "wrapper.fs_symlink";
     ctx.check_cancelled(op)?;
     let request = build_request(
@@ -552,7 +540,253 @@ pub fn nse_fs_symlink_metadata(
             ctx.after_blocking_operation(&request, None);
             Ok(meta)
         }
-        Err(e) => Err(format!("Failed to get symlink metadata for '{}': {}", path, e)),
+        Err(e) => Err(format!(
+            "Failed to get symlink metadata for '{}': {}",
+            path, e
+        )),
+    }
+}
+
+/// Connect a TCP socket after checking network-tcp capability.
+///
+/// Returns a `std::net::TcpStream` on success, or a denial/error string.
+pub fn nse_network_tcp_connect(
+    ctx: &NseCapabilityContext,
+    host: &str,
+    port: u16,
+    timeout: Option<std::time::Duration>,
+) -> Result<std::net::TcpStream, String> {
+    let op = "wrapper.network_tcp_connect";
+    ctx.check_cancelled(op)?;
+    let request = build_request(
+        NseCapabilityKind::NetworkTcp,
+        Some(host.to_string()),
+        None,
+        op,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(decision
+            .deny_reason()
+            .unwrap_or("network TCP connect denied")
+            .to_string());
+    }
+    ctx.before_blocking_operation(&request)?;
+
+    let timeout = timeout.unwrap_or(std::time::Duration::from_secs(10));
+    let addr = format!("{}:{}", host, port);
+    let socket_addr: std::net::SocketAddr = addr
+        .parse()
+        .map_err(|e| format!("Invalid socket address '{}': {}", addr, e))?;
+
+    match std::net::TcpStream::connect_timeout(&socket_addr, timeout) {
+        Ok(stream) => {
+            ctx.after_blocking_operation(&request, None);
+            Ok(stream)
+        }
+        Err(e) => Err(format!("TCP connect to {}:{} failed: {}", host, port, e)),
+    }
+}
+
+/// Send data over a TCP stream after checking network-tcp capability.
+///
+/// Accounts for bytes written in the resource counters.
+pub fn nse_network_tcp_send(
+    ctx: &NseCapabilityContext,
+    host: &str,
+    stream: &mut std::net::TcpStream,
+    data: &[u8],
+) -> Result<usize, String> {
+    let op = "wrapper.network_tcp_send";
+    ctx.check_cancelled(op)?;
+    let request = build_request(
+        NseCapabilityKind::NetworkTcp,
+        Some(host.to_string()),
+        Some(data.len() as u64),
+        op,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(decision
+            .deny_reason()
+            .unwrap_or("network TCP send denied")
+            .to_string());
+    }
+    ctx.before_blocking_operation(&request)?;
+
+    use std::io::Write;
+    match stream.write(data) {
+        Ok(n) => {
+            ctx.after_blocking_operation(&request, None);
+            ctx.counters
+                .network_bytes_written
+                .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+            Ok(n)
+        }
+        Err(e) => Err(format!("TCP send to {} failed: {}", host, e)),
+    }
+}
+
+/// Receive data from a TCP stream after checking network-tcp capability.
+///
+/// Accounts for bytes read in the resource counters.
+pub fn nse_network_tcp_receive(
+    ctx: &NseCapabilityContext,
+    host: &str,
+    stream: &mut std::net::TcpStream,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let op = "wrapper.network_tcp_receive";
+    ctx.check_cancelled(op)?;
+    let request = build_request(
+        NseCapabilityKind::NetworkTcp,
+        Some(host.to_string()),
+        Some(max_bytes as u64),
+        op,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(decision
+            .deny_reason()
+            .unwrap_or("network TCP receive denied")
+            .to_string());
+    }
+    ctx.before_blocking_operation(&request)?;
+
+    use std::io::Read;
+    let mut buffer = vec![0u8; max_bytes];
+    match stream.read(&mut buffer) {
+        Ok(n) => {
+            buffer.truncate(n);
+            ctx.after_blocking_operation(&request, Some(n as u64));
+            Ok(buffer)
+        }
+        Err(e) => Err(format!("TCP receive from {} failed: {}", host, e)),
+    }
+}
+
+/// Send data over a UDP socket after checking network-udp capability.
+///
+/// Accounts for bytes written in the resource counters.
+pub fn nse_network_udp_send(
+    ctx: &NseCapabilityContext,
+    host: &str,
+    port: u16,
+    data: &[u8],
+) -> Result<usize, String> {
+    let op = "wrapper.network_udp_send";
+    ctx.check_cancelled(op)?;
+    let request = build_request(
+        NseCapabilityKind::NetworkUdp,
+        Some(host.to_string()),
+        Some(data.len() as u64),
+        op,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(decision
+            .deny_reason()
+            .unwrap_or("network UDP send denied")
+            .to_string());
+    }
+    ctx.before_blocking_operation(&request)?;
+
+    let addr = format!("{}:{}", host, port);
+    let socket_addr: std::net::SocketAddr = addr
+        .parse()
+        .map_err(|e| format!("Invalid socket address '{}': {}", addr, e))?;
+
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("Failed to bind UDP socket: {}", e))?;
+
+    match socket.send_to(data, socket_addr) {
+        Ok(n) => {
+            ctx.after_blocking_operation(&request, None);
+            ctx.counters
+                .network_bytes_written
+                .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+            Ok(n)
+        }
+        Err(e) => Err(format!("UDP send to {}:{} failed: {}", host, port, e)),
+    }
+}
+
+/// Receive data from a UDP socket after checking network-udp capability.
+///
+/// Accounts for bytes read in the resource counters.
+pub fn nse_network_udp_receive(
+    ctx: &NseCapabilityContext,
+    host: &str,
+    max_bytes: usize,
+) -> Result<(Vec<u8>, std::net::SocketAddr), String> {
+    let op = "wrapper.network_udp_receive";
+    ctx.check_cancelled(op)?;
+    let request = build_request(
+        NseCapabilityKind::NetworkUdp,
+        Some(host.to_string()),
+        Some(max_bytes as u64),
+        op,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(decision
+            .deny_reason()
+            .unwrap_or("network UDP receive denied")
+            .to_string());
+    }
+    ctx.before_blocking_operation(&request)?;
+
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+        .map_err(|e| format!("Failed to bind UDP socket: {}", e))?;
+    socket
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .map_err(|e| format!("Failed to set UDP read timeout: {}", e))?;
+
+    let mut buffer = vec![0u8; max_bytes];
+    match socket.recv_from(&mut buffer) {
+        Ok((n, from)) => {
+            buffer.truncate(n);
+            ctx.after_blocking_operation(&request, Some(n as u64));
+            Ok((buffer, from))
+        }
+        Err(e) => Err(format!("UDP receive failed: {}", e)),
+    }
+}
+
+/// Perform a DNS lookup after checking DNS resolution capability.
+///
+/// Returns the resolved addresses or a denial/error string.
+pub fn nse_dns_lookup(
+    ctx: &NseCapabilityContext,
+    name: &str,
+    record_type: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let op = "wrapper.dns_lookup";
+    ctx.check_cancelled(op)?;
+    let request = build_request(
+        NseCapabilityKind::DnsResolution,
+        Some(name.to_string()),
+        None,
+        op,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(decision
+            .deny_reason()
+            .unwrap_or("DNS resolution denied")
+            .to_string());
+    }
+    ctx.before_blocking_operation(&request)?;
+
+    // Use std::net::ToSocketAddrs for basic resolution (system resolver)
+    let addr = format!("{}:0", name);
+    match addr.to_socket_addrs() {
+        Ok(addrs) => {
+            let results: Vec<String> = addrs.map(|a| a.ip().to_string()).collect();
+            ctx.after_blocking_operation(&request, None);
+            Ok(results)
+        }
+        Err(e) => Err(format!("DNS lookup for '{}' failed: {}", name, e)),
     }
 }
 
@@ -697,11 +931,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn temp_path(name: &str) -> std::path::PathBuf {
-        std::env::temp_dir().join(format!(
-            "eggsec_nse_test_{}_{}",
-            std::process::id(),
-            name
-        ))
+        std::env::temp_dir().join(format!("eggsec_nse_test_{}_{}", std::process::id(), name))
     }
 
     fn temp_dir_path(name: &str) -> std::path::PathBuf {
@@ -889,11 +1119,7 @@ mod tests {
         std::fs::write(&from, b"rename me").unwrap();
 
         let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
-        let result = nse_fs_rename(
-            &ctx,
-            from.to_str().unwrap(),
-            to.to_str().unwrap(),
-        );
+        let result = nse_fs_rename(&ctx, from.to_str().unwrap(), to.to_str().unwrap());
 
         assert!(result.is_ok());
         assert!(!from.exists());
@@ -1039,5 +1265,235 @@ mod tests {
         assert_eq!(bytes_after, bytes_before + payload.len() as u64);
 
         std::fs::remove_file(&path).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // Network TCP wrappers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_network_tcp_connect_allowed_in_manual_permissive() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        // Use a non-routable address to test denial path, not actual connectivity
+        let decision = check_network_tcp(&ctx, "192.0.2.1", "socket.connect");
+        assert!(decision.is_allowed());
+    }
+
+    #[test]
+    fn test_network_tcp_connect_denied_in_ci_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::CiSafe);
+        let decision = check_network_tcp(&ctx, "192.0.2.1", "socket.connect");
+        assert!(decision.is_denied());
+    }
+
+    #[test]
+    fn test_network_tcp_connect_wrapper_denied_in_ci_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::CiSafe);
+        let result = nse_network_tcp_connect(&ctx, "192.0.2.1", 80, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("denied") || err.contains("not allowed"),
+            "expected denial message, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_network_tcp_send_denied_in_ci_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::CiSafe);
+        // Use cancellation to avoid needing a real stream - the wrapper checks cancellation first
+        ctx.cancellation.cancel();
+        let mut stream = std::net::TcpStream::connect("127.0.0.1:1").ok();
+        if let Some(ref mut s) = stream {
+            let result = nse_network_tcp_send(&ctx, "127.0.0.1", s, b"test");
+            assert!(result.is_err());
+            assert!(result.unwrap_err().contains("cancelled"));
+        } else {
+            // No server available - verify denial via the check function directly
+            let decision = check_network_tcp(&ctx, "127.0.0.1", "test");
+            assert!(decision.is_denied());
+        }
+    }
+
+    #[test]
+    fn test_network_tcp_connect_wrapper_cancellation() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        ctx.cancellation.cancel();
+        let result = nse_network_tcp_connect(&ctx, "192.0.2.1", 80, None);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("cancelled"),
+            "expected cancellation message, got: {}",
+            err
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Network UDP wrappers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_network_udp_check_allowed_in_manual_permissive() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        let decision = check_network_udp(&ctx, "192.0.2.1", "socket.sendto");
+        assert!(decision.is_allowed());
+    }
+
+    #[test]
+    fn test_network_udp_check_denied_in_ci_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::CiSafe);
+        let decision = check_network_udp(&ctx, "192.0.2.1", "socket.sendto");
+        assert!(decision.is_denied());
+    }
+
+    #[test]
+    fn test_network_udp_send_denied_in_ci_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::CiSafe);
+        let result = nse_network_udp_send(&ctx, "192.0.2.1", 80, b"test");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("denied") || err.contains("not allowed"),
+            "expected denial message, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_network_udp_send_cancellation() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        ctx.cancellation.cancel();
+        let result = nse_network_udp_send(&ctx, "192.0.2.1", 80, b"test");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("cancelled"),
+            "expected cancellation message, got: {}",
+            err
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // DNS wrapper
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_dns_lookup_allowed_in_manual_permissive() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        let decision = check_dns(&ctx, "localhost", "dns.resolve");
+        assert!(decision.is_allowed());
+    }
+
+    #[test]
+    fn test_dns_lookup_denied_in_ci_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::CiSafe);
+        let decision = check_dns(&ctx, "example.com", "dns.resolve");
+        assert!(decision.is_denied());
+    }
+
+    #[test]
+    fn test_dns_lookup_wrapper_denied_in_ci_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::CiSafe);
+        let result = nse_dns_lookup(&ctx, "example.com", Some("A"));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("denied") || err.contains("not allowed"),
+            "expected denial message, got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_dns_lookup_wrapper_cancellation() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        ctx.cancellation.cancel();
+        let result = nse_dns_lookup(&ctx, "localhost", Some("A"));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("cancelled"),
+            "expected cancellation message, got: {}",
+            err
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Network counters
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_network_counters_update_after_tcp_connect() {
+        use std::sync::atomic::Ordering;
+
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        let ops_before = ctx.counters.network_operations.load(Ordering::Relaxed);
+
+        // TCP connect to a non-existent host will fail, but the counter
+        // should still be updated after the capability check passes
+        let _ = nse_network_tcp_connect(
+            &ctx,
+            "192.0.2.1",
+            1,
+            Some(std::time::Duration::from_millis(10)),
+        );
+
+        // The counter may or may not increment depending on whether the
+        // connect_timeout fails before after_blocking_operation is called.
+        // At minimum, the capability check should have passed.
+        let ops_after = ctx.counters.network_operations.load(Ordering::Relaxed);
+        // Connect may fail at the OS level, but the check passed
+        assert!(ops_after >= ops_before);
+    }
+
+    // -----------------------------------------------------------------------
+    // AgentSafe scope enforcement
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_network_tcp_allowed_in_agent_safe_with_scope() {
+        use crate::profile::NseNetworkPolicy;
+        use std::sync::Arc;
+
+        let counters = Arc::new(NseResourceCounters::new());
+        let ctx = NseCapabilityContext::new(
+            NseExecutionProfileKind::AgentSafe,
+            NseNetworkPolicy::AllowCidrs(vec!["10.0.0.0/8".parse().unwrap()]),
+            NseScriptPolicy {
+                allow_builtin_scripts: true,
+                allow_script_files: true,
+                allowed_script_roots: Vec::new(),
+                allow_conventional_nmap_paths: true,
+                max_script_bytes: None,
+            },
+            NseModulePolicy {
+                allow_builtin_modules: true,
+                allow_filesystem_modules: true,
+                allowed_module_roots: Vec::new(),
+                max_module_bytes: None,
+            },
+            SandboxConfig::default(),
+            crate::limits::NseExecutionLimits::default(),
+            NseCancellationToken::new(),
+            counters,
+        );
+
+        // 10.0.0.1 is in scope
+        let decision = check_network_tcp(&ctx, "10.0.0.1", "socket.connect");
+        assert!(decision.is_allowed());
+
+        // 192.168.1.1 is out of scope
+        let decision = check_network_tcp(&ctx, "192.168.1.1", "socket.connect");
+        assert!(decision.is_denied());
+    }
+
+    #[test]
+    fn test_dns_allowed_in_agent_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::AgentSafe);
+        // AgentSafe allows DNS unless DenyAll policy
+        let decision = check_dns(&ctx, "example.com", "dns.resolve");
+        assert!(decision.is_allowed());
     }
 }

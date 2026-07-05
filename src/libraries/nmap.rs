@@ -721,11 +721,7 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 #[cfg(unix)]
                 {
                     use crate::wrappers;
-                    let decision = wrappers::check_process_exec(
-                        &cap,
-                        "id",
-                        "nmap.is_admin",
-                    );
+                    let decision = wrappers::check_process_exec(&cap, "id", "nmap.is_admin");
                     if decision.is_denied() {
                         return Ok(false);
                     }
@@ -1143,11 +1139,7 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 #[cfg(unix)]
                 {
                     use crate::wrappers;
-                    let decision = wrappers::check_process_exec(
-                        &cap,
-                        "id",
-                        "nmap.is_privileged",
-                    );
+                    let decision = wrappers::check_process_exec(&cap, "id", "nmap.is_privileged");
                     if decision.is_denied() {
                         return Ok(false);
                     }
@@ -1520,11 +1512,7 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 #[cfg(unix)]
                 {
                     use crate::wrappers;
-                    let decision = wrappers::check_process_exec(
-                        &cap,
-                        "ip",
-                        "nmap.list_interfaces",
-                    );
+                    let decision = wrappers::check_process_exec(&cap, "ip", "nmap.list_interfaces");
                     if decision.is_denied() {
                         // Return empty/fallback list when process exec is denied
                         let iface = _lua.create_table()?;
@@ -1554,42 +1542,42 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                     }
                 }
 
-            #[cfg(windows)]
-            {
-                use std::process::Command;
-                if let Ok(output) = Command::new("ipconfig").output() {
-                    let output_str = String::from_utf8_lossy(&output.stdout);
-                    let mut current_iface = _lua.create_table()?;
-                    let mut idx = 1;
-                    for line in output_str.lines() {
-                        let trimmed = line.trim();
-                        if trimmed.ends_with(':') && !trimmed.contains("adapter") {
-                            if !current_iface.len().unwrap_or(0) == 0 {
-                                interfaces.set(idx, current_iface)?;
-                                idx += 1;
-                                current_iface = _lua.create_table()?;
+                #[cfg(windows)]
+                {
+                    use std::process::Command;
+                    if let Ok(output) = Command::new("ipconfig").output() {
+                        let output_str = String::from_utf8_lossy(&output.stdout);
+                        let mut current_iface = _lua.create_table()?;
+                        let mut idx = 1;
+                        for line in output_str.lines() {
+                            let trimmed = line.trim();
+                            if trimmed.ends_with(':') && !trimmed.contains("adapter") {
+                                if !current_iface.len().unwrap_or(0) == 0 {
+                                    interfaces.set(idx, current_iface)?;
+                                    idx += 1;
+                                    current_iface = _lua.create_table()?;
+                                }
+                                let name = trimmed.trim_end_matches(':').trim();
+                                current_iface.set("device", name)?;
+                                current_iface.set("addresses", _lua.create_table()?)?;
                             }
-                            let name = trimmed.trim_end_matches(':').trim();
-                            current_iface.set("device", name)?;
-                            current_iface.set("addresses", _lua.create_table()?)?;
+                        }
+                        if !current_iface.len().unwrap_or(0) == 0 {
+                            interfaces.set(idx, current_iface)?;
                         }
                     }
-                    if !current_iface.len().unwrap_or(0) == 0 {
-                        interfaces.set(idx, current_iface)?;
-                    }
                 }
-            }
 
-            if interfaces.len().unwrap_or(0) == 0 {
-                let iface = _lua.create_table()?;
-                iface.set("device", "lo")?;
-                let addrs = _lua.create_table()?;
-                addrs.set(1, "127.0.0.1")?;
-                iface.set("addresses", addrs)?;
-                interfaces.set(1, iface)?;
-            }
+                if interfaces.len().unwrap_or(0) == 0 {
+                    let iface = _lua.create_table()?;
+                    iface.set("device", "lo")?;
+                    let addrs = _lua.create_table()?;
+                    addrs.set(1, "127.0.0.1")?;
+                    iface.set("addresses", addrs)?;
+                    interfaces.set(1, iface)?;
+                }
 
-            Ok(interfaces)
+                Ok(interfaces)
             }
         })?,
     )?;
@@ -1615,11 +1603,8 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                     #[cfg(unix)]
                     {
                         use crate::wrappers;
-                        let decision = wrappers::check_process_exec(
-                            &cap,
-                            "ip",
-                            "nmap.get_interface",
-                        );
+                        let decision =
+                            wrappers::check_process_exec(&cap, "ip", "nmap.get_interface");
                         if decision.is_denied() {
                             iface.set("addresses", _lua.create_table()?)?;
                             return Ok(iface);
@@ -1631,28 +1616,28 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                             .arg(&iface_name)
                             .output();
 
-                    if let Ok(out) = output {
-                        let output_str = String::from_utf8_lossy(&out.stdout);
-                        let addrs = _lua.create_table()?;
-                        let mut idx = 1;
-                        for line in output_str.lines() {
-                            if line.trim().starts_with("inet ") {
-                                let parts: Vec<&str> = line.split_whitespace().collect();
-                                if parts.len() >= 2 {
-                                    addrs.set(idx, parts[1].to_string())?;
-                                    idx += 1;
+                        if let Ok(out) = output {
+                            let output_str = String::from_utf8_lossy(&out.stdout);
+                            let addrs = _lua.create_table()?;
+                            let mut idx = 1;
+                            for line in output_str.lines() {
+                                if line.trim().starts_with("inet ") {
+                                    let parts: Vec<&str> = line.split_whitespace().collect();
+                                    if parts.len() >= 2 {
+                                        addrs.set(idx, parts[1].to_string())?;
+                                        idx += 1;
+                                    }
                                 }
                             }
+                            iface.set("addresses", addrs)?;
                         }
-                        iface.set("addresses", addrs)?;
                     }
+                } else {
+                    iface.set("device", "")?;
+                    iface.set("addresses", _lua.create_table()?)?;
                 }
-            } else {
-                iface.set("device", "")?;
-                iface.set("addresses", _lua.create_table()?)?;
-            }
 
-            Ok(iface)
+                Ok(iface)
             }
         })?,
     )?;

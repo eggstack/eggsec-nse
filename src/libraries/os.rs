@@ -9,8 +9,8 @@ use std::env;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::SandboxConfig;
 use crate::capabilities::NseCapabilityContext;
+use crate::SandboxConfig;
 
 thread_local! {
     static NSE_ENV: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());

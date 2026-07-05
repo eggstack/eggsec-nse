@@ -16,8 +16,8 @@ use mlua::{Lua, Result as LuaResult};
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::SandboxConfig;
 use crate::capabilities::NseCapabilityContext;
+use crate::SandboxConfig;
 
 pub static LFS_SANDBOX_VIOLATIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -66,7 +66,10 @@ pub fn register_lfs_library(
         });
         if decision.is_denied() {
             return Err(mlua::Error::RuntimeError(
-                decision.deny_reason().unwrap_or("access denied").to_string(),
+                decision
+                    .deny_reason()
+                    .unwrap_or("access denied")
+                    .to_string(),
             ));
         }
         Ok(())

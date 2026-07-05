@@ -9,6 +9,8 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+use crate::capabilities::NseCapabilityContext;
+
 enum StreamType {
     Tcp(TcpStream),
     Udp(std::net::UdpSocket),
@@ -24,6 +26,7 @@ struct SocketHandle {
     sandbox_enabled: bool,
     log_violations: bool,
     allowed_networks: Vec<IpNetwork>,
+    capability_ctx: Option<NseCapabilityContext>,
 }
 
 impl SocketHandle {
@@ -31,6 +34,7 @@ impl SocketHandle {
         sandbox_enabled: bool,
         log_violations: bool,
         allowed_networks: Vec<IpNetwork>,
+        capability_ctx: Option<NseCapabilityContext>,
     ) -> Self {
         Self {
             stream: None,
@@ -42,6 +46,7 @@ impl SocketHandle {
             sandbox_enabled,
             log_violations,
             allowed_networks,
+            capability_ctx,
         }
     }
 
@@ -63,6 +68,24 @@ impl SocketHandle {
     }
 
     fn connect(&mut self, host: &str, port: u16) -> Result<(), String> {
+        // Capability check first
+        if let Some(ref ctx) = self.capability_ctx {
+            let decision = crate::wrappers::check_network_tcp(ctx, host, "socket.connect");
+            if decision.is_denied() {
+                return Err(decision
+                    .deny_reason()
+                    .unwrap_or("network TCP connect denied")
+                    .to_string());
+            }
+            let request = crate::capabilities::NseCapabilityRequest {
+                kind: crate::capabilities::NseCapabilityKind::NetworkTcp,
+                target: Some(host.to_string()),
+                bytes_hint: None,
+                operation: "socket.connect",
+            };
+            ctx.before_blocking_operation(&request)?;
+        }
+
         if !self.is_host_allowed(host) {
             let msg = format!(
                 "[NSE Sandbox] Network violation: {} is not in allowed networks (sandbox enabled)",
@@ -96,10 +119,38 @@ impl SocketHandle {
         self.port = port;
         self.socket_type = "tcp".to_string();
 
+        if let Some(ref ctx) = self.capability_ctx {
+            let request = crate::capabilities::NseCapabilityRequest {
+                kind: crate::capabilities::NseCapabilityKind::NetworkTcp,
+                target: Some(host.to_string()),
+                bytes_hint: None,
+                operation: "socket.connect",
+            };
+            ctx.after_blocking_operation(&request, None);
+        }
+
         Ok(())
     }
 
     fn connect_udp(&mut self, host: &str, port: u16) -> Result<(), String> {
+        // Capability check first
+        if let Some(ref ctx) = self.capability_ctx {
+            let decision = crate::wrappers::check_network_udp(ctx, host, "socket.connect_udp");
+            if decision.is_denied() {
+                return Err(decision
+                    .deny_reason()
+                    .unwrap_or("network UDP connect denied")
+                    .to_string());
+            }
+            let request = crate::capabilities::NseCapabilityRequest {
+                kind: crate::capabilities::NseCapabilityKind::NetworkUdp,
+                target: Some(host.to_string()),
+                bytes_hint: None,
+                operation: "socket.connect_udp",
+            };
+            ctx.before_blocking_operation(&request)?;
+        }
+
         if !self.is_host_allowed(host) {
             let msg = format!(
                 "[NSE Sandbox] Network violation: {} is not in allowed networks (sandbox enabled)",
@@ -139,11 +190,21 @@ impl SocketHandle {
         self.socket_type = "udp".to_string();
         self.udp_connected = true;
 
+        if let Some(ref ctx) = self.capability_ctx {
+            let request = crate::capabilities::NseCapabilityRequest {
+                kind: crate::capabilities::NseCapabilityKind::NetworkUdp,
+                target: Some(host.to_string()),
+                bytes_hint: None,
+                operation: "socket.connect_udp",
+            };
+            ctx.after_blocking_operation(&request, None);
+        }
+
         Ok(())
     }
 
     fn send(&mut self, data: &str) -> Result<usize, String> {
-        match self.stream.as_mut() {
+        let bytes = match self.stream.as_mut() {
             Some(StreamType::Tcp(stream)) => {
                 stream.write(data.as_bytes()).map_err(|e| e.to_string())
             }
@@ -151,11 +212,28 @@ impl SocketHandle {
                 socket.send(data.as_bytes()).map_err(|e| e.to_string())
             }
             None => Err("Not connected".to_string()),
+        }?;
+
+        if let Some(ref ctx) = self.capability_ctx {
+            let kind = if self.socket_type == "udp" {
+                crate::capabilities::NseCapabilityKind::NetworkUdp
+            } else {
+                crate::capabilities::NseCapabilityKind::NetworkTcp
+            };
+            let request = crate::capabilities::NseCapabilityRequest {
+                kind,
+                target: Some(self.host.clone()),
+                bytes_hint: Some(bytes as u64),
+                operation: "socket.send",
+            };
+            ctx.after_blocking_operation(&request, Some(bytes as u64));
         }
+
+        Ok(bytes)
     }
 
     fn receive(&mut self, size: usize) -> Result<String, String> {
-        match self.stream.as_mut() {
+        let result = match self.stream.as_mut() {
             Some(StreamType::Tcp(stream)) => {
                 let size = size.max(1).min(65536);
                 let mut buffer = vec![0u8; size];
@@ -183,7 +261,24 @@ impl SocketHandle {
                 }
             }
             None => Err("Not connected".to_string()),
+        }?;
+
+        if let Some(ref ctx) = self.capability_ctx {
+            let kind = if self.socket_type == "udp" {
+                crate::capabilities::NseCapabilityKind::NetworkUdp
+            } else {
+                crate::capabilities::NseCapabilityKind::NetworkTcp
+            };
+            let request = crate::capabilities::NseCapabilityRequest {
+                kind,
+                target: Some(self.host.clone()),
+                bytes_hint: Some(result.len() as u64),
+                operation: "socket.receive",
+            };
+            ctx.after_blocking_operation(&request, Some(result.len() as u64));
         }
+
+        Ok(result)
     }
 
     fn close(&mut self) {
@@ -301,22 +396,29 @@ impl UserData for SocketHandle {
     }
 }
 
-pub fn register_socket_library(lua: &Lua, sandbox: &crate::SandboxConfig) -> LuaResult<()> {
+pub fn register_socket_library(
+    lua: &Lua,
+    sandbox: &crate::SandboxConfig,
+    capability_ctx: &NseCapabilityContext,
+) -> LuaResult<()> {
     let globals = lua.globals();
 
     let sandbox_enabled = sandbox.enabled;
     let log_violations = sandbox.log_violations;
     let allowed_networks = sandbox.allowed_networks.clone();
+    let capability_ctx = capability_ctx.clone();
 
     let socket = lua.create_table()?;
 
     let tcp_fn = lua.create_function({
         let allowed_networks = allowed_networks.clone();
+        let capability_ctx = capability_ctx.clone();
         move |lua, _: ()| {
             let mut sock = SocketHandle::new_with_sandbox(
                 sandbox_enabled,
                 log_violations,
                 allowed_networks.clone(),
+                Some(capability_ctx.clone()),
             );
             sock.socket_type = "tcp".to_string();
             if sandbox_enabled && log_violations {
@@ -329,11 +431,13 @@ pub fn register_socket_library(lua: &Lua, sandbox: &crate::SandboxConfig) -> Lua
 
     let udp_fn = lua.create_function({
         let allowed_networks = allowed_networks.clone();
+        let capability_ctx = capability_ctx.clone();
         move |lua, _: ()| {
             let mut sock = SocketHandle::new_with_sandbox(
                 sandbox_enabled,
                 log_violations,
                 allowed_networks.clone(),
+                Some(capability_ctx.clone()),
             );
             sock.socket_type = "udp".to_string();
             lua.create_userdata(sock)
@@ -343,11 +447,13 @@ pub fn register_socket_library(lua: &Lua, sandbox: &crate::SandboxConfig) -> Lua
 
     let sctp_fn = lua.create_function({
         let allowed_networks = allowed_networks.clone();
+        let capability_ctx = capability_ctx.clone();
         move |lua, _: ()| {
             let mut sock = SocketHandle::new_with_sandbox(
                 sandbox_enabled,
                 log_violations,
                 allowed_networks.clone(),
+                Some(capability_ctx.clone()),
             );
             sock.socket_type = "sctp".to_string();
             lua.create_userdata(sock)
@@ -357,10 +463,30 @@ pub fn register_socket_library(lua: &Lua, sandbox: &crate::SandboxConfig) -> Lua
 
     let tcp_connect_fn = lua.create_function({
         let allowed_networks = allowed_networks.clone();
+        let capability_ctx = capability_ctx.clone();
         move |lua, (host, port): (String, u16)| {
             if sandbox_enabled && log_violations {
                 tracing::info!("[NSE Sandbox] TCP connect: {}:{} (sandbox enabled)", host, port);
             }
+
+            // Capability check first
+            let decision = crate::wrappers::check_network_tcp(&capability_ctx, &host, "socket.tcp_connect");
+            if decision.is_denied() {
+                return Err(mlua::Error::RuntimeError(
+                    decision
+                        .deny_reason()
+                        .unwrap_or("network TCP connect denied")
+                        .to_string(),
+                ));
+            }
+            let request = crate::capabilities::NseCapabilityRequest {
+                kind: crate::capabilities::NseCapabilityKind::NetworkTcp,
+                target: Some(host.clone()),
+                bytes_hint: None,
+                operation: "socket.tcp_connect",
+            };
+            capability_ctx.before_blocking_operation(&request)
+                .map_err(mlua::Error::RuntimeError)?;
 
             if !allowed_networks.is_empty() {
                 let addr = format!("{}:0", host);
@@ -382,7 +508,7 @@ pub fn register_socket_library(lua: &Lua, sandbox: &crate::SandboxConfig) -> Lua
             }
 
             let mut sock =
-                SocketHandle::new_with_sandbox(sandbox_enabled, log_violations, allowed_networks.clone());
+                SocketHandle::new_with_sandbox(sandbox_enabled, log_violations, allowed_networks.clone(), Some(capability_ctx.clone()));
             sock.connect(&host, port)
                 .map_err(mlua::Error::RuntimeError)?;
 
@@ -397,10 +523,30 @@ pub fn register_socket_library(lua: &Lua, sandbox: &crate::SandboxConfig) -> Lua
 
     let connect_fn = lua.create_function({
         let allowed_networks = allowed_networks.clone();
+        let capability_ctx = capability_ctx.clone();
         move |lua, (host, port): (String, u16)| {
             if sandbox_enabled && log_violations {
                 tracing::info!("[NSE Sandbox] Socket connect: {}:{} (sandbox enabled)", host, port);
             }
+
+            // Capability check first
+            let decision = crate::wrappers::check_network_tcp(&capability_ctx, &host, "socket.connect");
+            if decision.is_denied() {
+                return Err(mlua::Error::RuntimeError(
+                    decision
+                        .deny_reason()
+                        .unwrap_or("network TCP connect denied")
+                        .to_string(),
+                ));
+            }
+            let request = crate::capabilities::NseCapabilityRequest {
+                kind: crate::capabilities::NseCapabilityKind::NetworkTcp,
+                target: Some(host.clone()),
+                bytes_hint: None,
+                operation: "socket.connect",
+            };
+            capability_ctx.before_blocking_operation(&request)
+                .map_err(mlua::Error::RuntimeError)?;
 
             if !allowed_networks.is_empty() {
                 let addr = format!("{}:0", host);
@@ -422,7 +568,7 @@ pub fn register_socket_library(lua: &Lua, sandbox: &crate::SandboxConfig) -> Lua
             }
 
             let mut sock =
-                SocketHandle::new_with_sandbox(sandbox_enabled, log_violations, allowed_networks.clone());
+                SocketHandle::new_with_sandbox(sandbox_enabled, log_violations, allowed_networks.clone(), Some(capability_ctx.clone()));
             sock.connect(&host, port)
                 .map_err(mlua::Error::RuntimeError)?;
 
@@ -577,7 +723,28 @@ pub fn register_socket_library(lua: &Lua, sandbox: &crate::SandboxConfig) -> Lua
     // Async TCP connect
     let async_tcp_connect_fn = lua.create_function({
         let allowed_networks = allowed_networks.clone();
+        let capability_ctx = capability_ctx.clone();
         move |lua, (host, port): (String, u16)| {
+            // Capability check first
+            let decision = crate::wrappers::check_network_tcp(&capability_ctx, &host, "socket.tcp_connect_async");
+            if decision.is_denied() {
+                return Err(mlua::Error::RuntimeError(
+                    decision
+                        .deny_reason()
+                        .unwrap_or("network TCP connect denied")
+                        .to_string(),
+                ));
+            }
+            let request = crate::capabilities::NseCapabilityRequest {
+                kind: crate::capabilities::NseCapabilityKind::NetworkTcp,
+                target: Some(host.clone()),
+                bytes_hint: None,
+                operation: "socket.tcp_connect_async",
+            };
+            if let Err(e) = capability_ctx.before_blocking_operation(&request) {
+                return Err(mlua::Error::RuntimeError(e));
+            }
+
             if !allowed_networks.is_empty() {
                 let addr = format!("{}:0", host);
                 if let Ok(socket_addrs) = addr.to_socket_addrs() {
@@ -602,6 +769,7 @@ pub fn register_socket_library(lua: &Lua, sandbox: &crate::SandboxConfig) -> Lua
             let result = tokio::runtime::Handle::current().block_on(async {
                 match tokio::net::TcpStream::connect(&addr).await {
                     Ok(_stream) => {
+                        capability_ctx.after_blocking_operation(&request, None);
                         let r = lua.create_table()?;
                         r.set("host", host)?;
                         r.set("port", port)?;
@@ -620,7 +788,28 @@ pub fn register_socket_library(lua: &Lua, sandbox: &crate::SandboxConfig) -> Lua
     // Async connect (generic)
     let async_connect_fn = lua.create_function({
         let allowed_networks = allowed_networks.clone();
+        let capability_ctx = capability_ctx.clone();
         move |lua, (host, port): (String, u16)| {
+            // Capability check first
+            let decision = crate::wrappers::check_network_tcp(&capability_ctx, &host, "socket.connect_async");
+            if decision.is_denied() {
+                return Err(mlua::Error::RuntimeError(
+                    decision
+                        .deny_reason()
+                        .unwrap_or("network TCP connect denied")
+                        .to_string(),
+                ));
+            }
+            let request = crate::capabilities::NseCapabilityRequest {
+                kind: crate::capabilities::NseCapabilityKind::NetworkTcp,
+                target: Some(host.clone()),
+                bytes_hint: None,
+                operation: "socket.connect_async",
+            };
+            if let Err(e) = capability_ctx.before_blocking_operation(&request) {
+                return Err(mlua::Error::RuntimeError(e));
+            }
+
             if !allowed_networks.is_empty() {
                 let addr = format!("{}:0", host);
                 if let Ok(socket_addrs) = addr.to_socket_addrs() {
@@ -645,6 +834,7 @@ pub fn register_socket_library(lua: &Lua, sandbox: &crate::SandboxConfig) -> Lua
             let result = tokio::runtime::Handle::current().block_on(async {
                 match tokio::net::TcpStream::connect(&addr).await {
                     Ok(_stream) => {
+                        capability_ctx.after_blocking_operation(&request, None);
                         let r = lua.create_table()?;
                         r.set("host", host)?;
                         r.set("port", port)?;
@@ -663,7 +853,19 @@ pub fn register_socket_library(lua: &Lua, sandbox: &crate::SandboxConfig) -> Lua
     // Async DNS resolve - also needs network check since it reveals internal network info
     let async_resolve_fn = lua.create_function({
         let allowed_networks = allowed_networks.clone();
+        let capability_ctx = capability_ctx.clone();
         move |lua, host: String| {
+            // Capability check for DNS resolution
+            let decision = crate::wrappers::check_dns(&capability_ctx, &host, "socket.resolve_async");
+            if decision.is_denied() {
+                return Err(mlua::Error::RuntimeError(
+                    decision
+                        .deny_reason()
+                        .unwrap_or("DNS resolution denied")
+                        .to_string(),
+                ));
+            }
+
             if !allowed_networks.is_empty() {
                 let addr = format!("{}:0", host);
                 if let Ok(socket_addrs) = addr.to_socket_addrs() {

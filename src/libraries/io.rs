@@ -10,8 +10,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-use crate::SandboxConfig;
 use crate::capabilities::NseCapabilityContext;
+use crate::SandboxConfig;
 
 struct FileHandle {
     file: File,
@@ -56,15 +56,14 @@ pub fn register_io_library(
         lua.create_function(move |lua, (filename, mode): (String, Option<String>)| {
             // Route through capability context (primary enforcement)
             use crate::wrappers;
-            let check_decision = wrappers::check_fs_read(
-                &cap_ctx_for_open,
-                &filename,
-                "io.open",
-            );
+            let check_decision = wrappers::check_fs_read(&cap_ctx_for_open, &filename, "io.open");
             if check_decision.is_denied() {
                 IO_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
                 let result = lua.create_table()?;
-                result.set("error", check_decision.deny_reason().unwrap_or("access denied"))?;
+                result.set(
+                    "error",
+                    check_decision.deny_reason().unwrap_or("access denied"),
+                )?;
                 return Ok(result);
             }
             // Secondary: sandbox path check
@@ -79,15 +78,15 @@ pub fn register_io_library(
 
             // For write modes, also check write capability
             if mode_str.contains('w') || mode_str.contains('a') {
-                let write_decision = wrappers::check_fs_write(
-                    &cap_ctx_for_open,
-                    &filename,
-                    "io.open",
-                );
+                let write_decision =
+                    wrappers::check_fs_write(&cap_ctx_for_open, &filename, "io.open");
                 if write_decision.is_denied() {
                     IO_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
                     let result = lua.create_table()?;
-                    result.set("error", write_decision.deny_reason().unwrap_or("write denied"))?;
+                    result.set(
+                        "error",
+                        write_decision.deny_reason().unwrap_or("write denied"),
+                    )?;
                     return Ok(result);
                 }
             }
@@ -278,15 +277,14 @@ pub fn register_io_library(
         lua.create_function(move |lua, filename: String| {
             // Route through capability context
             use crate::wrappers;
-            let check_decision = wrappers::check_fs_read(
-                &cap_ctx_for_lines,
-                &filename,
-                "io.lines",
-            );
+            let check_decision = wrappers::check_fs_read(&cap_ctx_for_lines, &filename, "io.lines");
             if check_decision.is_denied() {
                 IO_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
                 let result = lua.create_table()?;
-                result.set("error", check_decision.deny_reason().unwrap_or("access denied"))?;
+                result.set(
+                    "error",
+                    check_decision.deny_reason().unwrap_or("access denied"),
+                )?;
                 return Ok(result);
             }
             // Secondary: sandbox path check
@@ -316,14 +314,13 @@ pub fn register_io_library(
         lua.create_function(move |lua, (cmd, mode): (String, Option<String>)| {
             // Route through capability context (primary enforcement)
             use crate::wrappers;
-            let decision = wrappers::check_process_exec(
-                &cap_ctx_for_popen,
-                &cmd,
-                "io.popen",
-            );
+            let decision = wrappers::check_process_exec(&cap_ctx_for_popen, &cmd, "io.popen");
             if decision.is_denied() {
                 let result = lua.create_table()?;
-                result.set("error", decision.deny_reason().unwrap_or("process exec denied"))?;
+                result.set(
+                    "error",
+                    decision.deny_reason().unwrap_or("process exec denied"),
+                )?;
                 return Ok(result);
             }
             // Secondary: sandbox command check
@@ -427,8 +424,8 @@ pub fn register_io_library(
     io.set(
         "tmpfile",
         lua.create_function(move |lua, _: ()| {
-            use std::fs;
             use crate::wrappers;
+            use std::fs;
             let temp_dir = if sandbox_for_tmpfile.enabled {
                 sandbox_for_tmpfile
                     .allowed_dir
@@ -453,14 +450,14 @@ pub fn register_io_library(
             }
 
             // Check write capability for temp file creation
-            let write_decision = wrappers::check_fs_write(
-                &cap_ctx_for_tmpfile,
-                &path_str,
-                "io.tmpfile",
-            );
+            let write_decision =
+                wrappers::check_fs_write(&cap_ctx_for_tmpfile, &path_str, "io.tmpfile");
             if write_decision.is_denied() {
                 let result = lua.create_table()?;
-                result.set("error", write_decision.deny_reason().unwrap_or("write denied"))?;
+                result.set(
+                    "error",
+                    write_decision.deny_reason().unwrap_or("write denied"),
+                )?;
                 return Ok(result);
             }
 

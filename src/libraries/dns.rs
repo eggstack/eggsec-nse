@@ -9,6 +9,9 @@ use mlua::{Lua, Result as LuaResult};
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::OnceLock;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 static RESOLVER: OnceLock<TokioResolver> = OnceLock::new();
 
 fn get_resolver() -> &'static TokioResolver {
@@ -27,69 +30,85 @@ fn get_resolver() -> &'static TokioResolver {
     })
 }
 
-pub fn register_dns_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_dns_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let dns = lua.create_table()?;
-
+    let cap_ctx = capability_ctx.clone();
     dns.set(
         "resolve",
-        lua.create_function(|lua, (hostname, query_type): (String, Option<String>)| {
-            let qtype = query_type.unwrap_or_else(|| "A".to_string());
+        lua.create_function(
+            move |lua, (hostname, query_type): (String, Option<String>)| {
+                let qtype = query_type.unwrap_or_else(|| "A".to_string());
 
-            if hostname.parse::<Ipv4Addr>().is_ok() || hostname.parse::<Ipv6Addr>().is_ok() {
-                let result = lua.create_table()?;
-                result.set("type", qtype.as_str())?;
-                result.set("address", hostname.clone())?;
-                return Ok(result);
-            }
-
-            let runtime = tokio::runtime::Handle::current();
-            let hostname_clone = hostname.clone();
-            let qtype_clone = qtype.clone();
-
-            runtime.block_on(async {
-                let record_type = match qtype_clone.to_uppercase().as_str() {
-                    "A" => RecordType::A,
-                    "AAAA" => RecordType::AAAA,
-                    "MX" => RecordType::MX,
-                    "TXT" => RecordType::TXT,
-                    "NS" => RecordType::NS,
-                    "SOA" => RecordType::SOA,
-                    "PTR" => RecordType::PTR,
-                    "CNAME" => RecordType::CNAME,
-                    "ANY" => RecordType::ANY,
-                    _ => RecordType::A,
-                };
-
-                match get_resolver()
-                    .lookup(hostname_clone.clone(), record_type)
-                    .await
-                {
-                    Ok(lookup) => {
-                        let result = lua.create_table()?;
-                        result.set("type", qtype_clone.as_str())?;
-
-                        let answers = lua.create_table()?;
-                        for (i, record) in lookup.answers().iter().enumerate() {
-                            answers.set(i + 1, record.data.to_string())?;
-                        }
-                        result.set("answers", answers)?;
-
-                        if !lookup.answers().is_empty() {
-                            result.set("address", lookup.answers()[0].data.to_string())?;
-                        }
-
-                        Ok(result)
-                    }
-                    Err(e) => {
-                        let result = lua.create_table()?;
-                        result.set("type", qtype_clone.as_str())?;
-                        result.set("error", format!("DNS lookup failed: {}", e))?;
-                        Ok(result)
-                    }
+                if hostname.parse::<Ipv4Addr>().is_ok() || hostname.parse::<Ipv6Addr>().is_ok() {
+                    let result = lua.create_table()?;
+                    result.set("type", qtype.as_str())?;
+                    result.set("address", hostname.clone())?;
+                    return Ok(result);
                 }
-            })
-        })?,
+
+                let runtime = tokio::runtime::Handle::current();
+                let hostname_clone = hostname.clone();
+                let qtype_clone = qtype.clone();
+
+                let decision = wrappers::check_dns(&cap_ctx, &hostname_clone, "dns.resolve");
+                if decision.is_denied() {
+                    let result = lua.create_table()?;
+                    result.set("type", qtype_clone.as_str())?;
+                    result.set(
+                        "error",
+                        format!(
+                            "DNS resolution denied: {}",
+                            decision.deny_reason().unwrap_or("policy violation")
+                        ),
+                    )?;
+                    return Ok(result);
+                }
+
+                runtime.block_on(async {
+                    let record_type = match qtype_clone.to_uppercase().as_str() {
+                        "A" => RecordType::A,
+                        "AAAA" => RecordType::AAAA,
+                        "MX" => RecordType::MX,
+                        "TXT" => RecordType::TXT,
+                        "NS" => RecordType::NS,
+                        "SOA" => RecordType::SOA,
+                        "PTR" => RecordType::PTR,
+                        "CNAME" => RecordType::CNAME,
+                        "ANY" => RecordType::ANY,
+                        _ => RecordType::A,
+                    };
+
+                    match get_resolver()
+                        .lookup(hostname_clone.clone(), record_type)
+                        .await
+                    {
+                        Ok(lookup) => {
+                            let result = lua.create_table()?;
+                            result.set("type", qtype_clone.as_str())?;
+
+                            let answers = lua.create_table()?;
+                            for (i, record) in lookup.answers().iter().enumerate() {
+                                answers.set(i + 1, record.data.to_string())?;
+                            }
+                            result.set("answers", answers)?;
+
+                            if !lookup.answers().is_empty() {
+                                result.set("address", lookup.answers()[0].data.to_string())?;
+                            }
+
+                            Ok(result)
+                        }
+                        Err(e) => {
+                            let result = lua.create_table()?;
+                            result.set("type", qtype_clone.as_str())?;
+                            result.set("error", format!("DNS lookup failed: {}", e))?;
+                            Ok(result)
+                        }
+                    }
+                })
+            },
+        )?,
     )?;
 
     dns.set(
@@ -125,13 +144,29 @@ pub fn register_dns_library(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
+    let cap_ctx = capability_ctx.clone();
     dns.set(
         "query",
-        lua.create_function(|lua, (name, qtype): (String, Option<String>)| {
+        lua.create_function(move |lua, (name, qtype): (String, Option<String>)| {
             let qt = qtype.unwrap_or_else(|| "A".to_string());
             let runtime = tokio::runtime::Handle::current();
             let name_clone = name.clone();
             let qt_clone = qt.clone();
+
+            let decision = wrappers::check_dns(&cap_ctx, &name_clone, "dns.query");
+            if decision.is_denied() {
+                let result = lua.create_table()?;
+                result.set("name", name_clone.as_str())?;
+                result.set("type", qt_clone.as_str())?;
+                result.set(
+                    "error",
+                    format!(
+                        "DNS resolution denied: {}",
+                        decision.deny_reason().unwrap_or("policy violation")
+                    ),
+                )?;
+                return Ok(result);
+            }
 
             runtime.block_on(async {
                 let record_type = match qt_clone.to_uppercase().as_str() {
@@ -202,13 +237,26 @@ pub fn register_dns_library(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|_lua, _: ()| Ok("1.0.0".to_string()))?,
     )?;
 
+    let cap_ctx = capability_ctx.clone();
     dns.set(
         "forward",
-        lua.create_function(|lua, (hostname, _server): (String, Option<String>)| {
+        lua.create_function(move |lua, (hostname, _server): (String, Option<String>)| {
             let result = lua.create_table()?;
 
             let runtime = tokio::runtime::Handle::current();
             let hostname_clone = hostname.clone();
+
+            let decision = wrappers::check_dns(&cap_ctx, &hostname_clone, "dns.forward");
+            if decision.is_denied() {
+                result.set(
+                    "error",
+                    format!(
+                        "DNS resolution denied: {}",
+                        decision.deny_reason().unwrap_or("policy violation")
+                    ),
+                )?;
+                return Ok(result);
+            }
 
             runtime.block_on(async {
                 match get_resolver()
@@ -233,9 +281,10 @@ pub fn register_dns_library(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
+    let cap_ctx = capability_ctx.clone();
     dns.set(
         "ptr",
-        lua.create_function(|lua, ip: String| {
+        lua.create_function(move |lua, ip: String| {
             let dns_reverse = lua.create_table()?;
 
             if let Ok(ipv4) = ip.parse::<Ipv4Addr>() {
@@ -247,6 +296,18 @@ pub fn register_dns_library(lua: &Lua) -> LuaResult<()> {
 
                 let runtime = tokio::runtime::Handle::current();
                 let reversed_clone = reversed.clone();
+
+                let decision = wrappers::check_dns(&cap_ctx, &reversed_clone, "dns.ptr");
+                if decision.is_denied() {
+                    dns_reverse.set(
+                        "error",
+                        format!(
+                            "DNS resolution denied: {}",
+                            decision.deny_reason().unwrap_or("policy violation")
+                        ),
+                    )?;
+                    return Ok(dns_reverse);
+                }
 
                 return runtime.block_on(async {
                     let result = lua.create_table()?;
