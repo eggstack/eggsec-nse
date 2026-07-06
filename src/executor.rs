@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::executor_core::ExecutorCore;
 use crate::limits::{NseCancellationToken, NseExecutionLimits, NseExecutionStats};
-use crate::profile::{NseModulePolicy, NseScriptPolicy};
+use crate::profile::{NseExecutionProfileKind, NseModulePolicy, NseNetworkPolicy, NseScriptPolicy};
 use crate::report::NseRuleEvaluationReport;
 use crate::SandboxMetrics;
 
@@ -62,9 +62,17 @@ impl NseExecutor {
 
     /// Create an executor with explicit execution limits and cancellation token.
     ///
-    /// This is the preferred constructor for all surfaces. Use
-    /// `NseExecutionLimits::manual_defaults()` for interactive use or
-    /// `NseExecutionLimits::automated_defaults()` for MCP/agent/REST/daemon.
+    /// # Manual-only capability context
+    ///
+    /// This constructor hardcodes `ManualPermissive` profile kind and
+    /// `AllowAllManual` network policy in the capability context. It is
+    /// intended for manual CLI/TUI surfaces where the operator is trusted to
+    /// scope behavior interactively.
+    ///
+    /// Automated surfaces (MCP, agent, REST, daemon, CI) MUST use
+    /// [`NseExecutor::with_full_policy`] or [`NseExecutor::with_profile`]
+    /// so the capability engine enforces the resolved profile's
+    /// `profile_kind` and `network_policy`.
     pub fn with_policy(
         sandbox: crate::SandboxConfig,
         limits: NseExecutionLimits,
@@ -83,9 +91,45 @@ impl NseExecutor {
         })
     }
 
+    /// Create an executor with explicit profile kind and network policy.
+    ///
+    /// This is the canonical constructor for automated surfaces. It accepts
+    /// the full capability policy set (`profile_kind`, `network_policy`,
+    /// sandbox, limits, script/module policies) and threads them through to
+    /// the `NseCapabilityContext` so capability decisions match the resolved
+    /// profile.
+    ///
+    /// Automated surfaces should prefer [`NseExecutor::with_profile`] (which
+    /// derives these fields from a `ResolvedNseExecutionProfile`) and use
+    /// this constructor only when the policy fields are constructed
+    /// independently of a full profile.
+    pub fn with_full_policy(
+        sandbox: crate::SandboxConfig,
+        limits: NseExecutionLimits,
+        cancellation: NseCancellationToken,
+        script_policy: NseScriptPolicy,
+        module_policy: NseModulePolicy,
+        profile_kind: NseExecutionProfileKind,
+        network_policy: NseNetworkPolicy,
+    ) -> LuaResult<Self> {
+        Ok(Self {
+            core: ExecutorCore::with_full_policy(
+                sandbox,
+                limits,
+                cancellation,
+                script_policy,
+                module_policy,
+                profile_kind,
+                network_policy,
+            )?,
+        })
+    }
+
     /// Create an executor from a resolved execution profile.
     ///
     /// This is the preferred constructor when a profile is available.
+    /// It threads the profile's `kind` and `network_policy` into the capability
+    /// context so capability decisions match the resolved profile.
     pub fn with_profile(profile: &crate::profile::ResolvedNseExecutionProfile) -> LuaResult<Self> {
         Ok(Self {
             core: ExecutorCore::with_profile(profile)?,
@@ -220,6 +264,16 @@ impl NseExecutor {
 
     pub fn capability_events(&self) -> Vec<crate::capabilities::NseCapabilityEvent> {
         self.core.capability_context().events()
+    }
+
+    /// Get a reference to the executor's capability context.
+    ///
+    /// The capability context carries the resolved execution profile's
+    /// `profile_kind` and `network_policy`, which determine how the
+    /// capability engine responds to filesystem, network, process, DNS,
+    /// time, randomness, environment, crypto, and compression requests.
+    pub fn capability_context(&self) -> &crate::capabilities::NseCapabilityContext {
+        self.core.capability_context()
     }
 
     // Executor-specific: rule execution

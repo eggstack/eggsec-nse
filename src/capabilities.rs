@@ -502,6 +502,41 @@ impl NseCapabilityContext {
             NseCapabilityKind::FilesystemWrite => NseCapabilityDecision::Deny {
                 reason: "Filesystem write not allowed in agent safe mode".to_string(),
             },
+            NseCapabilityKind::FilesystemRead => {
+                // AgentSafe is "scoped and bounded" by contract. Unscoped
+                // filesystem reads are a sensitive capability for autonomous
+                // surfaces and must be denied unless the path is under an
+                // explicit allowed root. The sandbox `allowed_dir` is the
+                // primary mechanism; resolver-approved module/script roots
+                // (passed via `request.target` semantics) are also accepted.
+                if let Some(ref target) = request.target {
+                    if self.sandbox.enabled {
+                        if self.sandbox.get_allowed_path(target).is_some() {
+                            return NseCapabilityDecision::Allow;
+                        }
+                        return NseCapabilityDecision::Deny {
+                            reason: format!(
+                                "Filesystem read of '{}' not in agent-safe allowed root",
+                                target
+                            ),
+                        };
+                    }
+                    // Sandbox disabled: AgentSafe policy still denies
+                    // unscoped reads because the operator has not opted in
+                    // to a permissive filesystem surface.
+                    return NseCapabilityDecision::Deny {
+                        reason: format!(
+                            "Filesystem read of '{}' denied: agent safe mode requires \
+                             sandbox allowed_dir to be configured for filesystem access",
+                            target
+                        ),
+                    };
+                }
+                NseCapabilityDecision::Deny {
+                    reason: "Filesystem read denied in agent safe mode (no target path)"
+                        .to_string(),
+                }
+            }
             NseCapabilityKind::NetworkTcp | NseCapabilityKind::NetworkUdp => {
                 // Allow only scoped network access
                 match &self.network_policy {
@@ -895,5 +930,51 @@ mod tests {
         let decision = ctx.check_capability(&request);
         assert!(decision.is_allowed());
         assert!(decision.warning().is_some());
+    }
+
+    // -----------------------------------------------------------------------
+    // AgentSafe FilesystemRead semantics (Option A: scoped-only)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_agent_safe_denies_unscoped_filesystem_read() {
+        let ctx = make_context(NseExecutionProfileKind::AgentSafe);
+        let request = NseCapabilityRequest {
+            kind: NseCapabilityKind::FilesystemRead,
+            target: Some("/etc/passwd".to_string()),
+            bytes_hint: None,
+            operation: "io.read",
+        };
+        let decision = ctx.check_capability(&request);
+        assert!(decision.is_denied());
+        let reason = decision.deny_reason().unwrap();
+        assert!(
+            reason.contains("agent-safe") || reason.contains("agent safe"),
+            "expected agent-safe denial message, got: {}",
+            reason
+        );
+    }
+
+    #[test]
+    fn test_agent_safe_allows_scoped_filesystem_read() {
+        let mut ctx = make_context(NseExecutionProfileKind::AgentSafe);
+        let dir = std::env::temp_dir().join("eggsec_nse_test_agent_safe_scope");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("file.txt");
+        std::fs::write(&path, b"scoped read").unwrap();
+
+        ctx.sandbox.enabled = true;
+        ctx.sandbox.allowed_dir = Some(dir.clone());
+        let request = NseCapabilityRequest {
+            kind: NseCapabilityKind::FilesystemRead,
+            target: Some(path.to_string_lossy().to_string()),
+            bytes_hint: None,
+            operation: "io.read",
+        };
+        let decision = ctx.check_capability(&request);
+        assert!(decision.is_allowed());
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
     }
 }

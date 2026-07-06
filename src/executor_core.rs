@@ -73,9 +73,17 @@ impl ExecutorCore {
 
     /// Create an executor core with explicit execution limits and cancellation token.
     ///
-    /// This is the canonical constructor. Automated surfaces (MCP, agent, REST)
-    /// should use `NseExecutionLimits::automated_defaults()` or stricter.
-    /// Manual/interactive use should use `NseExecutionLimits::manual_defaults()`.
+    /// # Manual-only capability context
+    ///
+    /// This constructor hardcodes `ManualPermissive` profile kind and
+    /// `AllowAllManual` network policy in the capability context. It is
+    /// intended for manual CLI/TUI surfaces where the operator is trusted to
+    /// scope behavior interactively.
+    ///
+    /// Automated surfaces (MCP, agent, REST, daemon, CI) MUST use
+    /// [`ExecutorCore::with_full_policy`] or [`ExecutorCore::with_profile`]
+    /// so the capability engine enforces the resolved profile's
+    /// `profile_kind` and `network_policy`.
     pub fn with_policy(
         sandbox: crate::SandboxConfig,
         limits: NseExecutionLimits,
@@ -83,14 +91,43 @@ impl ExecutorCore {
         script_policy: NseScriptPolicy,
         module_policy: NseModulePolicy,
     ) -> LuaResult<Self> {
+        Self::with_full_policy(
+            sandbox,
+            limits,
+            cancellation,
+            script_policy,
+            module_policy,
+            NseExecutionProfileKind::ManualPermissive,
+            NseNetworkPolicy::AllowAllManual,
+        )
+    }
+
+    /// Create an executor core with explicit profile kind and network policy.
+    ///
+    /// This is the canonical constructor for automated surfaces. It accepts
+    /// the full capability policy set (`profile_kind`, `network_policy`,
+    /// sandbox, limits, script/module policies) and threads them through to
+    /// the [`NseCapabilityContext`] so capability decisions match the
+    /// resolved profile.
+    ///
+    /// Automated surfaces (MCP, agent, REST, daemon, CI) should prefer
+    /// [`ExecutorCore::with_profile`] (which derives these fields from a
+    /// `ResolvedNseExecutionProfile`) and use this constructor only when the
+    /// policy fields are constructed independently of a full profile.
+    pub fn with_full_policy(
+        sandbox: crate::SandboxConfig,
+        limits: NseExecutionLimits,
+        cancellation: NseCancellationToken,
+        script_policy: NseScriptPolicy,
+        module_policy: NseModulePolicy,
+        profile_kind: NseExecutionProfileKind,
+        network_policy: NseNetworkPolicy,
+    ) -> LuaResult<Self> {
         let lua = Lua::new();
         let scripts_path = Arc::new(Mutex::new(vec![]));
         let output = Mutex::new(vec![]);
         let registry = Mutex::new(FxHashMap::default());
         let resource_counters = Arc::new(NseResourceCounters::new());
-
-        let profile_kind = NseExecutionProfileKind::ManualPermissive;
-        let network_policy = NseNetworkPolicy::AllowAllManual;
 
         let capability_context = NseCapabilityContext::new(
             profile_kind,
@@ -134,31 +171,18 @@ impl ExecutorCore {
     /// Create an executor core from a resolved execution profile.
     ///
     /// This is the preferred constructor for surfaces that have an explicit profile.
+    /// It threads the profile's `kind` and `network_policy` into the capability
+    /// context so capability decisions match the resolved profile.
     pub fn with_profile(profile: &crate::profile::ResolvedNseExecutionProfile) -> LuaResult<Self> {
-        let core = Self::with_policy(
+        Self::with_full_policy(
             profile.sandbox.clone(),
             profile.limits.clone(),
             NseCancellationToken::new(),
             profile.script_policy.clone(),
             profile.module_policy.clone(),
-        )?;
-        // Override profile_kind, network_policy, and capability_context from profile
-        let capability_context = NseCapabilityContext::new(
             profile.kind,
             profile.network_policy.clone(),
-            profile.script_policy.clone(),
-            profile.module_policy.clone(),
-            profile.sandbox.clone(),
-            profile.limits.clone(),
-            core.cancellation.clone(),
-            core.resource_counters.clone(),
-        );
-        Ok(Self {
-            profile_kind: profile.kind,
-            network_policy: profile.network_policy.clone(),
-            capability_context,
-            ..core
-        })
+        )
     }
 
     /// Get a reference to the capability context.

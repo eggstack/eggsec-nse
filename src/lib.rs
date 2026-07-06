@@ -385,20 +385,14 @@ pub async fn run_cli_with_profile(
         println!("Warning: sandbox enforcement is disabled (feature not compiled)");
     }
 
-    let sandbox = resolved_profile.sandbox.clone();
-    let limits = resolved_profile.limits.clone();
-    let cancellation = crate::limits::NseCancellationToken::new();
     let report_profile = resolved_profile.clone();
+    // Clone for the blocking task so we still hold `resolved_profile` for the
+    // post-execution report/profile label rendering below.
+    let execution_profile = resolved_profile.clone();
 
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, crate::resolver::NseScriptSource, Vec<crate::resolver::NseLoadDiagnostic>, Vec<crate::report::NseRuleEvaluationReport>, Vec<crate::report::NseLibraryUseReport>, Vec<crate::capabilities::NseCapabilityEvent>)> {
-        let mut executor = NseExecutor::with_policy(
-            sandbox,
-            limits,
-            cancellation,
-            resolved_profile.script_policy.clone(),
-            resolved_profile.module_policy.clone(),
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create NSE executor: {}", e))?;
+        let mut executor = NseExecutor::with_profile(&execution_profile)
+            .map_err(|e| anyhow::anyhow!("Failed to create NSE executor: {}", e))?;
         executor
             .set_target(&target)
             .map_err(|e| anyhow::anyhow!("Failed to set target: {}", e))?;

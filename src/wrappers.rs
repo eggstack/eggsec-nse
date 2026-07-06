@@ -1187,19 +1187,49 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // #2: Filesystem read allowed in agent safe (reads are permitted)
+    // #2: Filesystem read allowed in agent safe when path is under sandbox allowed_dir
     // -----------------------------------------------------------------------
 
     #[test]
-    fn test_fs_read_to_string_allowed_in_agent_safe() {
-        let path = temp_path("read_agent_safe");
+    fn test_fs_read_to_string_allowed_in_agent_safe_when_scoped() {
+        let path = temp_path("read_agent_safe_scoped");
         std::fs::write(&path, b"agent safe read").unwrap();
 
-        let ctx = make_ctx(NseExecutionProfileKind::AgentSafe);
+        let mut ctx = make_ctx(NseExecutionProfileKind::AgentSafe);
+        // Configure sandbox to permit reads under the temp directory used by
+        // this test (the only path allowed for AgentSafe filesystem reads).
+        ctx.sandbox.enabled = true;
+        ctx.sandbox.allowed_dir = Some(std::env::temp_dir());
+
         let result = nse_fs_read_to_string(&ctx, path.to_str().unwrap());
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "agent safe read");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // #2a: Filesystem read denied in agent safe for unscoped paths
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fs_read_to_string_denied_in_agent_safe_when_unscoped() {
+        let path = temp_path("read_agent_safe_unscoped");
+        std::fs::write(&path, b"agent safe read").unwrap();
+
+        let ctx = make_ctx(NseExecutionProfileKind::AgentSafe);
+        // Default sandbox: enabled but allowed_dir points at /tmp/eggsec-nse,
+        // which does not contain `path`. The read must be denied.
+        let result = nse_fs_read_to_string(&ctx, path.to_str().unwrap());
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("agent-safe") || err.contains("agent safe") || err.contains("denied"),
+            "expected agent-safe denial message, got: {}",
+            err
+        );
 
         std::fs::remove_file(&path).ok();
     }
