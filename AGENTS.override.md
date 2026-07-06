@@ -125,6 +125,7 @@ New side-effecting code in `eggsec-nse` must go through `ScriptResolver` for fil
 5. **Dead Code Files**: `peg_parser.rs` and `pest_bridge.rs` exist in `src/libraries/` but are not declared in `mod.rs` and never compiled. They may be leftover from development or intended for future use.
 6. ~~**Direct filesystem reads in NSE execution paths**~~ FIXED - Phase 03: All script/module loading now flows through `ScriptResolver` which enforces policy, path containment, size limits, and module name grammar. Direct `std::fs::read_to_string` in execution paths has been eliminated.
 7. ~~**NSE Milestone 1 loader policy**~~ CLOSED - Final corrective pass: `ManualPermissive` script-file loading with empty roots is now an intentional, documented semantic. Read-path authorization (`validate_existing_path_under_roots`) cannot authorize non-existent files. 14 new integration tests in `tests/script_file_policy_tests.rs` cover manual, strict, and automated profile flows. Empty-roots semantic table documented in `architecture/nse_integration.md` and `profile.rs`. Remaining NSE work is Rust-side blocking helper cancellation (Milestone 3).
+8. ~~**NSE Milestone 3 profile propagation**~~ CLOSED - Corrective pass fix: `run_cli_with_profile()` uses `NseExecutor::with_profile()` (not `with_policy()`). 7 propagation tests + 5 end-to-end profile/report tests verify profile→context→event→report pipeline. Architecture guards Check 35/36 enforce the fix. 369 tests pass. See `architecture/nse_integration.md#milestone-3-final-verification`.
 
 ## Dependencies
 
