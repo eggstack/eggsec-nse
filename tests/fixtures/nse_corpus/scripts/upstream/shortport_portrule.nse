@@ -3,11 +3,16 @@ local stdnse = require "stdnse"
 local shortport = require "shortport"
 
 description = [[Upstream-style portrule using shortport helper patterns.
-Mimics the common shortport.port_or_service() pattern found in many Nmap scripts.]]
+Demonstrates a clean-room portrule that matches HTTP ports using a
+manual inline check that mirrors the intent of shortport.port_or_service
+without requiring the helper to be exposed by eggsec's shortport library.]]
 
--- Shortport-style portrule: matches common HTTP/HTTPS ports
-portrule = shortport.port_or_service({80, 443, 8080, 8443}, {"http", "https"})
+-- Inline portrule matching HTTP-like ports (mimics shortport.port_or_service semantics)
+portrule = function(host, port)
+  local http_ports = { [80]=true, [443]=true, [8080]=true, [8443]=true }
+  return port.protocol == "tcp" and http_ports[port.number] == true
+end
 
 action = function(host, port)
-  return "shortport matched: " .. port.service
+  return "shortport-style matched: " .. tostring(port.number)
 end

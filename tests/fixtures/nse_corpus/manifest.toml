@@ -284,6 +284,14 @@ public_network_required = false
 gap_classification = "approximate"
 notes = "Script with approximate compatibility warning. Rule exactness=approximate triggers CompatibleWithWarnings."
 
+[fixture.target]
+host = "10.0.0.1"
+
+[[fixture.ports]]
+number = 80
+protocol = "tcp"
+state = "open"
+
 [[fixture]]
 id = "agent-denied-file"
 name = "agent_denied_file.nse"
@@ -310,9 +318,9 @@ id = "process-denied"
 name = "process_denied.nse"
 category = "unsupported"
 path = "scripts/unsupported/process_denied.nse"
-profile = "agent_safe"
+profile = "agent_safe_runtime"
 expected_status = "partial"
-expected_fidelity = "full"
+expected_fidelity = "approximate"
 expected_resolved = true
 expected_block = false
 expected_libraries = ["stdnse"]
@@ -324,16 +332,24 @@ license_note = "No upstream source copied"
 local_fixture = true
 public_network_required = false
 gap_classification = "capability_denied"
-notes = "Process execution denied by AgentSafe. Capability denial yields Partial status but Full fidelity."
+notes = "Process execution denied by AgentSafe. Capability denial yields Partial status. Rule-level fidelity is Approximate because the harness injects a synthetic host/port context (no real scan target)."
+
+[fixture.target]
+host = "10.0.0.1"
+
+[[fixture.ports]]
+number = 80
+protocol = "tcp"
+state = "open"
 
 [[fixture]]
 id = "fs-read-denied"
 name = "fs_read_denied.nse"
 category = "unsupported"
 path = "scripts/unsupported/fs_read_denied.nse"
-profile = "agent_safe"
+profile = "agent_safe_runtime"
 expected_status = "partial"
-expected_fidelity = "full"
+expected_fidelity = "approximate"
 expected_resolved = true
 expected_block = false
 expected_libraries = ["stdnse"]
@@ -345,7 +361,15 @@ license_note = "No upstream source copied"
 local_fixture = true
 public_network_required = false
 gap_classification = "capability_denied"
-notes = "Filesystem read outside allowed directory denied. Capability denial yields Partial status but Full fidelity."
+notes = "Filesystem read outside allowed directory denied. Capability denial yields Partial status. Rule-level fidelity is Approximate because the harness injects a synthetic host/port context."
+
+[fixture.target]
+host = "10.0.0.1"
+
+[[fixture.ports]]
+number = 80
+protocol = "tcp"
+state = "open"
 
 [[fixture]]
 id = "unsupported-rule"
@@ -398,7 +422,7 @@ profile = "compatibility_lab"
 expected_status = "failed"
 expected_fidelity = "full"
 expected_resolved = true
-expected_block = true
+expected_block = false
 expected_libraries = []
 expected_rules = ["portrule"]
 expected_capability_events = []
@@ -408,16 +432,24 @@ license_note = "No upstream source copied"
 local_fixture = true
 public_network_required = false
 gap_classification = "unsupported_runtime"
-notes = "Script where portrule throws an error. Simulated as blocked."
+notes = "Script where portrule throws an error. Runtime execution surfaces the rule error as a report-level error, yielding Failed status (not blocked at resolver)."
+
+[fixture.target]
+host = "10.0.0.1"
+
+[[fixture.ports]]
+number = 80
+protocol = "tcp"
+state = "open"
 
 [[fixture]]
 id = "capability-fs-deny"
 name = "capability_fs_deny.nse"
 category = "regression"
 path = "scripts/regression/capability_fs_deny.nse"
-profile = "agent_safe"
+profile = "agent_safe_runtime"
 expected_status = "partial"
-expected_fidelity = "full"
+expected_fidelity = "approximate"
 expected_resolved = true
 expected_block = false
 expected_libraries = ["stdnse"]
@@ -429,7 +461,15 @@ license_note = "No upstream source copied"
 local_fixture = true
 public_network_required = false
 gap_classification = "capability_denied"
-notes = "Regression: capability event for filesystem read denial. Capability denial yields Partial status but Full fidelity."
+notes = "Regression: capability event for filesystem read denial. Capability denial yields Partial status. Rule-level fidelity is Approximate because the harness injects a synthetic host/port context."
+
+[fixture.target]
+host = "10.0.0.1"
+
+[[fixture.ports]]
+number = 80
+protocol = "tcp"
+state = "open"
 
 [[fixture]]
 id = "capability-compress"
@@ -817,6 +857,15 @@ public_network_required = false
 gap_classification = "approximate"
 notes = "Tests portrule(host, port) two-argument signature with context fidelity fields. Synthetic context produces approximate fidelity."
 
+[fixture.target]
+host = "10.0.0.1"
+
+[[fixture.ports]]
+number = 80
+protocol = "tcp"
+state = "open"
+
+
 [[fixture]]
 id = "hostrule-host-context"
 name = "hostrule_host_context.nse"
@@ -838,6 +887,10 @@ public_network_required = false
 gap_classification = "approximate"
 notes = "Tests hostrule receives host table with eggsec_context_source field. Synthetic context produces approximate fidelity."
 
+[fixture.target]
+host = "10.0.0.1"
+
+
 [[fixture]]
 id = "portrule-service-context"
 name = "portrule_service_context.nse"
@@ -858,3 +911,13 @@ local_fixture = true
 public_network_required = false
 gap_classification = "approximate"
 notes = "Tests portrule receives port with service context sub-table. Synthetic context produces approximate fidelity."
+
+[fixture.target]
+host = "10.0.0.1"
+
+[[fixture.ports]]
+number = 80
+protocol = "tcp"
+state = "open"
+service = "http"
+

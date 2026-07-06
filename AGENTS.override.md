@@ -22,6 +22,13 @@ The NSE (Nmap Scripting Engine) module (`crates/eggsec-nse/`) provides Lua VM in
 
 > **Milestone 4 complete (2026-07-06).** Evidence model (`NseEvidenceKind`, `NseEvidenceItem`), extraction (`extract_evidence()`), bridge (`to_report_envelope()`), CLI UX (`print_human_report()`), 40 corpus fixtures, 43 library registry. See [architecture/nse_integration.md](../architecture/nse_integration.md).
 
+> **Milestone 4 closure (2026-07-06, runtime harness).** The compatibility corpus is now verified by two structurally separated harnesses:
+> - `compatibility_corpus_tests.rs` (`mod corpus_manifest`, formerly `corpus_harness`) is the **static** harness: resolver-only, no script execution. Verifies script/module resolution, file policies, blocked-at-resolver diagnostics.
+> - `runtime_corpus_tests.rs` is the **runtime** harness: drives every fixture through `NseExecutor::with_profile(&ResolvedNseExecutionProfile)` with synthetic host/port context. Asserts manifest expectations (`expected_status`, `expected_fidelity`, `expected_libraries`, `expected_rules`, `expected_capability_events`) against observed behavior.
+> - `runtime_smoke_tests.rs` exercises the full pipeline (profile → context → execution → report → `ReportEnvelope` bridge) for representative scenarios.
+>
+> Architecture guards 42/43/44 enforce the separation: the runtime test binary must exist, must use `NseExecutor::with_profile`, and the static harness must not call `run_script_with_rules`. See the [Milestone 4 Closure Verification](../../architecture/nse_integration.md#milestone-4-closure-verification) for the full verification table.
+
 ## Recent Bug Fixes (2026-05-28)
 
 | Component | Issue | Fix |
