@@ -5,16 +5,30 @@
 
 use mlua::{Lua, Result as LuaResult};
 
-pub fn register_datetime_library(lua: &Lua) -> LuaResult<()> {
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
+pub fn register_datetime_library(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+) -> LuaResult<()> {
     let globals = lua.globals();
 
     let datetime = lua.create_table().map_err(|e| {
         mlua::Error::RuntimeError(format!("Failed to create datetime table: {}", e))
     })?;
 
+    let cap_ctx = capability_ctx.clone();
     datetime.set(
         "now",
-        lua.create_function(|_lua, _: ()| {
+        lua.create_function(move |_lua, _: ()| {
+            let decision = wrappers::check_time_clock(&cap_ctx, "datetime.now");
+            if decision.is_denied() {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "Time clock access denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                )));
+            }
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -23,17 +37,33 @@ pub fn register_datetime_library(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
+    let cap_ctx = capability_ctx.clone();
     datetime.set(
         "current_time",
-        lua.create_function(|_lua, _: ()| {
+        lua.create_function(move |_lua, _: ()| {
+            let decision = wrappers::check_time_clock(&cap_ctx, "datetime.current_time");
+            if decision.is_denied() {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "Time clock access denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                )));
+            }
             let now = chrono::Utc::now();
             Ok(now.format("%Y-%m-%d %H:%M:%S").to_string())
         })?,
     )?;
 
+    let cap_ctx = capability_ctx.clone();
     datetime.set(
         "timestamp",
-        lua.create_function(|_lua, _: ()| {
+        lua.create_function(move |_lua, _: ()| {
+            let decision = wrappers::check_time_clock(&cap_ctx, "datetime.timestamp");
+            if decision.is_denied() {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "Time clock access denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                )));
+            }
             let now = chrono::Utc::now().timestamp();
             Ok(now)
         })?,
@@ -84,10 +114,22 @@ pub fn register_datetime_library(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
+    let cap_ctx = capability_ctx.clone();
     datetime.set(
         "isotime",
-        lua.create_function(|_lua, timestamp: Option<i64>| {
-            let ts = timestamp.unwrap_or_else(|| chrono::Utc::now().timestamp());
+        lua.create_function(move |_lua, timestamp: Option<i64>| {
+            let ts = if let Some(ts) = timestamp {
+                ts
+            } else {
+                let decision = wrappers::check_time_clock(&cap_ctx, "datetime.isotime");
+                if decision.is_denied() {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Time clock access denied: {}",
+                        decision.deny_reason().unwrap_or("policy violation")
+                    )));
+                }
+                chrono::Utc::now().timestamp()
+            };
             use chrono::{TimeZone, Utc};
             let dt = Utc.timestamp_opt(ts, 0).single();
             match dt {

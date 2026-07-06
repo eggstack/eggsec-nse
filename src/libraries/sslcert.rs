@@ -11,6 +11,9 @@ use std::net::TcpStream;
 extern crate base64;
 extern crate hex;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 fn parse_x509_name(name: &openssl::x509::X509NameRef) -> String {
     name.entries()
         .map(|e| {
@@ -26,12 +29,26 @@ fn parse_x509_name(name: &openssl::x509::X509NameRef) -> String {
         .join(", ")
 }
 
-pub fn register_sslcert_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
 
     let sslcert = lua.create_table()?;
 
-    let get_cert_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let get_cert_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "sslcert.get_certificate");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
 
         let connector = match TlsConnector::builder()
@@ -79,7 +96,21 @@ pub fn register_sslcert_library(lua: &Lua) -> LuaResult<()> {
     })?;
     sslcert.set("get_certificate", get_cert_fn)?;
 
-    let get_chain_certs_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let get_chain_certs_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "sslcert.get_chain_certs");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
 
         let connector = match native_tls::TlsConnector::builder()
@@ -281,7 +312,13 @@ pub fn register_sslcert_library(lua: &Lua) -> LuaResult<()> {
     })?;
     sslcert.set("is_valid", is_valid_fn)?;
 
-    let version = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let version = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "sslcert.version");
+        if decision.is_denied() {
+            return Ok(String::new());
+        }
+
         let _result = lua.create_table()?;
 
         let connector = match native_tls::TlsConnector::builder()

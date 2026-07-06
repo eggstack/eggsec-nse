@@ -10,6 +10,9 @@ use std::net::TcpStream;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 static SSL_SESSIONS: std::sync::LazyLock<Mutex<FxHashMap<String, TlsConnector>>> =
     std::sync::LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
@@ -37,7 +40,7 @@ fn create_ssl_connection(
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
-pub fn register_openssl_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_openssl_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let openssl = lua.create_table()?;
 
@@ -54,7 +57,22 @@ pub fn register_openssl_library(lua: &Lua) -> LuaResult<()> {
     openssl.set("new", new_fn)?;
 
     // openssl.connect() - Connect with TLS
-    let connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "openssl.connect");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set("success", false)?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
         let host_clone = host.clone();
         let port_clone = port;
@@ -85,7 +103,21 @@ pub fn register_openssl_library(lua: &Lua) -> LuaResult<()> {
     openssl.set("connect", connect_fn)?;
 
     // openssl.get_certificate() - Get server certificate
-    let get_certificate_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let get_certificate_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "openssl.get_certificate");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
 
         // Try to get the certificate
@@ -146,7 +178,23 @@ pub fn register_openssl_library(lua: &Lua) -> LuaResult<()> {
     openssl.set("get_certificate", get_certificate_fn)?;
 
     // openssl.verify() - Verify certificate
-    let verify_fn = lua.create_function(|_lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let verify_fn = lua.create_function(move |_lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "openssl.verify");
+        if decision.is_denied() {
+            let result = _lua.create_table()?;
+            result.set("valid", false)?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            result.set("error_code", -1)?;
+            return Ok(result);
+        }
+
         let result = _lua.create_table()?;
 
         // Try to verify the connection
@@ -237,7 +285,24 @@ pub fn register_openssl_library(lua: &Lua) -> LuaResult<()> {
     openssl.set("get_error", get_error_fn)?;
 
     // openssl.rand_bytes() - Generate random bytes
-    let random_fn = lua.create_function(|_lua, size: usize| {
+    let cap_ctx_crypto = capability_ctx.clone();
+    let cap_ctx_rand = capability_ctx.clone();
+    let random_fn = lua.create_function(move |_lua, size: usize| {
+        let decision = wrappers::check_crypto(&cap_ctx_crypto, "openssl.rand_bytes");
+        if decision.is_denied() {
+            return Err(mlua::Error::RuntimeError(format!(
+                "Crypto denied: {}",
+                decision.deny_reason().unwrap_or("policy violation")
+            )));
+        }
+        let decision = wrappers::check_randomness(&cap_ctx_rand, "openssl.rand_bytes");
+        if decision.is_denied() {
+            return Err(mlua::Error::RuntimeError(format!(
+                "Randomness generation denied: {}",
+                decision.deny_reason().unwrap_or("policy violation")
+            )));
+        }
+
         let bytes: Vec<u8> = (0..size.min(65536)).map(|_| rand::random::<u8>()).collect();
 
         use base64::Engine;
@@ -263,7 +328,23 @@ pub fn register_openssl_library(lua: &Lua) -> LuaResult<()> {
     openssl.set("cipher_get_min_version", min_version_fn)?;
 
     // openssl.remote_verify() - Verify remote certificate
-    let remote_verify_fn = lua.create_function(|_lua, (host, _port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let remote_verify_fn = lua.create_function(move |_lua, (host, _port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "openssl.remote_verify");
+        if decision.is_denied() {
+            let result = _lua.create_table()?;
+            result.set("valid", false)?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            result.set("error_code", -1)?;
+            return Ok(result);
+        }
+
         let result = _lua.create_table()?;
 
         // For now, always return valid with warning
@@ -277,9 +358,18 @@ pub fn register_openssl_library(lua: &Lua) -> LuaResult<()> {
     openssl.set("remote_verify", remote_verify_fn)?;
 
     // openssl.cert_get_fingerprint() - Get certificate fingerprint
+    let cap_ctx = capability_ctx.clone();
     let fingerprint_fn =
-        lua.create_function(|_lua, (_host, _port, _hash): (String, u16, String)| {
-        // Return SHA256 fingerprint
+        lua.create_function(move |_lua, (_host, _port, _hash): (String, u16, String)| {
+            let decision = wrappers::check_crypto(&cap_ctx, "openssl.cert_get_fingerprint");
+            if decision.is_denied() {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                )));
+            }
+
+            // Return SHA256 fingerprint
         let fingerprint = format!("{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
             rand::random::<u8>(), rand::random::<u8>(), rand::random::<u8>(), rand::random::<u8>(),
             rand::random::<u8>(), rand::random::<u8>(), rand::random::<u8>(), rand::random::<u8>(),
@@ -296,7 +386,21 @@ pub fn register_openssl_library(lua: &Lua) -> LuaResult<()> {
     openssl.set("cert_get_fingerprint", fingerprint_fn)?;
 
     // openssl.cert_get_altnames() - Get certificate alt names
-    let altnames_fn = lua.create_function(|lua, (host, _port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let altnames_fn = lua.create_function(move |lua, (host, _port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "openssl.cert_get_altnames");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
 
         // Return common SANs

@@ -874,8 +874,8 @@ impl ExecutorCore {
         crate::libraries::nmap::register_nmap_library(&self.lua, &self.capability_context)?;
         crate::libraries::http::register_http_library(&self.lua)?;
         crate::libraries::comm::register_comm_library(&self.lua, &self.capability_context)?;
-        crate::libraries::sslcert::register_sslcert_library(&self.lua)?;
-        crate::libraries::tls::register_tls_library(&self.lua)?;
+        crate::libraries::sslcert::register_sslcert_library(&self.lua, &self.capability_context)?;
+        crate::libraries::tls::register_tls_library(&self.lua, &self.capability_context)?;
         crate::libraries::shortport::register_shortport_library(&self.lua)?;
         crate::libraries::socket::register_socket_library(
             &self.lua,
@@ -926,11 +926,11 @@ impl ExecutorCore {
         crate::libraries::httpspider::register_httpspider_library(&self.lua)?;
         crate::libraries::base64::register_base64_library(&self.lua)?;
         crate::libraries::base32::register_base32_library(&self.lua)?;
-        crate::libraries::datetime::register_datetime_library(&self.lua)?;
-        crate::libraries::rand::register_rand_library(&self.lua)?;
+        crate::libraries::datetime::register_datetime_library(&self.lua, &self.capability_context)?;
+        crate::libraries::rand::register_rand_library(&self.lua, &self.capability_context)?;
         crate::libraries::url::register_url_library(&self.lua)?;
         crate::libraries::creds::register_creds_library(&self.lua)?;
-        crate::libraries::openssl::register_openssl_library(&self.lua)?;
+        crate::libraries::openssl::register_openssl_library(&self.lua, &self.capability_context)?;
         crate::libraries::pcre::register_pcre_library(&self.lua)?;
         crate::libraries::io::register_io_library(
             &self.lua,
@@ -1032,7 +1032,7 @@ impl ExecutorCore {
         crate::libraries::tableaux::register_tableaux_library(&self.lua)?;
         crate::libraries::vuzedht::register_vuzedht_library(&self.lua)?;
         crate::libraries::listop::register_listop_library(&self.lua)?;
-        crate::libraries::zlib::register_zlib_library(&self.lua)?;
+        crate::libraries::zlib::register_zlib_library(&self.lua, &self.capability_context)?;
 
         self.sync_require_modules()
     }

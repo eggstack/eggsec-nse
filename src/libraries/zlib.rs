@@ -9,6 +9,9 @@ use flate2::Compression;
 use mlua::{Lua, Result as LuaResult, Table, UserData};
 use std::io::{Read, Write};
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 struct DeflateStream {
     buffer: Vec<u8>,
     compressed: Vec<u8>,
@@ -43,7 +46,7 @@ impl UserData for InflateStream {
     }
 }
 
-pub fn register_zlib_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_zlib_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let zlib = lua.create_table()?;
 
@@ -65,36 +68,56 @@ pub fn register_zlib_library(lua: &Lua) -> LuaResult<()> {
     })?;
     zlib.set("crc32", crc32_fn)?;
 
-    let compress_fn = lua.create_function(|_lua, (buffer, level): (String, Option<i32>)| {
-        let compression_level = match level.unwrap_or(6) {
-            0 => Compression::none(),
-            1..=3 => Compression::fast(),
-            4..=6 => Compression::default(),
-            7..=9 => Compression::best(),
-            _ => Compression::default(),
-        };
+    let cap_ctx = capability_ctx.clone();
+    let compress_fn =
+        lua.create_function(move |_lua, (buffer, level): (String, Option<i32>)| {
+            let decision = wrappers::check_compression(&cap_ctx, "zlib.compress");
+            if decision.is_denied() {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "Compression denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                )));
+            }
 
-        let mut encoder = ZlibEncoder::new(Vec::new(), compression_level);
-        encoder
-            .write_all(buffer.as_bytes())
-            .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
-        let compressed = encoder
-            .finish()
-            .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+            let compression_level = match level.unwrap_or(6) {
+                0 => Compression::none(),
+                1..=3 => Compression::fast(),
+                4..=6 => Compression::default(),
+                7..=9 => Compression::best(),
+                _ => Compression::default(),
+            };
 
-        Ok(compressed)
-    })?;
+            let mut encoder = ZlibEncoder::new(Vec::new(), compression_level);
+            encoder
+                .write_all(buffer.as_bytes())
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+            let compressed = encoder
+                .finish()
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+
+            Ok(compressed)
+        })?;
     zlib.set("compress", compress_fn)?;
 
-    let decompress_fn =
-        lua.create_function(|_lua, (buffer, _window_bits): (Vec<u8>, Option<i32>)| {
+    let cap_ctx = capability_ctx.clone();
+    let decompress_fn = lua.create_function(
+        move |_lua, (buffer, _window_bits): (Vec<u8>, Option<i32>)| {
+            let decision = wrappers::check_compression(&cap_ctx, "zlib.decompress");
+            if decision.is_denied() {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "Decompression denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                )));
+            }
+
             let mut decompressed = Vec::new();
             let mut decoder = ZlibDecoder::new(buffer.as_slice());
             decoder
                 .read_to_end(&mut decompressed)
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
             Ok(decompressed)
-        })?;
+        },
+    )?;
     zlib.set("decompress", decompress_fn)?;
 
     let deflate_fn = lua.create_function(|lua, (_sink, level): (Table, Option<i32>)| {

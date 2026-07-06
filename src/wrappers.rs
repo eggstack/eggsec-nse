@@ -113,6 +113,56 @@ pub fn check_dns(
     })
 }
 
+/// Check a randomness capability and return the decision.
+pub fn check_randomness(
+    ctx: &NseCapabilityContext,
+    operation: &'static str,
+) -> NseCapabilityDecision {
+    ctx.check_capability(&NseCapabilityRequest {
+        kind: NseCapabilityKind::Randomness,
+        target: None,
+        bytes_hint: None,
+        operation,
+    })
+}
+
+/// Check an environment access capability and return the decision.
+pub fn check_environment(
+    ctx: &NseCapabilityContext,
+    var_name: &str,
+    operation: &'static str,
+) -> NseCapabilityDecision {
+    ctx.check_capability(&NseCapabilityRequest {
+        kind: NseCapabilityKind::Environment,
+        target: Some(var_name.to_string()),
+        bytes_hint: None,
+        operation,
+    })
+}
+
+/// Check a crypto capability and return the decision.
+pub fn check_crypto(ctx: &NseCapabilityContext, operation: &'static str) -> NseCapabilityDecision {
+    ctx.check_capability(&NseCapabilityRequest {
+        kind: NseCapabilityKind::Crypto,
+        target: None,
+        bytes_hint: None,
+        operation,
+    })
+}
+
+/// Check a compression capability and return the decision.
+pub fn check_compression(
+    ctx: &NseCapabilityContext,
+    operation: &'static str,
+) -> NseCapabilityDecision {
+    ctx.check_capability(&NseCapabilityRequest {
+        kind: NseCapabilityKind::Compression,
+        target: None,
+        bytes_hint: None,
+        operation,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Executing wrappers: check capability, perform operation, record event.
 // ---------------------------------------------------------------------------
@@ -822,6 +872,182 @@ pub fn nse_process_exec(
     }
 }
 
+/// Get the current wall-clock time after checking time-clock capability.
+pub fn nse_time_now(ctx: &NseCapabilityContext) -> Result<i64, String> {
+    let op = "wrapper.time_now";
+    ctx.check_cancelled(op)?;
+    let request = build_request(NseCapabilityKind::TimeClock, None, None, op);
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(decision
+            .deny_reason()
+            .unwrap_or("time clock access denied")
+            .to_string());
+    }
+    ctx.before_blocking_operation(&request)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("System time error: {}", e))?
+        .as_secs() as i64;
+    ctx.after_blocking_operation(&request, None);
+    Ok(now)
+}
+
+/// Generate random bytes after checking randomness capability.
+pub fn nse_random_bytes(ctx: &NseCapabilityContext, count: usize) -> Result<Vec<u8>, String> {
+    let op = "wrapper.random_bytes";
+    ctx.check_cancelled(op)?;
+    let request = build_request(NseCapabilityKind::Randomness, None, Some(count as u64), op);
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(decision
+            .deny_reason()
+            .unwrap_or("randomness generation denied")
+            .to_string());
+    }
+    ctx.before_blocking_operation(&request)?;
+    let bytes: Vec<u8> = (0..count).map(|_| rand::random::<u8>()).collect();
+    ctx.after_blocking_operation(&request, Some(count as u64));
+    Ok(bytes)
+}
+
+/// Read an environment variable after checking environment capability.
+pub fn nse_env_var(ctx: &NseCapabilityContext, var_name: &str) -> Result<Option<String>, String> {
+    let op = "wrapper.env_var";
+    ctx.check_cancelled(op)?;
+    let request = build_request(
+        NseCapabilityKind::Environment,
+        Some(var_name.to_string()),
+        None,
+        op,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(decision
+            .deny_reason()
+            .unwrap_or("environment access denied")
+            .to_string());
+    }
+    ctx.before_blocking_operation(&request)?;
+    let value = std::env::var(var_name).ok();
+    ctx.after_blocking_operation(&request, None);
+    Ok(value)
+}
+
+/// Compress data after checking compression capability.
+///
+/// Enforces a maximum input size to prevent compression bombs.
+pub fn nse_compress(
+    ctx: &NseCapabilityContext,
+    data: &[u8],
+    level: Option<u32>,
+) -> Result<Vec<u8>, String> {
+    let op = "wrapper.compress";
+    ctx.check_cancelled(op)?;
+    let request = build_request(
+        NseCapabilityKind::Compression,
+        None,
+        Some(data.len() as u64),
+        op,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(decision
+            .deny_reason()
+            .unwrap_or("compression denied")
+            .to_string());
+    }
+    ctx.before_blocking_operation(&request)?;
+
+    // Enforce maximum input size (64 MiB)
+    const MAX_COMPRESS_INPUT: usize = 64 * 1024 * 1024;
+    if data.len() > MAX_COMPRESS_INPUT {
+        return Err(format!(
+            "Compression input too large: {} bytes (max {})",
+            data.len(),
+            MAX_COMPRESS_INPUT
+        ));
+    }
+
+    let compression_level = match level.unwrap_or(6) {
+        0 => flate2::Compression::none(),
+        1..=3 => flate2::Compression::fast(),
+        4..=6 => flate2::Compression::default(),
+        7..=9 => flate2::Compression::best(),
+        _ => flate2::Compression::default(),
+    };
+
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+    let mut encoder = ZlibEncoder::new(Vec::new(), compression_level);
+    encoder
+        .write_all(data)
+        .map_err(|e| format!("Compression failed: {}", e))?;
+    let compressed = encoder
+        .finish()
+        .map_err(|e| format!("Compression finish failed: {}", e))?;
+    ctx.after_blocking_operation(&request, Some(compressed.len() as u64));
+    Ok(compressed)
+}
+
+/// Decompress data after checking compression capability.
+///
+/// Enforces maximum input and output expansion limits to prevent decompression bombs.
+pub fn nse_decompress(ctx: &NseCapabilityContext, data: &[u8]) -> Result<Vec<u8>, String> {
+    let op = "wrapper.decompress";
+    ctx.check_cancelled(op)?;
+    let request = build_request(
+        NseCapabilityKind::Compression,
+        None,
+        Some(data.len() as u64),
+        op,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(decision
+            .deny_reason()
+            .unwrap_or("decompression denied")
+            .to_string());
+    }
+    ctx.before_blocking_operation(&request)?;
+
+    // Enforce maximum input size (64 MiB)
+    const MAX_DECOMPRESS_INPUT: usize = 64 * 1024 * 1024;
+    if data.len() > MAX_DECOMPRESS_INPUT {
+        return Err(format!(
+            "Decompression input too large: {} bytes (max {})",
+            data.len(),
+            MAX_DECOMPRESS_INPUT
+        ));
+    }
+
+    // Enforce maximum output expansion (256 MiB)
+    const MAX_DECOMPRESS_OUTPUT: usize = 256 * 1024 * 1024;
+
+    use flate2::read::ZlibDecoder;
+    use std::io::Read;
+    let mut decoder = ZlibDecoder::new(data);
+    let mut decompressed = Vec::new();
+    let mut buf = [0u8; 8192];
+    loop {
+        let n = decoder
+            .read(&mut buf)
+            .map_err(|e| format!("Decompression failed: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        decompressed.extend_from_slice(&buf[..n]);
+        if decompressed.len() > MAX_DECOMPRESS_OUTPUT {
+            return Err(format!(
+                "Decompression output too large: exceeded {} bytes",
+                MAX_DECOMPRESS_OUTPUT
+            ));
+        }
+    }
+    ctx.after_blocking_operation(&request, Some(decompressed.len() as u64));
+    Ok(decompressed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1495,5 +1721,226 @@ mod tests {
         // AgentSafe allows DNS unless DenyAll policy
         let decision = check_dns(&ctx, "example.com", "dns.resolve");
         assert!(decision.is_allowed());
+    }
+
+    // -----------------------------------------------------------------------
+    // Time wrapper tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_time_now_allowed_in_manual_permissive() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        let result = nse_time_now(&ctx);
+        assert!(result.is_ok());
+        assert!(result.unwrap() > 0);
+    }
+
+    #[test]
+    fn test_time_now_allowed_in_agent_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::AgentSafe);
+        let result = nse_time_now(&ctx);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_time_now_cancellation() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        ctx.cancellation.cancel();
+        let result = nse_time_now(&ctx);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cancelled"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Randomness wrapper tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_random_bytes_allowed_in_manual_permissive() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        let result = nse_random_bytes(&ctx, 32);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 32);
+    }
+
+    #[test]
+    fn test_random_bytes_allowed_in_agent_safe_with_warning() {
+        let ctx = make_ctx(NseExecutionProfileKind::AgentSafe);
+        let result = nse_random_bytes(&ctx, 16);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().len(), 16);
+        // Check that a warning event was recorded
+        let events = ctx.events();
+        assert!(events
+            .iter()
+            .any(|e| e.kind == NseCapabilityKind::Randomness));
+    }
+
+    #[test]
+    fn test_random_bytes_denied_in_ci_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::CiSafe);
+        let result = nse_random_bytes(&ctx, 32);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not allowed"));
+    }
+
+    #[test]
+    fn test_random_bytes_cancellation() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        ctx.cancellation.cancel();
+        let result = nse_random_bytes(&ctx, 32);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cancelled"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Environment wrapper tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_env_var_allowed_in_manual_permissive() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        // PATH usually exists on Unix
+        let result = nse_env_var(&ctx, "PATH");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_env_var_denied_in_agent_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::AgentSafe);
+        let result = nse_env_var(&ctx, "PATH");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not allowed"));
+    }
+
+    #[test]
+    fn test_env_var_denied_in_ci_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::CiSafe);
+        let result = nse_env_var(&ctx, "PATH");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not allowed"));
+    }
+
+    #[test]
+    fn test_env_var_cancellation() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        ctx.cancellation.cancel();
+        let result = nse_env_var(&ctx, "PATH");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cancelled"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Compression wrapper tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_compress_decompress_roundtrip() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        let data = b"Hello, eggsec compression test! ".repeat(100);
+        let compressed = nse_compress(&ctx, &data, None);
+        assert!(compressed.is_ok());
+        let compressed = compressed.unwrap();
+        assert!(compressed.len() < data.len());
+
+        let decompressed = nse_decompress(&ctx, &compressed);
+        assert!(decompressed.is_ok());
+        assert_eq!(decompressed.unwrap(), data);
+    }
+
+    #[test]
+    fn test_compress_allowed_in_ci_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::CiSafe);
+        let result = nse_compress(&ctx, b"test data", None);
+        // CiSafe allows compression (it's not denied)
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_compress_cancellation() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        ctx.cancellation.cancel();
+        let result = nse_compress(&ctx, b"test", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cancelled"));
+    }
+
+    #[test]
+    fn test_decompress_cancellation() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        ctx.cancellation.cancel();
+        let result = nse_decompress(&ctx, b"test");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cancelled"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Check-only wrapper tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_check_randomness_allowed_in_manual() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        let decision = check_randomness(&ctx, "rand.random");
+        assert!(decision.is_allowed());
+    }
+
+    #[test]
+    fn test_check_randomness_denied_in_ci_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::CiSafe);
+        let decision = check_randomness(&ctx, "rand.random");
+        assert!(decision.is_denied());
+    }
+
+    #[test]
+    fn test_check_environment_denied_in_agent_safe() {
+        let ctx = make_ctx(NseExecutionProfileKind::AgentSafe);
+        let decision = check_environment(&ctx, "HOME", "os.getenv");
+        assert!(decision.is_denied());
+    }
+
+    #[test]
+    fn test_check_environment_allowed_in_manual() {
+        let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
+        let decision = check_environment(&ctx, "HOME", "os.getenv");
+        assert!(decision.is_allowed());
+    }
+
+    #[test]
+    fn test_check_crypto_allowed_in_all_profiles() {
+        for profile in [
+            NseExecutionProfileKind::ManualPermissive,
+            NseExecutionProfileKind::ManualStrict,
+            NseExecutionProfileKind::AgentSafe,
+            NseExecutionProfileKind::CiSafe,
+            NseExecutionProfileKind::CompatibilityLab,
+        ] {
+            let ctx = make_ctx(profile);
+            let decision = check_crypto(&ctx, "openssl.connect");
+            assert!(
+                decision.is_allowed(),
+                "crypto should be allowed in {:?}",
+                profile
+            );
+        }
+    }
+
+    #[test]
+    fn test_check_compression_allowed_in_all_profiles() {
+        for profile in [
+            NseExecutionProfileKind::ManualPermissive,
+            NseExecutionProfileKind::ManualStrict,
+            NseExecutionProfileKind::AgentSafe,
+            NseExecutionProfileKind::CiSafe,
+            NseExecutionProfileKind::CompatibilityLab,
+        ] {
+            let ctx = make_ctx(profile);
+            let decision = check_compression(&ctx, "zlib.compress");
+            assert!(
+                decision.is_allowed(),
+                "compression should be allowed in {:?}",
+                profile
+            );
+        }
     }
 }

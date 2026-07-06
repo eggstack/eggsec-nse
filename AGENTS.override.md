@@ -12,6 +12,12 @@ The NSE (Nmap Scripting Engine) module (`crates/eggsec-nse/`) provides Lua VM in
 
 > **Milestone 3 Phase 02 complete.** `NseCapabilityContext` and decision engine (`capabilities.rs`) provide centralized policy enforcement. `NseCapabilityKind` covers 11 operation classes. Profile-specific checks: ManualPermissive allows all with warnings, ManualStrict enforces path/network policy, AgentSafe denies process exec + FS write, CiSafe denies all side effects. `NseCapabilityEvent` integration into `NseRunReport.capability_events`. Pilot wrappers in `wrappers.rs`. `ExecutorCore` stores capability context. Architecture guards detect direct high-risk ops in NSE libraries (informational).
 
+> **Milestone 3 Phase 03 complete.** Filesystem and process wrappers fully migrated. Libraries `io.rs`, `lfs.rs`, `os.rs`, `nmap.rs` route all side-effecting operations through capability checks. Executing wrappers (`nse_fs_read_to_string`, `nse_fs_write`, `nse_fs_remove_file`, `nse_fs_create_dir`, `nse_fs_rename`, `nse_process_exec`, etc.) combine capability checking with the actual operation. Library registration functions accept `&NseCapabilityContext`.
+
+> **Milestone 3 Phase 04 complete.** Network TCP/UDP and DNS wrappers migrated. Executing wrappers: `nse_network_tcp_connect`, `nse_network_tcp_send`, `nse_network_tcp_receive`, `nse_network_udp_send`, `nse_network_udp_receive`, `nse_dns_lookup`, plus check-only `check_network_udp`. Libraries `socket.rs`, `comm.rs`, `dns.rs` accept `&NseCapabilityContext`.
+
+> **Milestone 3 Phase 05 complete.** Time, randomness, environment, crypto, and compression helpers routed through `NseCapabilityContext`. Executing wrappers: `nse_time_now`, `nse_random_bytes`, `nse_env_var`, `nse_compress`, `nse_decompress`. Check-only wrappers: `check_randomness`, `check_environment`, `check_crypto`, `check_compression`. Libraries migrated: `datetime.rs`, `rand.rs`, `openssl.rs`, `tls.rs`, `sslcert.rs`, `zlib.rs`. Compression enforces 64 MiB input and 256 MiB output limits.
+
 ## Recent Bug Fixes (2026-05-28)
 
 | Component | Issue | Fix |

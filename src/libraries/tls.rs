@@ -10,6 +10,9 @@ use openssl::rsa::Rsa;
 use std::net::TcpStream;
 use std::time::Duration;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 struct TlsConnection {
     stream: Option<TcpStream>,
     host: String,
@@ -119,11 +122,20 @@ impl UserData for TlsConnection {
     }
 }
 
-pub fn register_tls_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let tls = lua.create_table()?;
 
-    let connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "tls.connect");
+        if decision.is_denied() {
+            return Err(mlua::Error::RuntimeError(format!(
+                "Crypto denied: {}",
+                decision.deny_reason().unwrap_or("policy violation")
+            )));
+        }
+
         let mut conn = TlsConnection::new();
         conn.connect(&host, port)
             .map_err(mlua::Error::RuntimeError)?;
@@ -195,7 +207,21 @@ pub fn register_tls_library(lua: &Lua) -> LuaResult<()> {
     })?;
     tls.set("protocol_to_string", protocol_to_string_fn)?;
 
-    let get_curve_info_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let get_curve_info_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "tls.get_curve_info");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
 
         let connector = match native_tls::TlsConnector::builder()
@@ -242,7 +268,21 @@ pub fn register_tls_library(lua: &Lua) -> LuaResult<()> {
     })?;
     tls.set("get_curve_info", get_curve_info_fn)?;
 
-    let get_cert_info_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let get_cert_info_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "tls.get_cert_info");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
 
         let connector = match native_tls::TlsConnector::builder()
@@ -332,34 +372,55 @@ pub fn register_tls_library(lua: &Lua) -> LuaResult<()> {
     })?;
     tls.set("get_cert_info", get_cert_info_fn)?;
 
-    let check_hostname_fn = lua.create_function(|_lua, (host, hostname): (String, String)| {
-        let connector = match native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-        {
-            Ok(c) => c,
-            Err(_) => return Ok(false),
-        };
+    let cap_ctx = capability_ctx.clone();
+    let check_hostname_fn =
+        lua.create_function(move |_lua, (host, hostname): (String, String)| {
+            let decision = wrappers::check_crypto(&cap_ctx, "tls.check_hostname");
+            if decision.is_denied() {
+                return Ok(false);
+            }
 
-        let addr = format!("{}:{}", host, 443);
-        let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-            Ok(a) => a,
-            Err(_) => return Ok(false),
-        };
-        let stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-            Ok(s) => s,
-            Err(_) => return Ok(false),
-        };
+            let connector = match native_tls::TlsConnector::builder()
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true)
+                .build()
+            {
+                Ok(c) => c,
+                Err(_) => return Ok(false),
+            };
 
-        match connector.connect(&hostname, stream) {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false),
-        }
-    })?;
+            let addr = format!("{}:{}", host, 443);
+            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
+                Ok(a) => a,
+                Err(_) => return Ok(false),
+            };
+            let stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
+                Ok(s) => s,
+                Err(_) => return Ok(false),
+            };
+
+            match connector.connect(&hostname, stream) {
+                Ok(_) => Ok(true),
+                Err(_) => Ok(false),
+            }
+        })?;
     tls.set("check_hostname", check_hostname_fn)?;
 
-    let get_session_info_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let get_session_info_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "tls.get_session_info");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
 
         let connector = match native_tls::TlsConnector::builder()
@@ -406,7 +467,16 @@ pub fn register_tls_library(lua: &Lua) -> LuaResult<()> {
     })?;
     tls.set("get_session_info", get_session_info_fn)?;
 
-    let generate_key_fn = lua.create_function(|lua, bits: Option<usize>| {
+    let cap_ctx = capability_ctx.clone();
+    let generate_key_fn = lua.create_function(move |lua, bits: Option<usize>| {
+        let decision = wrappers::check_crypto(&cap_ctx, "tls.generate_key");
+        if decision.is_denied() {
+            return Err(mlua::Error::RuntimeError(format!(
+                "Crypto denied: {}",
+                decision.deny_reason().unwrap_or("policy violation")
+            )));
+        }
+
         let bits = bits.unwrap_or(2048);
 
         let rsa =
@@ -423,7 +493,21 @@ pub fn register_tls_library(lua: &Lua) -> LuaResult<()> {
     tls.set("generate_key", generate_key_fn)?;
 
     // tls.parse_certificate() - Parse X.509 certificate
-    let parse_certificate_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let parse_certificate_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "tls.parse_certificate");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
 
         let connector = match native_tls::TlsConnector::builder()
@@ -524,7 +608,22 @@ pub fn register_tls_library(lua: &Lua) -> LuaResult<()> {
     tls.set("parse_certificate", parse_certificate_fn)?;
 
     // tls.verify() - Verify certificate validity
-    let verify_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let verify_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "tls.verify");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set("valid", false)?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
 
         let connector = match native_tls::TlsConnector::builder()
@@ -572,8 +671,22 @@ pub fn register_tls_library(lua: &Lua) -> LuaResult<()> {
     tls.set("verify", verify_fn)?;
 
     // tls.get_fingerprint() - Get certificate fingerprint
-    let get_fingerprint_fn =
-        lua.create_function(|lua, (host, port, hash): (String, u16, Option<String>)| {
+    let cap_ctx = capability_ctx.clone();
+    let get_fingerprint_fn = lua.create_function(
+        move |lua, (host, port, hash): (String, u16, Option<String>)| {
+            let decision = wrappers::check_crypto(&cap_ctx, "tls.get_fingerprint");
+            if decision.is_denied() {
+                let result = lua.create_table()?;
+                result.set(
+                    "error",
+                    format!(
+                        "Crypto denied: {}",
+                        decision.deny_reason().unwrap_or("policy violation")
+                    ),
+                )?;
+                return Ok(result);
+            }
+
             let hash = hash.unwrap_or_else(|| "sha256".to_string());
             let result = lua.create_table()?;
 
@@ -622,11 +735,26 @@ pub fn register_tls_library(lua: &Lua) -> LuaResult<()> {
             }
 
             Ok(result)
-        })?;
+        },
+    )?;
     tls.set("get_fingerprint", get_fingerprint_fn)?;
 
     // tls.get_altnames() - Get subject alternative names
-    let get_altnames_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let get_altnames_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "tls.get_altnames");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
 
         let connector = match native_tls::TlsConnector::builder()
@@ -710,7 +838,21 @@ pub fn register_tls_library(lua: &Lua) -> LuaResult<()> {
     tls.set("cipher_to_string", cipher_to_string_fn)?;
 
     // tls.get_connection_info() - Get detailed TLS connection information
-    let get_connection_info_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let get_connection_info_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "tls.get_connection_info");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
 
         let connector = match native_tls::TlsConnector::builder()
@@ -780,7 +922,21 @@ pub fn register_tls_library(lua: &Lua) -> LuaResult<()> {
     tls.set("get_supported_ciphers", get_supported_ciphers_fn)?;
 
     // tls.get_cert_chain() - Get certificate chain
-    let get_cert_chain_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap_ctx = capability_ctx.clone();
+    let get_cert_chain_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let decision = wrappers::check_crypto(&cap_ctx, "tls.get_cert_chain");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                format!(
+                    "Crypto denied: {}",
+                    decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
 
         let connector = match native_tls::TlsConnector::builder()

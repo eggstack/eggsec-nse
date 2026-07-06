@@ -428,6 +428,13 @@ impl NseCapabilityContext {
                 }
                 NseCapabilityDecision::Allow
             }
+            NseCapabilityKind::Environment => NseCapabilityDecision::AllowWithWarning {
+                warning: "Environment access allowed in manual permissive mode".to_string(),
+            },
+            NseCapabilityKind::Randomness => NseCapabilityDecision::Allow,
+            NseCapabilityKind::TimeClock => NseCapabilityDecision::Allow,
+            NseCapabilityKind::Crypto => NseCapabilityDecision::Allow,
+            NseCapabilityKind::Compression => NseCapabilityDecision::Allow,
             _ => NseCapabilityDecision::Allow,
         }
     }
@@ -476,6 +483,13 @@ impl NseCapabilityContext {
                     _ => NseCapabilityDecision::Allow,
                 }
             }
+            NseCapabilityKind::Environment => NseCapabilityDecision::AllowWithWarning {
+                warning: "Environment access allowed in manual strict mode".to_string(),
+            },
+            NseCapabilityKind::Randomness => NseCapabilityDecision::Allow,
+            NseCapabilityKind::TimeClock => NseCapabilityDecision::Allow,
+            NseCapabilityKind::Crypto => NseCapabilityDecision::Allow,
+            NseCapabilityKind::Compression => NseCapabilityDecision::Allow,
             _ => NseCapabilityDecision::Allow,
         }
     }
@@ -532,6 +546,15 @@ impl NseCapabilityContext {
                 }
                 NseCapabilityDecision::Allow
             }
+            NseCapabilityKind::Environment => NseCapabilityDecision::Deny {
+                reason: "Environment variable access not allowed in agent safe mode".to_string(),
+            },
+            NseCapabilityKind::Randomness => NseCapabilityDecision::AllowWithWarning {
+                warning: "Randomness use reported in agent safe mode".to_string(),
+            },
+            NseCapabilityKind::TimeClock => NseCapabilityDecision::Allow,
+            NseCapabilityKind::Crypto => NseCapabilityDecision::Allow,
+            NseCapabilityKind::Compression => NseCapabilityDecision::Allow,
             _ => NseCapabilityDecision::Allow,
         }
     }
@@ -549,6 +572,17 @@ impl NseCapabilityContext {
             | NseCapabilityKind::DnsResolution => NseCapabilityDecision::Deny {
                 reason: "Network access not allowed in CI safe mode".to_string(),
             },
+            NseCapabilityKind::Environment => NseCapabilityDecision::Deny {
+                reason: "Environment variable access not allowed in CI safe mode".to_string(),
+            },
+            NseCapabilityKind::Randomness => NseCapabilityDecision::Deny {
+                reason: "Nondeterministic randomness not allowed in CI safe mode".to_string(),
+            },
+            NseCapabilityKind::TimeClock => NseCapabilityDecision::AllowWithWarning {
+                warning: "Time reads are nondeterministic in CI safe mode".to_string(),
+            },
+            NseCapabilityKind::Crypto => NseCapabilityDecision::Allow,
+            NseCapabilityKind::Compression => NseCapabilityDecision::Allow,
             _ => NseCapabilityDecision::Allow,
         }
     }
@@ -582,6 +616,13 @@ impl NseCapabilityContext {
                     warning: "Network access allowed in compatibility lab mode".to_string(),
                 }
             }
+            NseCapabilityKind::Environment => NseCapabilityDecision::AllowWithWarning {
+                warning: "Environment access allowed in compatibility lab mode".to_string(),
+            },
+            NseCapabilityKind::Randomness => NseCapabilityDecision::Allow,
+            NseCapabilityKind::TimeClock => NseCapabilityDecision::Allow,
+            NseCapabilityKind::Crypto => NseCapabilityDecision::Allow,
+            NseCapabilityKind::Compression => NseCapabilityDecision::Allow,
             _ => NseCapabilityDecision::Allow,
         }
     }
@@ -757,5 +798,102 @@ mod tests {
         let counters = &ctx.counters;
         assert_eq!(counters.network_operations.load(Ordering::Relaxed), 1);
         assert_eq!(counters.network_bytes_read.load(Ordering::Relaxed), 1024);
+    }
+
+    #[test]
+    fn test_environment_denied_in_agent_safe() {
+        let ctx = make_context(NseExecutionProfileKind::AgentSafe);
+        let request = NseCapabilityRequest {
+            kind: NseCapabilityKind::Environment,
+            target: Some("HOME".to_string()),
+            bytes_hint: None,
+            operation: "os.getenv",
+        };
+        let decision = ctx.check_capability(&request);
+        assert!(decision.is_denied());
+        assert!(decision.deny_reason().unwrap().contains("agent safe"));
+    }
+
+    #[test]
+    fn test_environment_denied_in_ci_safe() {
+        let ctx = make_context(NseExecutionProfileKind::CiSafe);
+        let request = NseCapabilityRequest {
+            kind: NseCapabilityKind::Environment,
+            target: Some("HOME".to_string()),
+            bytes_hint: None,
+            operation: "os.getenv",
+        };
+        let decision = ctx.check_capability(&request);
+        assert!(decision.is_denied());
+        assert!(decision.deny_reason().unwrap().contains("CI safe"));
+    }
+
+    #[test]
+    fn test_randomness_denied_in_ci_safe() {
+        let ctx = make_context(NseExecutionProfileKind::CiSafe);
+        let request = NseCapabilityRequest {
+            kind: NseCapabilityKind::Randomness,
+            target: None,
+            bytes_hint: None,
+            operation: "rand.random",
+        };
+        let decision = ctx.check_capability(&request);
+        assert!(decision.is_denied());
+        assert!(decision.deny_reason().unwrap().contains("CI safe"));
+    }
+
+    #[test]
+    fn test_randomness_warned_in_agent_safe() {
+        let ctx = make_context(NseExecutionProfileKind::AgentSafe);
+        let request = NseCapabilityRequest {
+            kind: NseCapabilityKind::Randomness,
+            target: None,
+            bytes_hint: None,
+            operation: "rand.random",
+        };
+        let decision = ctx.check_capability(&request);
+        assert!(decision.is_allowed());
+        assert!(decision.warning().is_some());
+    }
+
+    #[test]
+    fn test_time_clock_warned_in_ci_safe() {
+        let ctx = make_context(NseExecutionProfileKind::CiSafe);
+        let request = NseCapabilityRequest {
+            kind: NseCapabilityKind::TimeClock,
+            target: None,
+            bytes_hint: None,
+            operation: "datetime.now",
+        };
+        let decision = ctx.check_capability(&request);
+        assert!(decision.is_allowed());
+        assert!(decision.warning().is_some());
+    }
+
+    #[test]
+    fn test_time_clock_allowed_in_agent_safe() {
+        let ctx = make_context(NseExecutionProfileKind::AgentSafe);
+        let request = NseCapabilityRequest {
+            kind: NseCapabilityKind::TimeClock,
+            target: None,
+            bytes_hint: None,
+            operation: "datetime.now",
+        };
+        let decision = ctx.check_capability(&request);
+        assert!(decision.is_allowed());
+    }
+
+    #[test]
+    fn test_environment_allowed_with_warning_in_manual_permissive() {
+        let ctx = make_context(NseExecutionProfileKind::ManualPermissive);
+        let request = NseCapabilityRequest {
+            kind: NseCapabilityKind::Environment,
+            target: Some("HOME".to_string()),
+            bytes_hint: None,
+            operation: "os.getenv",
+        };
+        let decision = ctx.check_capability(&request);
+        assert!(decision.is_allowed());
+        assert!(decision.warning().is_some());
     }
 }
