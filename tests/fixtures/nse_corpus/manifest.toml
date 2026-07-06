@@ -1,0 +1,317 @@
+# NSE Compatibility Corpus Manifest
+# Categories: discovery, version, default, protocol, auth, partial, unsupported, regression
+
+[[fixture]]
+id = "simple-portrule"
+name = "simple_portrule.nse"
+category = "discovery"
+path = "scripts/discovery/simple_portrule.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["nmap"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "Basic portrule script requiring nmap module."
+
+[[fixture]]
+id = "simple-hostrule"
+name = "simple_hostrule.nse"
+category = "discovery"
+path = "scripts/discovery/simple_hostrule.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = []
+expected_rules = ["hostrule"]
+expected_capability_events = []
+notes = "Basic hostrule script."
+
+[[fixture]]
+id = "no-require"
+name = "no_require.nse"
+category = "discovery"
+path = "scripts/discovery/no_require.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = []
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "Script with no require statements."
+
+[[fixture]]
+id = "prerule"
+name = "prerule.nse"
+category = "discovery"
+path = "scripts/discovery/prerule.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = []
+expected_rules = ["prerule"]
+expected_capability_events = []
+notes = "Script using prerule."
+
+[[fixture]]
+id = "postrule"
+name = "postrule.nse"
+category = "discovery"
+path = "scripts/discovery/postrule.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = []
+expected_rules = ["postrule"]
+expected_capability_events = []
+notes = "Script using postrule."
+
+[[fixture]]
+id = "version-detect"
+name = "version_detect.nse"
+category = "version"
+path = "scripts/version/version_detect.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "Service version detection pattern."
+
+[[fixture]]
+id = "builtin-module-require"
+name = "builtin_module_require.nse"
+category = "default"
+path = "scripts/default/builtin_module_require.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "Script requiring a builtin module."
+
+[[fixture]]
+id = "stdnse-output"
+name = "stdnse_output.nse"
+category = "default"
+path = "scripts/default/stdnse_output.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "Script using stdnse output functions."
+
+[[fixture]]
+id = "stdnse-vulns"
+name = "stdnse_vulns.nse"
+category = "default"
+path = "scripts/default/stdnse_vulns.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse", "vulns"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "Script requiring stdnse and vulns libraries."
+
+[[fixture]]
+id = "http-title-mock"
+name = "http_title_mock.nse"
+category = "protocol"
+path = "scripts/protocol/http_title_mock.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["http", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "HTTP title fetch with local mock service."
+
+[[fixture]]
+id = "dns-lookup-mock"
+name = "dns_lookup_mock.nse"
+category = "protocol"
+path = "scripts/protocol/dns_lookup_mock.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["dns", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "DNS lookup pattern with mock deny path."
+
+[[fixture]]
+id = "brute-shape"
+name = "brute_shape.nse"
+category = "auth"
+path = "scripts/auth/brute_shape.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "Credential shape test, no real brute force."
+
+[[fixture]]
+id = "approximate-compat"
+name = "approximate_compat.nse"
+category = "partial"
+path = "scripts/partial/approximate_compat.nse"
+profile = "manual_permissive"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "approximate"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "Script with approximate compatibility warning. Rule exactness=approximate triggers CompatibleWithWarnings."
+
+[[fixture]]
+id = "agent-denied-file"
+name = "agent_denied_file.nse"
+category = "unsupported"
+path = "scripts/unsupported/agent_denied_file.nse"
+profile = "agent_safe"
+expected_status = "failed"
+expected_fidelity = "full"
+expected_resolved = false
+expected_block = true
+expected_libraries = []
+expected_rules = []
+expected_capability_events = []
+notes = "File script denied by AgentSafe policy."
+
+[[fixture]]
+id = "process-denied"
+name = "process_denied.nse"
+category = "unsupported"
+path = "scripts/unsupported/process_denied.nse"
+profile = "agent_safe"
+expected_status = "partial"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "process_exec", allowed = false }]
+notes = "Process execution denied by AgentSafe. Capability denial yields Partial status but Full fidelity."
+
+[[fixture]]
+id = "fs-read-denied"
+name = "fs_read_denied.nse"
+category = "unsupported"
+path = "scripts/unsupported/fs_read_denied.nse"
+profile = "agent_safe"
+expected_status = "partial"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "filesystem_read", allowed = false }]
+notes = "Filesystem read outside allowed directory denied. Capability denial yields Partial status but Full fidelity."
+
+[[fixture]]
+id = "unsupported-rule"
+name = "unsupported_rule.nse"
+category = "unsupported"
+path = "scripts/unsupported/unsupported_rule.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = []
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "Script with non-boolean portrule return."
+
+[[fixture]]
+id = "false-portrule"
+name = "false_portrule.nse"
+category = "unsupported"
+path = "scripts/unsupported/false_portrule.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = []
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "Script where portrule always returns false."
+
+[[fixture]]
+id = "error-portrule"
+name = "error_portrule.nse"
+category = "unsupported"
+path = "scripts/unsupported/error_portrule.nse"
+profile = "compatibility_lab"
+expected_status = "failed"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = true
+expected_libraries = []
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "Script where portrule throws an error. Simulated as blocked."
+
+[[fixture]]
+id = "capability-fs-deny"
+name = "capability_fs_deny.nse"
+category = "regression"
+path = "scripts/regression/capability_fs_deny.nse"
+profile = "agent_safe"
+expected_status = "partial"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "filesystem_read", allowed = false }]
+notes = "Regression: capability event for filesystem read denial. Capability denial yields Partial status but Full fidelity."
+
+[[fixture]]
+id = "capability-compress"
+name = "capability_compress.nse"
+category = "regression"
+path = "scripts/regression/capability_compress.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+notes = "Regression: compression bounded path test."

@@ -45,6 +45,9 @@ des = { version = "0.8", optional = true }
 ssh2 = { version = "0.9", optional = true }
 ipnetwork = "0.20"
 
+[dev-dependencies]
+toml = "0.8"
+
 [features]
 default = []
 nse = ["mlua", "mlua-luau-scheduler", "openssl", "des"]

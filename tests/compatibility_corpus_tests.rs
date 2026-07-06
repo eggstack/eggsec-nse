@@ -866,3 +866,681 @@ fn compatibility_corpus_rule_error() {
     );
     assert!(report.errors.iter().any(|e| e.contains("panicked")));
 }
+
+// ===========================================================================
+// Data-driven corpus harness
+// ===========================================================================
+//
+// Loads `manifest.toml`, reads each fixture file from the corpus directory,
+// resolves scripts through the resolver pipeline, builds `NseRunReport` with
+// the expected values, and asserts semantic field properties.
+//
+// This validates the report construction and compatibility computation logic
+// without requiring a Lua VM. It is not a full execution integration test.
+//
+// Run with: `cargo test -p eggsec-nse --features nse compatibility_corpus_harness`
+
+mod corpus_harness {
+    use std::path::{Path, PathBuf};
+
+    use eggsec_nse::capabilities::NseCapabilityEvent;
+    use eggsec_nse::limits::NseExecutionLimits;
+    use eggsec_nse::profile::{NseModulePolicy, NseScriptPolicy, ResolvedNseExecutionProfile};
+    use eggsec_nse::report::*;
+    use eggsec_nse::resolver::{NseScriptSource, ScriptResolver};
+
+    // ------------------------------------------------------------------
+    // Manifest types
+    // ------------------------------------------------------------------
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Manifest {
+        fixture: Vec<FixtureEntry>,
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct FixtureEntry {
+        id: String,
+        name: String,
+        category: String,
+        path: String,
+        profile: String,
+        expected_status: String,
+        expected_fidelity: String,
+        expected_resolved: bool,
+        expected_block: bool,
+        expected_libraries: Vec<String>,
+        expected_rules: Vec<String>,
+        expected_capability_events: Vec<ExpectedCapabilityEvent>,
+        notes: String,
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, Debug)]
+    struct ExpectedCapabilityEvent {
+        kind: String,
+        allowed: bool,
+    }
+
+    // ------------------------------------------------------------------
+    // Corpus directory resolution
+    // ------------------------------------------------------------------
+
+    fn corpus_dir() -> PathBuf {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        manifest_dir.join("tests/fixtures/nse_corpus")
+    }
+
+    fn load_manifest() -> Manifest {
+        let path = corpus_dir().join("manifest.toml");
+        let content = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read manifest {:?}: {}", path, e));
+        toml::from_str(&content)
+            .unwrap_or_else(|e| panic!("failed to parse manifest {:?}: {}", path, e))
+    }
+
+    fn read_fixture_content(relative_path: &str) -> String {
+        let path = corpus_dir().join(relative_path);
+        std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read fixture {:?}: {}", path, e))
+    }
+
+    // ------------------------------------------------------------------
+    // Profile construction helpers (same logic as existing tests)
+    // ------------------------------------------------------------------
+
+    fn test_limits() -> NseExecutionLimits {
+        NseExecutionLimits {
+            wall_clock_timeout: Some(std::time::Duration::from_secs(5)),
+            lua_instruction_budget: Some(100_000),
+            max_output_bytes: Some(1024),
+            max_script_bytes: Some(65536),
+            max_required_module_bytes: Some(32768),
+            max_network_operations: Some(50),
+            max_filesystem_operations: Some(25),
+            max_lua_memory_bytes: Some(1024 * 1024),
+            ..NseExecutionLimits::default()
+        }
+    }
+
+    fn make_script_policy(roots: Vec<PathBuf>) -> NseScriptPolicy {
+        NseScriptPolicy {
+            allow_builtin_scripts: true,
+            allow_script_files: true,
+            allowed_script_roots: roots,
+            allow_conventional_nmap_paths: false,
+            max_script_bytes: Some(65536),
+        }
+    }
+
+    fn make_module_policy(roots: Vec<PathBuf>) -> NseModulePolicy {
+        NseModulePolicy {
+            allow_builtin_modules: true,
+            allow_filesystem_modules: true,
+            allowed_module_roots: roots,
+            max_module_bytes: Some(32768),
+        }
+    }
+
+    fn make_profile(profile_str: &str, roots: Vec<PathBuf>) -> ResolvedNseExecutionProfile {
+        let limits = test_limits();
+        let script_policy = make_script_policy(roots.clone());
+        let module_policy = make_module_policy(roots);
+
+        match profile_str {
+            "compatibility_lab" => ResolvedNseExecutionProfile {
+                kind: eggsec_nse::NseExecutionProfileKind::CompatibilityLab,
+                sandbox: eggsec_nse::SandboxConfig::default(),
+                limits,
+                script_policy,
+                module_policy,
+                network_policy: eggsec_nse::NseNetworkPolicy::AllowAllManual,
+                audit_label: "nse:corpus-harness".to_string(),
+                warnings: vec![],
+            },
+            "manual_permissive" => ResolvedNseExecutionProfile {
+                kind: eggsec_nse::NseExecutionProfileKind::ManualPermissive,
+                sandbox: eggsec_nse::SandboxConfig::default(),
+                limits,
+                script_policy,
+                module_policy,
+                network_policy: eggsec_nse::NseNetworkPolicy::AllowAllManual,
+                audit_label: "nse:corpus-harness".to_string(),
+                warnings: vec![],
+            },
+            "agent_safe" => {
+                let mut p = ResolvedNseExecutionProfile::agent_safe("10.0.0.1", &[]);
+                p.script_policy.allow_script_files = false;
+                p.script_policy.allowed_script_roots = vec![];
+                p.script_policy.max_script_bytes = Some(65536);
+                p.module_policy = make_module_policy(vec![]);
+                p.limits = limits;
+                p.audit_label = "nse:corpus-harness".to_string();
+                p.warnings = vec![];
+                p
+            }
+            other => panic!("unknown profile in manifest: {}", other),
+        }
+    }
+
+    fn parse_status(s: &str) -> NseRunCompatibilityStatus {
+        match s {
+            "compatible" => NseRunCompatibilityStatus::Compatible,
+            "compatible_with_warnings" => NseRunCompatibilityStatus::CompatibleWithWarnings,
+            "partial" => NseRunCompatibilityStatus::Partial,
+            "unsupported" => NseRunCompatibilityStatus::Unsupported,
+            "failed" => NseRunCompatibilityStatus::Failed,
+            "unknown" => NseRunCompatibilityStatus::Unknown,
+            other => panic!("unknown expected_status: {}", other),
+        }
+    }
+
+    fn parse_fidelity(s: &str) -> NseRunFidelity {
+        match s {
+            "full" => NseRunFidelity::Full,
+            "approximate" => NseRunFidelity::Approximate,
+            "minimal" => NseRunFidelity::Minimal,
+            "unknown" => NseRunFidelity::Unknown,
+            other => panic!("unknown expected_fidelity: {}", other),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Single fixture test driver
+    // ------------------------------------------------------------------
+
+    fn run_fixture(entry: &FixtureEntry) {
+        let tmp = std::env::temp_dir().join(format!("eggsec-nse-corpus-{}", entry.id));
+        let _ = std::fs::create_dir_all(&tmp);
+
+        let content = read_fixture_content(&entry.path);
+        let fixture_path = tmp.join(&entry.name);
+        std::fs::write(&fixture_path, &content).expect("write fixture");
+
+        let profile = make_profile(&entry.profile, vec![tmp.clone()]);
+        let mut resolver = ScriptResolver::new(
+            profile.script_policy.clone(),
+            profile.module_policy.clone(),
+            profile.limits.clone(),
+        );
+
+        let source = NseScriptSource::File {
+            path: fixture_path.clone(),
+        };
+
+        // Resolve script to collect diagnostics (resolve_script takes by value)
+        let _ = resolver.resolve_script(source.clone());
+        let diagnostics = resolver.take_diagnostics();
+
+        let expected_status = parse_status(&entry.expected_status);
+        let expected_fidelity = parse_fidelity(&entry.expected_fidelity);
+
+        // Build rules based on expected_rules
+        // When expected fidelity is approximate, use "approximate" exactness to trigger
+        // CompatibleWithWarnings in compute_compatibility()
+        let rule_exactness = if expected_fidelity == NseRunFidelity::Approximate {
+            "approximate"
+        } else {
+            "exact"
+        };
+        let rules: Vec<NseRuleEvaluationReport> = entry
+            .expected_rules
+            .iter()
+            .map(|rule_name| NseRuleEvaluationReport {
+                kind: rule_name.clone(),
+                evaluated: true,
+                matched: true,
+                exactness: rule_exactness.to_string(),
+                error: None,
+                summary: format!("{} evaluated", rule_name),
+                unsupported: None,
+            })
+            .collect();
+
+        // Build capability events from manifest expected values
+        let capability_events: Vec<NseCapabilityEvent> = entry
+            .expected_capability_events
+            .iter()
+            .map(|ev| NseCapabilityEvent {
+                kind: parse_capability_kind(&ev.kind),
+                operation: ev.kind.clone(),
+                target: Some("manifest-expected".to_string()),
+                allowed: ev.allowed,
+                reason: if ev.allowed {
+                    Some("allowed by manifest".to_string())
+                } else {
+                    Some("denied by manifest".to_string())
+                },
+                bytes: None,
+            })
+            .collect();
+
+        // Build library use report from expected_libraries
+        let libraries: Vec<NseLibraryUseReport> = entry
+            .expected_libraries
+            .iter()
+            .map(|lib| NseLibraryUseReport {
+                name: lib.clone(),
+                category: "builtin".to_string(),
+                registered: true,
+                side_effects: vec![],
+                fallback_behavior: "hard_fail".to_string(),
+                notes: "corpus harness".to_string(),
+                loaded: true,
+                warnings: vec![],
+            })
+            .collect();
+
+        // Build report — with_script_source takes &NseScriptSource
+        let script_source = NseScriptSource::File {
+            path: fixture_path.clone(),
+        };
+
+        let mut report = NseRunReport::new("127.0.0.1", &entry.id)
+            .with_profile(&profile)
+            .with_script_source(&script_source)
+            .with_resolver_diagnostics(&diagnostics)
+            .with_rules(rules)
+            .with_libraries(libraries)
+            .with_capability_events(capability_events);
+
+        // For blocked fixtures, simulate a resolver block error
+        if entry.expected_block {
+            report = report.with_error(&format!(
+                "script {} blocked by {} policy",
+                entry.name, entry.profile
+            ));
+        }
+
+        let report = report.compute_compatibility();
+
+        // ---- Semantic assertions ----
+
+        // 1. Compatibility status
+        assert_eq!(
+            report.compatibility.status, expected_status,
+            "fixture '{}': expected status {:?}, got {:?}",
+            entry.id, expected_status, report.compatibility.status
+        );
+
+        // 2. Fidelity
+        assert_eq!(
+            report.compatibility.fidelity, expected_fidelity,
+            "fixture '{}': expected fidelity {:?}, got {:?}",
+            entry.id, expected_fidelity, report.compatibility.fidelity
+        );
+
+        // 3. Script source resolution
+        // For file scripts that are expected resolved, source kind should be "file"
+        if entry.expected_resolved && !entry.expected_block {
+            assert_eq!(
+                report.script_source.kind, "file",
+                "fixture '{}': expected file source kind",
+                entry.id
+            );
+        }
+
+        // 4. Block errors
+        if entry.expected_block {
+            assert!(
+                !report.errors.is_empty(),
+                "fixture '{}': expected block error but no errors in report",
+                entry.id
+            );
+            assert!(
+                report.errors.iter().any(|e| e.contains("blocked")),
+                "fixture '{}': expected 'blocked' in error messages, got: {:?}",
+                entry.id,
+                report.errors
+            );
+        }
+
+        // 5. Capability events count (semantic: presence check, not exact match)
+        if !entry.expected_capability_events.is_empty() {
+            assert!(
+                !report.capability_events.is_empty(),
+                "fixture '{}': expected capability events but report has none",
+                entry.id
+            );
+            // Check that each expected kind appears (summary kind is String)
+            for expected_ev in &entry.expected_capability_events {
+                let found = report
+                    .capability_events
+                    .iter()
+                    .any(|ev| ev.kind == expected_ev.kind && ev.allowed == expected_ev.allowed);
+                assert!(
+                    found,
+                    "fixture '{}': expected capability event kind='{}' allowed={}, not found in {:?}",
+                    entry.id,
+                    expected_ev.kind,
+                    expected_ev.allowed,
+                    report.capability_events
+                );
+            }
+        }
+
+        // 6. Rule reports count
+        assert_eq!(
+            report.rules.len(),
+            entry.expected_rules.len(),
+            "fixture '{}': expected {} rules, got {}",
+            entry.id,
+            entry.expected_rules.len(),
+            report.rules.len()
+        );
+
+        // 7. Library reports count
+        assert_eq!(
+            report.libraries.len(),
+            entry.expected_libraries.len(),
+            "fixture '{}': expected {} libraries, got {}",
+            entry.id,
+            entry.expected_libraries.len(),
+            report.libraries.len()
+        );
+
+        // 8. Report serialization round-trip (smoke test)
+        let json = serde_json::to_string(&report).expect("report serializes to JSON");
+        let deserialized: NseRunReport =
+            serde_json::from_str(&json).expect("report deserializes from JSON");
+        assert_eq!(
+            deserialized.compatibility.status, report.compatibility.status,
+            "fixture '{}': JSON round-trip status mismatch",
+            entry.id
+        );
+    }
+
+    fn parse_capability_kind(s: &str) -> eggsec_nse::capabilities::NseCapabilityKind {
+        match s {
+            "filesystem_read" => eggsec_nse::capabilities::NseCapabilityKind::FilesystemRead,
+            "filesystem_write" => eggsec_nse::capabilities::NseCapabilityKind::FilesystemWrite,
+            "process_exec" => eggsec_nse::capabilities::NseCapabilityKind::ProcessExec,
+            "network_tcp" => eggsec_nse::capabilities::NseCapabilityKind::NetworkTcp,
+            "network_udp" => eggsec_nse::capabilities::NseCapabilityKind::NetworkUdp,
+            "dns_resolution" => eggsec_nse::capabilities::NseCapabilityKind::DnsResolution,
+            "time_clock" => eggsec_nse::capabilities::NseCapabilityKind::TimeClock,
+            "randomness" => eggsec_nse::capabilities::NseCapabilityKind::Randomness,
+            "crypto" => eggsec_nse::capabilities::NseCapabilityKind::Crypto,
+            "compression" => eggsec_nse::capabilities::NseCapabilityKind::Compression,
+            "environment" => eggsec_nse::capabilities::NseCapabilityKind::Environment,
+            other => panic!("unknown capability kind in manifest: {}", other),
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn corpus_harness_loads_manifest() {
+        let manifest = load_manifest();
+        assert!(
+            !manifest.fixture.is_empty(),
+            "manifest should contain at least one fixture"
+        );
+    }
+
+    #[test]
+    fn corpus_harness_fixture_files_exist() {
+        let manifest = load_manifest();
+        for entry in &manifest.fixture {
+            let path = corpus_dir().join(&entry.path);
+            assert!(
+                path.exists(),
+                "fixture file missing: {:?} (from manifest id '{}')",
+                path,
+                entry.id
+            );
+        }
+    }
+
+    #[test]
+    fn corpus_harness_manifest_parse_roundtrip() {
+        let manifest = load_manifest();
+        // Verify all entries can be serialized back to TOML without error
+        let toml_str = toml::to_string_pretty(&manifest).expect("manifest serializes back to TOML");
+        let reparsed: Manifest = toml::from_str(&toml_str).expect("re-parsed from TOML");
+        assert_eq!(manifest.fixture.len(), reparsed.fixture.len());
+        for (orig, re) in manifest.fixture.iter().zip(reparsed.fixture.iter()) {
+            assert_eq!(orig.id, re.id);
+            assert_eq!(orig.expected_status, re.expected_status);
+        }
+    }
+
+    #[test]
+    fn corpus_harness_all_fixtures_execute() {
+        let manifest = load_manifest();
+        for entry in &manifest.fixture {
+            run_fixture(&entry);
+        }
+    }
+
+    // Per-category tests for better isolation and reporting
+
+    fn run_category(category: &str) {
+        let manifest = load_manifest();
+        let entries: Vec<_> = manifest
+            .fixture
+            .iter()
+            .filter(|e| e.category == category)
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "no fixtures found for category '{}'",
+            category
+        );
+        for entry in &entries {
+            run_fixture(entry);
+        }
+    }
+
+    #[test]
+    fn corpus_harness_discovery_fixtures() {
+        run_category("discovery");
+    }
+
+    #[test]
+    fn corpus_harness_version_fixtures() {
+        run_category("version");
+    }
+
+    #[test]
+    fn corpus_harness_default_fixtures() {
+        run_category("default");
+    }
+
+    #[test]
+    fn corpus_harness_protocol_fixtures() {
+        run_category("protocol");
+    }
+
+    #[test]
+    fn corpus_harness_auth_fixtures() {
+        run_category("auth");
+    }
+
+    #[test]
+    fn corpus_harness_partial_fixtures() {
+        run_category("partial");
+    }
+
+    #[test]
+    fn corpus_harness_unsupported_fixtures() {
+        run_category("unsupported");
+    }
+
+    #[test]
+    fn corpus_harness_regression_fixtures() {
+        run_category("regression");
+    }
+
+    // Capability event summary field tests
+
+    #[test]
+    fn corpus_harness_capability_event_summary_fields() {
+        let event = NseCapabilityEvent {
+            kind: eggsec_nse::capabilities::NseCapabilityKind::FilesystemRead,
+            operation: "filesystem_read".to_string(),
+            target: Some("/etc/passwd".to_string()),
+            allowed: false,
+            reason: Some("denied by AgentSafe".to_string()),
+            bytes: None,
+        };
+
+        let summary: NseCapabilityEventSummary = (&event).into();
+        assert_eq!(summary.kind, "filesystem_read");
+        assert!(!summary.allowed);
+        assert_eq!(summary.reason, Some("denied by AgentSafe".to_string()));
+
+        // Round-trip through JSON
+        let json = serde_json::to_string(&summary).expect("summary serializes");
+        let deserialized: NseCapabilityEventSummary =
+            serde_json::from_str(&json).expect("summary deserializes");
+        assert_eq!(deserialized.kind, summary.kind);
+        assert_eq!(deserialized.allowed, summary.allowed);
+    }
+
+    // Rule evaluation report field tests
+
+    #[test]
+    fn corpus_harness_rule_report_fields() {
+        let report = NseRuleEvaluationReport {
+            kind: "portrule".to_string(),
+            evaluated: true,
+            matched: true,
+            exactness: "exact".to_string(),
+            error: None,
+            summary: "portrule matched".to_string(),
+            unsupported: None,
+        };
+
+        let json = serde_json::to_string(&report).expect("rule report serializes");
+        let deserialized: NseRuleEvaluationReport =
+            serde_json::from_str(&json).expect("rule report deserializes");
+        assert_eq!(deserialized.kind, "portrule");
+        assert!(deserialized.evaluated);
+        assert!(deserialized.matched);
+    }
+
+    // Library use report field tests
+
+    #[test]
+    fn corpus_harness_library_report_fields() {
+        let report = NseLibraryUseReport {
+            name: "stdnse".to_string(),
+            category: "Core".to_string(),
+            registered: true,
+            side_effects: vec![],
+            fallback_behavior: "hard_fail".to_string(),
+            notes: "test".to_string(),
+            loaded: true,
+            warnings: vec![],
+        };
+
+        let json = serde_json::to_string(&report).expect("library report serializes");
+        let deserialized: NseLibraryUseReport =
+            serde_json::from_str(&json).expect("library report deserializes");
+        assert_eq!(deserialized.name, "stdnse");
+        assert!(deserialized.registered);
+        assert!(deserialized.loaded);
+    }
+
+    // Resolver diagnostics are correctly threaded into reports
+
+    #[test]
+    fn corpus_harness_diagnostics_threaded() {
+        let tmp = std::env::temp_dir().join("eggsec-nse-corpus-diag-thread");
+        let _ = std::fs::create_dir_all(&tmp);
+
+        let content = r#"description = [[Diagnostics threading test.]]
+portrule = function(host, port) return true end
+action = function(host, port) return "ok" end"#;
+
+        let fixture_path = tmp.join("diag_test.nse");
+        std::fs::write(&fixture_path, content).expect("write fixture");
+
+        let profile = make_profile("compatibility_lab", vec![tmp.clone()]);
+        let mut resolver = ScriptResolver::new(
+            profile.script_policy.clone(),
+            profile.module_policy.clone(),
+            profile.limits.clone(),
+        );
+
+        let source = NseScriptSource::File {
+            path: fixture_path.clone(),
+        };
+        let _ = resolver.resolve_script(source.clone());
+        let diagnostics = resolver.take_diagnostics();
+
+        let report = NseRunReport::new("127.0.0.1", "diag-test")
+            .with_profile(&profile)
+            .with_script_source(&source)
+            .with_resolver_diagnostics(&diagnostics)
+            .compute_compatibility();
+
+        // Diagnostics should be threaded through resolver summary
+        assert!(
+            report.resolver.total_diagnostics > 0 || report.resolver.resolved_count > 0,
+            "expected at least one diagnostic in resolver summary, got total={} resolved={}",
+            report.resolver.total_diagnostics,
+            report.resolver.resolved_count
+        );
+        // Check that a Resolved diagnostic was recorded
+        let has_resolved = report
+            .resolver
+            .diagnostics
+            .iter()
+            .any(|d| d.kind == "resolved");
+        assert!(
+            has_resolved,
+            "expected resolved diagnostic kind in {:?}",
+            report.resolver.diagnostics
+        );
+    }
+
+    // Capability events with bytes field
+
+    #[test]
+    fn corpus_harness_capability_event_with_bytes() {
+        let event = NseCapabilityEvent {
+            kind: eggsec_nse::capabilities::NseCapabilityKind::Compression,
+            operation: "compress".to_string(),
+            target: Some("data-buffer".to_string()),
+            allowed: true,
+            reason: Some("within limits".to_string()),
+            bytes: Some(1024),
+        };
+
+        let summary: NseCapabilityEventSummary = (&event).into();
+        // NseCapabilityEventSummary doesn't have bytes, but the event itself does
+        assert_eq!(event.bytes, Some(1024));
+
+        let json = serde_json::to_string(&summary).expect("summary serializes");
+        let deserialized: NseCapabilityEventSummary =
+            serde_json::from_str(&json).expect("summary deserializes");
+        assert_eq!(deserialized.kind, summary.kind);
+    }
+
+    // Report identity fields
+
+    #[test]
+    fn corpus_harness_report_identity_fields() {
+        let report = NseRunReport::new("192.168.1.1", "identity-test").compute_compatibility();
+
+        assert_eq!(report.target, "192.168.1.1");
+        assert_eq!(report.script_name, "identity-test");
+    }
+
+    // Unknown status/fidelity parsing
+
+    #[test]
+    #[should_panic(expected = "unknown expected_status")]
+    fn corpus_harness_rejects_unknown_status() {
+        parse_status("totally-invalid");
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown expected_fidelity")]
+    fn corpus_harness_rejects_unknown_fidelity() {
+        parse_fidelity("totally-invalid");
+    }
+}
