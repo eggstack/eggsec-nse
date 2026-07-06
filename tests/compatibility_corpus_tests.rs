@@ -913,6 +913,12 @@ mod corpus_harness {
         expected_rules: Vec<String>,
         expected_capability_events: Vec<ExpectedCapabilityEvent>,
         notes: String,
+        provenance: String,
+        upstream_reference: String,
+        license_note: String,
+        local_fixture: bool,
+        public_network_required: bool,
+        gap_classification: String,
     }
 
     #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -1238,6 +1244,34 @@ mod corpus_harness {
             report.libraries.len()
         );
 
+        // 9. Provenance metadata present
+        assert!(
+            !entry.provenance.is_empty(),
+            "fixture '{}': provenance must not be empty",
+            entry.id
+        );
+        assert!(
+            !entry.upstream_reference.is_empty(),
+            "fixture '{}': upstream_reference must not be empty",
+            entry.id
+        );
+
+        // 10. Gap classification present and valid
+        let valid_classifications = [
+            "supported",
+            "approximate",
+            "capability_denied",
+            "missing_library",
+            "context_gap",
+            "unsupported_runtime",
+        ];
+        assert!(
+            valid_classifications.contains(&entry.gap_classification.as_str()),
+            "fixture '{}': invalid gap_classification '{}'",
+            entry.id,
+            entry.gap_classification
+        );
+
         // 8. Report serialization round-trip (smoke test)
         let json = serde_json::to_string(&report).expect("report serializes to JSON");
         let deserialized: NseRunReport =
@@ -1371,6 +1405,11 @@ mod corpus_harness {
     #[test]
     fn corpus_harness_regression_fixtures() {
         run_category("regression");
+    }
+
+    #[test]
+    fn corpus_harness_upstream() {
+        run_category("upstream");
     }
 
     // Capability event summary field tests
@@ -1542,5 +1581,88 @@ action = function(host, port) return "ok" end"#;
     #[should_panic(expected = "unknown expected_fidelity")]
     fn corpus_harness_rejects_unknown_fidelity() {
         parse_fidelity("totally-invalid");
+    }
+
+    #[test]
+    fn corpus_harness_all_fixtures_have_provenance() {
+        let manifest = load_manifest();
+        for fixture in &manifest.fixture {
+            assert!(
+                !fixture.provenance.is_empty(),
+                "fixture '{}' missing provenance",
+                fixture.id
+            );
+            assert!(
+                fixture.provenance == "clean-room" || fixture.provenance == "upstream-derived",
+                "fixture '{}' has invalid provenance: {}",
+                fixture.id,
+                fixture.provenance
+            );
+            assert!(
+                !fixture.upstream_reference.is_empty(),
+                "fixture '{}' missing upstream_reference",
+                fixture.id
+            );
+            assert!(
+                !fixture.license_note.is_empty(),
+                "fixture '{}' missing license_note",
+                fixture.id
+            );
+        }
+    }
+
+    #[test]
+    fn corpus_harness_all_fixtures_have_gap_classification() {
+        let manifest = load_manifest();
+        let valid_classifications = [
+            "supported",
+            "approximate",
+            "capability_denied",
+            "missing_library",
+            "context_gap",
+            "unsupported_runtime",
+        ];
+        for fixture in &manifest.fixture {
+            assert!(
+                valid_classifications.contains(&fixture.gap_classification.as_str()),
+                "fixture '{}' has invalid gap_classification: {}",
+                fixture.id,
+                fixture.gap_classification
+            );
+        }
+    }
+
+    #[test]
+    fn corpus_harness_upstream_fixtures_are_local_only() {
+        let manifest = load_manifest();
+        for fixture in &manifest.fixture {
+            if fixture.category == "upstream" {
+                assert!(
+                    !fixture.public_network_required,
+                    "upstream fixture '{}' must not require public network",
+                    fixture.id
+                );
+                assert!(
+                    fixture.local_fixture,
+                    "upstream fixture '{}' must be local_fixture = true",
+                    fixture.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn corpus_harness_fixture_count_in_range() {
+        let manifest = load_manifest();
+        let upstream_count = manifest
+            .fixture
+            .iter()
+            .filter(|f| f.category == "upstream")
+            .count();
+        assert!(
+            upstream_count >= 10 && upstream_count <= 25,
+            "upstream fixture count {} not in range 10-25",
+            upstream_count
+        );
     }
 }

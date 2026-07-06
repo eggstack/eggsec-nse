@@ -1,5 +1,15 @@
 # NSE Compatibility Corpus Manifest
-# Categories: discovery, version, default, protocol, auth, partial, unsupported, regression
+# Categories: discovery, version, default, protocol, auth, partial, unsupported, regression, upstream
+#
+# Provenance fields (Workstream 2):
+#   provenance = "clean-room" | "upstream-derived"
+#   upstream_reference = "pattern description or upstream script name"
+#   license_note = "No upstream source copied" | SPDX/license note
+#   local_fixture = true | false
+#   public_network_required = true | false
+#
+# Gap classification fields (Workstream 4):
+#   gap_classification = "supported" | "approximate" | "capability_denied" | "missing_library" | "context_gap" | "unsupported_runtime"
 
 [[fixture]]
 id = "simple-portrule"
@@ -14,6 +24,12 @@ expected_block = false
 expected_libraries = ["nmap"]
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "scripts/http-title.nse portrule pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "Basic portrule script requiring nmap module."
 
 [[fixture]]
@@ -29,6 +45,12 @@ expected_block = false
 expected_libraries = []
 expected_rules = ["hostrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "hostrule pattern from upstream scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "Basic hostrule script."
 
 [[fixture]]
@@ -44,6 +66,12 @@ expected_block = false
 expected_libraries = []
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "Minimal NSE script pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "Script with no require statements."
 
 [[fixture]]
@@ -59,6 +87,12 @@ expected_block = false
 expected_libraries = []
 expected_rules = ["prerule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "prerule pattern from upstream scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "Script using prerule."
 
 [[fixture]]
@@ -74,6 +108,12 @@ expected_block = false
 expected_libraries = []
 expected_rules = ["postrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "postrule pattern from upstream scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "Script using postrule."
 
 [[fixture]]
@@ -89,6 +129,12 @@ expected_block = false
 expected_libraries = ["stdnse"]
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "Service version detection pattern (http-server-header, ssl-cert)"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "Service version detection pattern."
 
 [[fixture]]
@@ -104,6 +150,12 @@ expected_block = false
 expected_libraries = ["stdnse"]
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "Common require() pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "Script requiring a builtin module."
 
 [[fixture]]
@@ -119,6 +171,12 @@ expected_block = false
 expected_libraries = ["stdnse"]
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "stdnse.format_output() pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "Script using stdnse output functions."
 
 [[fixture]]
@@ -134,6 +192,12 @@ expected_block = false
 expected_libraries = ["stdnse", "vulns"]
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "vulns.Vulnerability:new() / vulns.Report pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "Script requiring stdnse and vulns libraries."
 
 [[fixture]]
@@ -149,6 +213,12 @@ expected_block = false
 expected_libraries = ["http", "stdnse"]
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "scripts/http-title.nse pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "HTTP title fetch with local mock service."
 
 [[fixture]]
@@ -164,6 +234,12 @@ expected_block = false
 expected_libraries = ["dns", "stdnse"]
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "dns.query() pattern from dns-brute.nse"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "DNS lookup pattern with mock deny path."
 
 [[fixture]]
@@ -179,6 +255,12 @@ expected_block = false
 expected_libraries = ["stdnse"]
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "Credential iteration pattern from brute library"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "Credential shape test, no real brute force."
 
 [[fixture]]
@@ -194,6 +276,12 @@ expected_block = false
 expected_libraries = ["stdnse"]
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "Port matching approximation pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "approximate"
 notes = "Script with approximate compatibility warning. Rule exactness=approximate triggers CompatibleWithWarnings."
 
 [[fixture]]
@@ -209,6 +297,12 @@ expected_block = true
 expected_libraries = []
 expected_rules = []
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "AgentSafe policy enforcement"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "capability_denied"
 notes = "File script denied by AgentSafe policy."
 
 [[fixture]]
@@ -224,6 +318,12 @@ expected_block = false
 expected_libraries = ["stdnse"]
 expected_rules = ["portrule"]
 expected_capability_events = [{ kind = "process_exec", allowed = false }]
+provenance = "clean-room"
+upstream_reference = "io.popen() pattern from NSE scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "capability_denied"
 notes = "Process execution denied by AgentSafe. Capability denial yields Partial status but Full fidelity."
 
 [[fixture]]
@@ -239,6 +339,12 @@ expected_block = false
 expected_libraries = ["stdnse"]
 expected_rules = ["portrule"]
 expected_capability_events = [{ kind = "filesystem_read", allowed = false }]
+provenance = "clean-room"
+upstream_reference = "io.open() pattern from NSE scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "capability_denied"
 notes = "Filesystem read outside allowed directory denied. Capability denial yields Partial status but Full fidelity."
 
 [[fixture]]
@@ -254,6 +360,12 @@ expected_block = false
 expected_libraries = []
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "Non-boolean portrule return handling"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "Script with non-boolean portrule return."
 
 [[fixture]]
@@ -269,6 +381,12 @@ expected_block = false
 expected_libraries = []
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "Portrule returning false pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "Script where portrule always returns false."
 
 [[fixture]]
@@ -284,6 +402,12 @@ expected_block = true
 expected_libraries = []
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "Error handling in portrule evaluation"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "unsupported_runtime"
 notes = "Script where portrule throws an error. Simulated as blocked."
 
 [[fixture]]
@@ -299,6 +423,12 @@ expected_block = false
 expected_libraries = ["stdnse"]
 expected_rules = ["portrule"]
 expected_capability_events = [{ kind = "filesystem_read", allowed = false }]
+provenance = "clean-room"
+upstream_reference = "Capability enforcement regression test"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "capability_denied"
 notes = "Regression: capability event for filesystem read denial. Capability denial yields Partial status but Full fidelity."
 
 [[fixture]]
@@ -314,4 +444,350 @@ expected_block = false
 expected_libraries = ["stdnse"]
 expected_rules = ["portrule"]
 expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "Compression capability enforcement"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
 notes = "Regression: compression bounded path test."
+
+# =========================================================================
+# Upstream-style subset fixtures (Phase 02)
+# =========================================================================
+
+[[fixture]]
+id = "upstream-shortport-portrule"
+name = "shortport_portrule.nse"
+category = "upstream"
+path = "scripts/upstream/shortport_portrule.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["nmap", "stdnse", "shortport"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "shortport.port_or_service() pattern from upstream NSE scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Upstream-style portrule using shortport helper pattern."
+
+[[fixture]]
+id = "upstream-shortport-port"
+name = "shortport_port.nse"
+category = "upstream"
+path = "scripts/upstream/shortport_port.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["nmap", "stdnse", "shortport"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "shortport.port() pattern from upstream NSE scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Upstream-style script using shortport.port() for port number matching."
+
+[[fixture]]
+id = "upstream-categories-multi"
+name = "categories_multi.nse"
+category = "upstream"
+path = "scripts/upstream/categories_multi.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "categories array pattern from upstream NSE scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Upstream-style script demonstrating multiple category tags."
+
+[[fixture]]
+id = "upstream-ssl-cert-summary"
+name = "ssl_cert_summary.nse"
+category = "upstream"
+path = "scripts/upstream/ssl_cert_summary.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse", "sslcert"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "ssl-cert.nse certificate summary pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "approximate"
+notes = "Upstream-style SSL certificate summary script. sslcert.isPort() called but actual TLS connection is mocked."
+
+[[fixture]]
+id = "upstream-http-get-mock"
+name = "http_get_mock.nse"
+category = "upstream"
+path = "scripts/upstream/http_get_mock.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["http", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "http.get() pattern from http-title.nse and similar scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "approximate"
+notes = "Upstream-style HTTP GET request pattern. Uses host.hostname which may not be set in local context."
+
+[[fixture]]
+id = "upstream-http-post-mock"
+name = "http_post_mock.nse"
+category = "upstream"
+path = "scripts/upstream/http_post_mock.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["http", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "http.post() pattern from API testing scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "approximate"
+notes = "Upstream-style HTTP POST request pattern. http.post() available but not exercised in local test."
+
+[[fixture]]
+id = "upstream-dns-reverse"
+name = "dns_reverse_lookup.nse"
+category = "upstream"
+path = "scripts/upstream/dns_reverse_lookup.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["dns", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "dns.reverse() pattern from dns-brute.nse"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "approximate"
+notes = "Upstream-style DNS reverse lookup pattern. dns.reverse() available but not exercised locally."
+
+[[fixture]]
+id = "upstream-stdnse-scripts-args"
+name = "stdnse_scripts_args.nse"
+category = "upstream"
+path = "scripts/upstream/stdnse_scripts_args.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "stdnse.get_script_args(SCRIPT_NAME .. '.arg') pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Upstream-style script using SCRIPT_NAME and script args."
+
+[[fixture]]
+id = "upstream-stdnse-output-table"
+name = "stdnse_output_table.nse"
+category = "upstream"
+path = "scripts/upstream/stdnse_output_table.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "stdnse.output_table() pattern from structured output scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Upstream-style script producing structured output using stdnse output helpers."
+
+[[fixture]]
+id = "upstream-hostrule-hostname"
+name = "hostrule_hostname.nse"
+category = "upstream"
+path = "scripts/upstream/hostrule_hostname.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["hostrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "hostname-matching hostrule pattern from discovery scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "context_gap"
+notes = "Upstream-style hostrule matching on hostname patterns. hostname may be empty in local context."
+
+[[fixture]]
+id = "upstream-graceful-degrade"
+name = "graceful_degrade.nse"
+category = "upstream"
+path = "scripts/upstream/graceful_degrade.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["http", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "pcall(fallback) pattern from resilient NSE scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "approximate"
+notes = "Upstream-style script that degrades gracefully when a library operation fails."
+
+[[fixture]]
+id = "upstream-vulns-check"
+name = "vulns_check.nse"
+category = "upstream"
+path = "scripts/upstream/vulns_check.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse", "vulns"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "vulns.Report / Vulnerability:new pattern from vulns-*.nse scripts"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "approximate"
+notes = "Upstream-style vulnerability check pattern using the vulns library."
+
+[[fixture]]
+id = "upstream-brute-categories"
+name = "brute_shape_categories.nse"
+category = "upstream"
+path = "scripts/upstream/brute_shape_categories.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "brute credential iteration pattern with auth/brute categories"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Upstream-style brute force credential shape with proper categories."
+
+[[fixture]]
+id = "upstream-nmap-fetch-file"
+name = "nmap_fetch_file.nse"
+category = "upstream"
+path = "scripts/upstream/nmap_fetch_file.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["nmap", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "nmap.fetch_file() utility pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Upstream-style script using nmap.fetch_file() for local file operations."
+
+[[fixture]]
+id = "upstream-structured-output"
+name = "structured_output.nse"
+category = "upstream"
+path = "scripts/upstream/structured_output.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "stdnse.output_table() XML-like structured output pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Upstream-style script producing XML-like structured output."
+
+[[fixture]]
+id = "upstream-banner-parse"
+name = "banner_parse.nse"
+category = "upstream"
+path = "scripts/upstream/banner_parse.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "Lua string pattern matching for banner detection"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Upstream-style script using string patterns for response parsing."
