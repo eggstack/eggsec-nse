@@ -19,10 +19,18 @@
 //!
 //! Run with:
 //!   cargo test -p eggsec-nse --features nse --test runtime_corpus_tests
+//!
+//! **Parallel execution safety**: Each call to `run_fixture_runtime()` obtains
+//! a unique invocation ID from a global `AtomicU32` counter, ensuring that
+//! concurrent test functions (same PID, different threads) get separate temp
+//! dirs even when executing the same fixture. Without this, concurrent writes
+//! to the same temp file and shared Lua/library statics cause intermittent
+//! assertion failures (e.g., missing capability events, empty rule reports).
 
 #![cfg(feature = "nse")]
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use eggsec_nse::capabilities::NseCapabilityKind;
 use eggsec_nse::limits::NseExecutionLimits;
@@ -35,6 +43,11 @@ use eggsec_nse::report::{
 };
 use eggsec_nse::resolver::{NseScriptSource, ScriptResolver};
 use eggsec_nse::NseExecutor;
+
+/// Monotonically increasing counter ensuring each call to `run_fixture_runtime`
+/// gets a unique temp dir even when multiple test functions run the same fixture
+/// concurrently (same PID, different threads).
+static INVOCATION_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 // ---------------------------------------------------------------------------
 // Manifest types — minimal in-test subset of the corpus manifest schema.
@@ -319,12 +332,15 @@ fn parse_capability_kind(s: &str) -> NseCapabilityKind {
 fn run_fixture_runtime(
     entry: &FixtureEntry,
 ) -> (NseRunReport, Vec<eggsec_nse::report::NseEvidenceItem>) {
-    // Use a unique tmp dir per fixture; do NOT delete on re-entry to avoid
-    // racing with concurrent tests using the same fixture id.
+    // Use a unique tmp dir per invocation (not just per fixture) to avoid
+    // races when multiple test functions execute the same fixture concurrently.
+    // Each call gets a unique monotonic counter value + PID.
+    let invocation_id = INVOCATION_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp = std::env::temp_dir().join(format!(
-        "eggsec-nse-runtime-corpus-{}-{}",
+        "eggsec-nse-runtime-corpus-{}-{}-{}",
         entry.id,
         std::process::id(),
+        invocation_id,
     ));
     let _ = std::fs::create_dir_all(&tmp);
 
@@ -375,7 +391,9 @@ fn run_fixture_runtime(
             port.service.clone(),
         ) {
             Ok(()) => {}
-            Err(e) => tracing::debug!(fixture = %entry.id, error = %e, "add_port failed"),
+            Err(e) => {
+                tracing::warn!(fixture = %entry.id, error = %e, "add_port failed — portrule may not fire")
+            }
         }
     }
 
@@ -535,7 +553,7 @@ fn corpus_runtime_all_fixtures_execute_and_assert() {
         // Compatibility status
         assert_eq!(
             report.compatibility.status, expected_status,
-            "fixture '{}': expected status {:?}, got {:?} (errors={:?}, blocked={}, rejected={}, capability_denials={})",
+            "fixture '{}': expected status {:?}, got {:?} (errors={:?}, blocked={}, rejected={}, capability_denials={}, rules_observed={}, output_empty={})",
             entry.id,
             expected_status,
             report.compatibility.status,
@@ -543,6 +561,8 @@ fn corpus_runtime_all_fixtures_execute_and_assert() {
             report.resolver.blocked_count,
             report.resolver.rejected_count,
             report.capability_events.iter().filter(|e| !e.allowed).count(),
+            report.rules.len(),
+            report.output.content.is_empty(),
         );
 
         // Fidelity
