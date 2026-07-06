@@ -1,4 +1,6 @@
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -54,6 +56,226 @@ impl PortInfo {
             table.set("version", ver.as_str())?;
         }
         Ok(table)
+    }
+}
+
+/// Source of host/port/service context data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NseContextSource {
+    /// Data came from an actual scan result.
+    Scan,
+    /// Data was provided as a test fixture.
+    Fixture,
+    /// Data was synthetically generated (e.g., target string only).
+    Synthetic,
+    /// Source is unknown or not tracked.
+    Unknown,
+}
+
+impl fmt::Display for NseContextSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Scan => write!(f, "scan"),
+            Self::Fixture => write!(f, "fixture"),
+            Self::Synthetic => write!(f, "synthetic"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
+/// Service context for a port, capturing what is known about the service.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NseServiceContext {
+    /// Service name (e.g., "http", "ssh", "https").
+    pub name: Option<String>,
+    /// Service product (e.g., "Apache httpd", "OpenSSH").
+    pub product: Option<String>,
+    /// Service version (e.g., "2.4.41", "8.1p1").
+    pub version: Option<String>,
+    /// Tunnel type (e.g., "ssl", "ssl/http").
+    pub tunnel: Option<String>,
+    /// Confidence in the service detection (0.0 - 1.0).
+    pub confidence: Option<f32>,
+}
+
+impl NseServiceContext {
+    pub fn new() -> Self {
+        Self {
+            name: None,
+            product: None,
+            version: None,
+            tunnel: None,
+            confidence: None,
+        }
+    }
+
+    /// Build a Lua table compatible with Nmap's `port.service` structure.
+    pub fn to_table(&self, lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
+        let table = lua.create_table()?;
+        if let Some(ref name) = self.name {
+            table.set("name", name.as_str())?;
+        }
+        if let Some(ref product) = self.product {
+            table.set("product", product.as_str())?;
+        }
+        if let Some(ref version) = self.version {
+            table.set("version", version.as_str())?;
+        }
+        if let Some(ref tunnel) = self.tunnel {
+            table.set("tunnel", tunnel.as_str())?;
+        }
+        if let Some(confidence) = self.confidence {
+            table.set("confidence", confidence)?;
+        }
+        Ok(table)
+    }
+}
+
+impl Default for NseServiceContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Host context for NSE rule evaluation and script execution.
+///
+/// Carries structured host data with explicit provenance tracking.
+/// Fields that are not available from scan data are `None` rather
+/// than fabricated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NseHostContext {
+    /// Host IP address.
+    pub ip: String,
+    /// Hostname (DNS name) if known.
+    pub hostname: Option<String>,
+    /// Target label (usually the original target string).
+    pub target_label: String,
+    /// Source of this context data.
+    pub source: NseContextSource,
+}
+
+impl NseHostContext {
+    pub fn new(ip: String, target_label: String, source: NseContextSource) -> Self {
+        Self {
+            ip,
+            hostname: None,
+            target_label,
+            source,
+        }
+    }
+
+    /// Build a Lua host table compatible with Nmap's `host` structure.
+    ///
+    /// Sets: `ip`, `name`, `hostname`, `binip`, `address_family`, and
+    /// `eggsec_context_source` for provenance tracking.
+    pub fn to_table(&self, lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
+        let table = lua.create_table()?;
+        table.set("ip", self.ip.as_str())?;
+        table.set("binip", self.ip.as_str())?;
+        if let Some(ref hostname) = self.hostname {
+            table.set("name", hostname.as_str())?;
+            table.set("hostname", hostname.as_str())?;
+        }
+        table.set("address_family", "inet")?;
+        table.set("eggsec_context_source", self.source.to_string())?;
+        Ok(table)
+    }
+
+    /// Derive a host context from a `HostInfo` and target string.
+    pub fn from_host_info(host: &HostInfo, target: &str) -> Self {
+        Self {
+            ip: host.ip.clone(),
+            hostname: host.hostname.clone(),
+            target_label: target.to_string(),
+            source: NseContextSource::Scan,
+        }
+    }
+
+    /// Create a synthetic context from just a target string.
+    pub fn synthetic(target: &str) -> Self {
+        Self {
+            ip: target.to_string(),
+            hostname: None,
+            target_label: target.to_string(),
+            source: NseContextSource::Synthetic,
+        }
+    }
+}
+
+/// Port context for NSE rule evaluation and script execution.
+///
+/// Carries structured port/service data with explicit provenance tracking.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NsePortContext {
+    /// Port number.
+    pub port: u16,
+    /// Protocol (e.g., "tcp", "udp").
+    pub protocol: String,
+    /// Port state (e.g., "open", "closed", "filtered", "unknown").
+    pub state: String,
+    /// Service context if known.
+    pub service: Option<NseServiceContext>,
+    /// Source of this context data.
+    pub source: NseContextSource,
+}
+
+impl NsePortContext {
+    pub fn new(port: u16, protocol: String, state: String, source: NseContextSource) -> Self {
+        Self {
+            port,
+            protocol,
+            state,
+            service: None,
+            source,
+        }
+    }
+
+    /// Build a Lua port table compatible with Nmap's `port` structure.
+    ///
+    /// Sets: `number`, `protocol`, `state`, `service` (sub-table),
+    /// `version` (convenience), and `eggsec_context_source`.
+    pub fn to_table(&self, lua: &mlua::Lua) -> mlua::Result<mlua::Table> {
+        let table = lua.create_table()?;
+        table.set("number", self.port)?;
+        table.set("protocol", self.protocol.as_str())?;
+        table.set("state", self.state.as_str())?;
+        if let Some(ref svc) = self.service {
+            table.set("service", svc.to_table(lua)?)?;
+            if let Some(ref version) = svc.version {
+                table.set("version", version.as_str())?;
+            }
+        }
+        table.set("eggsec_context_source", self.source.to_string())?;
+        Ok(table)
+    }
+
+    /// Derive a port context from a `PortInfo`.
+    pub fn from_port_info(port: &PortInfo) -> Self {
+        let service = port.service.as_ref().map(|name| NseServiceContext {
+            name: Some(name.clone()),
+            product: None,
+            version: port.version.clone(),
+            tunnel: None,
+            confidence: None,
+        });
+        Self {
+            port: port.number,
+            protocol: port.protocol.clone(),
+            state: port.state.clone(),
+            service,
+            source: NseContextSource::Scan,
+        }
+    }
+
+    /// Create a minimal port context (port number and protocol only).
+    pub fn minimal(port: u16, protocol: &str) -> Self {
+        Self {
+            port,
+            protocol: protocol.to_string(),
+            state: "unknown".to_string(),
+            service: None,
+            source: NseContextSource::Synthetic,
+        }
     }
 }
 

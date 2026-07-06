@@ -791,3 +791,70 @@ local_fixture = true
 public_network_required = false
 gap_classification = "supported"
 notes = "Upstream-style script using string patterns for response parsing."
+
+# =========================================================================
+# Context fidelity fixtures (Milestone 4 Phase 03)
+# =========================================================================
+
+[[fixture]]
+id = "portrule-host-port"
+name = "portrule_host_port.nse"
+category = "discovery"
+path = "scripts/discovery/portrule_host_port.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "approximate"
+expected_resolved = true
+expected_block = false
+expected_libraries = []
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "Nmap portrule(host, port) signature"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "approximate"
+notes = "Tests portrule(host, port) two-argument signature with context fidelity fields. Synthetic context produces approximate fidelity."
+
+[[fixture]]
+id = "hostrule-host-context"
+name = "hostrule_host_context.nse"
+category = "discovery"
+path = "scripts/discovery/hostrule_host_context.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "approximate"
+expected_resolved = true
+expected_block = false
+expected_libraries = []
+expected_rules = ["hostrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "Nmap hostrule(host) signature"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "approximate"
+notes = "Tests hostrule receives host table with eggsec_context_source field. Synthetic context produces approximate fidelity."
+
+[[fixture]]
+id = "portrule-service-context"
+name = "portrule_service_context.nse"
+category = "discovery"
+path = "scripts/discovery/portrule_service_context.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "approximate"
+expected_resolved = true
+expected_block = false
+expected_libraries = []
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "Nmap port.service table"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "approximate"
+notes = "Tests portrule receives port with service context sub-table. Synthetic context produces approximate fidelity."

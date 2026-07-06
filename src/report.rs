@@ -216,6 +216,18 @@ pub struct NseRuleEvaluationReport {
     pub summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unsupported: Option<String>,
+    /// Source of host context used for this rule evaluation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_context_source: Option<String>,
+    /// Source of port context used for this rule evaluation (portrule only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port_context_source: Option<String>,
+    /// Whether service context was available for this evaluation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_context_available: Option<bool>,
+    /// Fidelity reason explaining why the result is exact or approximate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fidelity_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -562,6 +574,10 @@ pub fn evaluate_rule(
             error: None,
             summary: "rule returned nil".to_string(),
             unsupported: None,
+            host_context_source: None,
+            port_context_source: None,
+            service_context_available: None,
+            fidelity_reason: None,
         },
         Ok(mlua::Value::Boolean(true)) => NseRuleEvaluationReport {
             kind: kind.to_string(),
@@ -571,6 +587,10 @@ pub fn evaluate_rule(
             error: None,
             summary: "rule matched".to_string(),
             unsupported: None,
+            host_context_source: None,
+            port_context_source: None,
+            service_context_available: None,
+            fidelity_reason: None,
         },
         Ok(mlua::Value::Boolean(false)) => NseRuleEvaluationReport {
             kind: kind.to_string(),
@@ -580,6 +600,10 @@ pub fn evaluate_rule(
             error: None,
             summary: "rule did not match".to_string(),
             unsupported: None,
+            host_context_source: None,
+            port_context_source: None,
+            service_context_available: None,
+            fidelity_reason: None,
         },
         Ok(other) => {
             let type_name = match &other {
@@ -605,6 +629,10 @@ pub fn evaluate_rule(
                 error: None,
                 summary: format!("expected boolean, got {}", type_name),
                 unsupported: Some(format!("expected boolean, got {}", type_name)),
+                host_context_source: None,
+                port_context_source: None,
+                service_context_available: None,
+                fidelity_reason: None,
             }
         }
         Err(e) => NseRuleEvaluationReport {
@@ -615,8 +643,67 @@ pub fn evaluate_rule(
             error: Some(e.to_string()),
             summary: format!("rule error: {}", e),
             unsupported: None,
+            host_context_source: None,
+            port_context_source: None,
+            service_context_available: None,
+            fidelity_reason: None,
         },
     }
+}
+
+/// Evaluate a Lua rule result with host/port context metadata.
+///
+/// This is the preferred entry point for rule evaluation when context
+/// provenance is available. It produces the same rule result as
+/// `evaluate_rule()` but annotates the report with context source
+/// information for fidelity tracking.
+pub fn evaluate_rule_with_context(
+    kind: &str,
+    lua_result: Result<mlua::Value, mlua::Error>,
+    host_ctx: &crate::context::NseHostContext,
+    port_ctx: Option<&crate::context::NsePortContext>,
+) -> NseRuleEvaluationReport {
+    let mut report = evaluate_rule(kind, lua_result);
+
+    report.host_context_source = Some(host_ctx.source.to_string());
+    report.port_context_source = port_ctx.map(|p| p.source.to_string());
+    report.service_context_available = port_ctx
+        .and_then(|p| p.service.as_ref())
+        .map(|s| s.name.is_some() || s.product.is_some() || s.version.is_some());
+
+    // Compute fidelity reason based on context sources
+    let host_synthetic = host_ctx.source == crate::context::NseContextSource::Synthetic;
+    let port_synthetic = port_ctx
+        .map(|p| p.source == crate::context::NseContextSource::Synthetic)
+        .unwrap_or(false);
+    let no_service = port_ctx
+        .map(|p| p.service.is_none() || p.service.as_ref().map_or(true, |s| s.name.is_none()))
+        .unwrap_or(true);
+
+    if report.exactness == "exact" && report.matched {
+        if host_synthetic || port_synthetic {
+            report.fidelity_reason = Some(format!(
+                "rule matched but host context is {} and port context is {}",
+                if host_synthetic { "synthetic" } else { "scan" },
+                if port_synthetic { "synthetic" } else { "scan" },
+            ));
+            // Mark as approximate when context is synthetic
+            report.exactness = "approximate".to_string();
+        } else if no_service && kind == "portrule" {
+            report.fidelity_reason =
+                Some("rule matched but service context is unavailable".to_string());
+        }
+    } else if report.exactness == "exact" && !report.matched {
+        if host_synthetic || port_synthetic {
+            report.fidelity_reason = Some(format!(
+                "rule did not match with {} host context and {} port context",
+                if host_synthetic { "synthetic" } else { "scan" },
+                if port_synthetic { "synthetic" } else { "scan" },
+            ));
+        }
+    }
+
+    report
 }
 
 impl From<&NseExecutionLimits> for NseLimitsSummary {

@@ -288,6 +288,11 @@ impl NseExecutor {
         let mut outputs = Vec::new();
         let mut rule_reports = Vec::new();
 
+        // Build centralized host context from executor target
+        let target = self.target().to_string();
+        let host_ctx = crate::context::NseHostContext::synthetic(&target);
+        let host_table = host_ctx.to_table(self.lua())?;
+
         // prerule
         if let Ok(prerule) = globals.get::<mlua::Function>("prerule") {
             let report = crate::report::evaluate_rule("prerule", prerule.call::<Value>(()));
@@ -296,18 +301,18 @@ impl NseExecutor {
             }
         }
 
-        // hostrule
+        // hostrule — receives structured host table
         let hostrule_matched = if let Ok(hostrule) = globals.get::<mlua::Function>("hostrule") {
-            let host = globals.get::<Table>("nmap")?;
-            let result = hostrule.call::<Value>(host.clone());
-            let report = crate::report::evaluate_rule("hostrule", result);
+            let result = hostrule.call::<Value>(host_table.clone());
+            let report =
+                crate::report::evaluate_rule_with_context("hostrule", result, &host_ctx, None);
             let matched = report.matched;
             if report.evaluated || report.error.is_some() {
                 rule_reports.push(report);
             }
             if matched {
                 if let Ok(action) = globals.get::<mlua::Function>("action") {
-                    match action.call::<Value>((host.clone(), self.lua().create_table()?)) {
+                    match action.call::<Value>((host_table.clone(), self.lua().create_table()?)) {
                         Ok(v) if !v.is_nil() => outputs.push(format!("action: {:?}", v)),
                         Err(e) => outputs.push(format!("action error: {}", e)),
                         _ => {}
@@ -321,22 +326,55 @@ impl NseExecutor {
             false
         };
 
-        // portrule
+        // portrule — receives (host_table, port_table) matching Nmap signature
         let ports = globals.get::<Table>("nmap")?.get::<Table>("_ports")?;
         let mut portrule_matched = false;
 
         for (_, port_info) in ports.pairs::<String, Table>().flatten() {
             if let Ok(portrule) = globals.get::<mlua::Function>("portrule") {
-                let result = portrule.call::<Value>(port_info.clone());
-                let report = crate::report::evaluate_rule("portrule", result);
+                // Build port context from the Lua port table
+                let port_num: u16 = port_info.get("number").unwrap_or(0);
+                let port_proto: String = port_info.get("protocol").unwrap_or_default();
+                let port_state: String = port_info.get("state").unwrap_or_default();
+                let port_svc: Option<String> = port_info.get("service").ok();
+                let port_ver: Option<String> = port_info.get("version").ok();
+
+                let svc_ctx = if port_svc.is_some() || port_ver.is_some() {
+                    Some(crate::context::NseServiceContext {
+                        name: port_svc,
+                        product: None,
+                        version: port_ver,
+                        tunnel: None,
+                        confidence: None,
+                    })
+                } else {
+                    None
+                };
+
+                let port_ctx = crate::context::NsePortContext {
+                    port: port_num,
+                    protocol: port_proto,
+                    state: port_state,
+                    service: svc_ctx,
+                    source: crate::context::NseContextSource::Synthetic,
+                };
+
+                let port_table = port_ctx.to_table(self.lua())?;
+
+                let result = portrule.call::<Value>((host_table.clone(), port_table.clone()));
+                let report = crate::report::evaluate_rule_with_context(
+                    "portrule",
+                    result,
+                    &host_ctx,
+                    Some(&port_ctx),
+                );
                 let matched = report.matched;
                 if report.evaluated || report.error.is_some() {
                     rule_reports.push(report);
                 }
                 if matched {
                     if let Ok(action) = globals.get::<mlua::Function>("action") {
-                        let host = globals.get::<Table>("nmap")?;
-                        match action.call::<Value>((host.clone(), port_info.clone())) {
+                        match action.call::<Value>((host_table.clone(), port_table)) {
                             Ok(v) if !v.is_nil() => outputs.push(format!("action: {:?}", v)),
                             Err(e) => outputs.push(format!("action error: {}", e)),
                             _ => {}
@@ -397,6 +435,10 @@ impl NseExecutor {
             error: None,
             summary: format!("{} function not defined", kind),
             unsupported: None,
+            host_context_source: None,
+            port_context_source: None,
+            service_context_available: None,
+            fidelity_reason: None,
         }
     }
 
@@ -408,24 +450,32 @@ impl NseExecutor {
         state: &str,
         service: Option<&str>,
     ) -> LuaResult<bool> {
-        let port_table = self.lua().create_table()?;
-        port_table.set("number", port)?;
-        port_table.set("protocol", protocol)?;
-        port_table.set("state", state)?;
-        if let Some(svc) = service {
-            port_table.set("service", svc)?;
-        }
+        let svc_ctx = service.map(|s| crate::context::NseServiceContext {
+            name: Some(s.to_string()),
+            product: None,
+            version: None,
+            tunnel: None,
+            confidence: None,
+        });
+
+        let port_ctx = crate::context::NsePortContext {
+            port,
+            protocol: protocol.to_string(),
+            state: state.to_string(),
+            service: svc_ctx,
+            source: crate::context::NseContextSource::Synthetic,
+        };
+        let port_table = port_ctx.to_table(self.lua())?;
+
         let report = self.evaluate_rule_value("portrule", portrule, Value::Table(port_table));
         Ok(report.matched)
     }
 
     pub fn check_hostrule(&mut self, hostrule: Option<&str>) -> LuaResult<bool> {
-        let globals = self.lua().globals();
-        let host = match globals.get::<Table>("nmap") {
-            Ok(t) => t,
-            Err(_) => return Ok(false),
-        };
-        let report = self.evaluate_rule_value("hostrule", hostrule, Value::Table(host));
+        let target = self.target().to_string();
+        let host_ctx = crate::context::NseHostContext::synthetic(&target);
+        let host_table = host_ctx.to_table(self.lua())?;
+        let report = self.evaluate_rule_value("hostrule", hostrule, Value::Table(host_table));
         Ok(report.matched)
     }
 

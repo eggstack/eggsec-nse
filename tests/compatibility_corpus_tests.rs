@@ -515,6 +515,10 @@ fn compatibility_corpus_approximate_rule() {
         error: None,
         summary: "portrule matched with approximate port handling".to_string(),
         unsupported: None,
+        host_context_source: None,
+        port_context_source: None,
+        service_context_available: None,
+        fidelity_reason: None,
     }];
 
     let report = NseRunReport::new("127.0.0.1", "approximate-rule")
@@ -822,6 +826,10 @@ fn compatibility_corpus_exact_rule() {
         error: None,
         summary: "portrule matched exactly".to_string(),
         unsupported: None,
+        host_context_source: None,
+        port_context_source: None,
+        service_context_available: None,
+        fidelity_reason: None,
     }];
 
     let report = NseRunReport::new("127.0.0.1", "exact-rule")
@@ -852,6 +860,10 @@ fn compatibility_corpus_rule_error() {
         error: Some("rule evaluation panicked".to_string()),
         summary: "portrule failed".to_string(),
         unsupported: None,
+        host_context_source: None,
+        port_context_source: None,
+        service_context_available: None,
+        fidelity_reason: None,
     }];
 
     let report = NseRunReport::new("127.0.0.1", "rule-error")
@@ -1099,6 +1111,10 @@ mod corpus_harness {
                 error: None,
                 summary: format!("{} evaluated", rule_name),
                 unsupported: None,
+                host_context_source: None,
+                port_context_source: None,
+                service_context_available: None,
+                fidelity_reason: None,
             })
             .collect();
 
@@ -1450,6 +1466,10 @@ mod corpus_harness {
             error: None,
             summary: "portrule matched".to_string(),
             unsupported: None,
+            host_context_source: None,
+            port_context_source: None,
+            service_context_available: None,
+            fidelity_reason: None,
         };
 
         let json = serde_json::to_string(&report).expect("rule report serializes");

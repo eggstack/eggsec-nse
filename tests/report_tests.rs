@@ -340,6 +340,10 @@ fn test_compatibility_with_approximations() {
         error: None,
         summary: "port state approximated".to_string(),
         unsupported: None,
+        host_context_source: None,
+        port_context_source: None,
+        service_context_available: None,
+        fidelity_reason: None,
     }];
 
     let report = NseRunReport::new("10.0.0.1", "test")
@@ -466,6 +470,10 @@ fn test_rule_evaluation_report_fields() {
         error: None,
         summary: "host not matched".to_string(),
         unsupported: None,
+        host_context_source: None,
+        port_context_source: None,
+        service_context_available: None,
+        fidelity_reason: None,
     };
 
     let report = NseRunReport::new("10.0.0.1", "test")

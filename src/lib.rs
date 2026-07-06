@@ -316,6 +316,9 @@ pub use report::{
     NseScriptSourceSummary,
 };
 
+#[cfg(feature = "nse")]
+pub use context::{NseContextSource, NseHostContext, NsePortContext, NseServiceContext};
+
 /// Compatibility wrapper that defaults to `ManualPermissive` profile.
 ///
 /// # Manual-only
