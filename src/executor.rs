@@ -218,6 +218,10 @@ impl NseExecutor {
         self.core.library_reports()
     }
 
+    pub fn capability_events(&self) -> Vec<crate::capabilities::NseCapabilityEvent> {
+        self.core.capability_context().events()
+    }
+
     // Executor-specific: rule execution
 
     pub fn run_script_with_rules(
@@ -513,6 +517,7 @@ impl NseExecutor {
             .with_stats(&stats)
             .with_resolver_diagnostics(diagnostics)
             .with_libraries(self.library_reports())
+            .with_capability_events(self.core.capability_context().events())
             .with_output(output)
             .compute_compatibility()
     }

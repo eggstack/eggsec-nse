@@ -566,3 +566,99 @@ fn test_build_report_via_executor_method() {
     assert_eq!(report.output.content, "hello");
     assert!(report.libraries.is_empty());
 }
+
+#[test]
+fn test_capability_events_serialization_roundtrip() {
+    use eggsec_nse::capabilities::{NseCapabilityEvent, NseCapabilityKind};
+
+    let events = vec![
+        NseCapabilityEvent {
+            kind: NseCapabilityKind::FilesystemRead,
+            operation: "io.open".to_string(),
+            target: Some("/tmp/test.txt".to_string()),
+            allowed: true,
+            reason: None,
+            bytes: Some(1024),
+        },
+        NseCapabilityEvent {
+            kind: NseCapabilityKind::ProcessExec,
+            operation: "io.popen".to_string(),
+            target: Some("id".to_string()),
+            allowed: false,
+            reason: Some("AgentSafe denies process execution".to_string()),
+            bytes: None,
+        },
+        NseCapabilityEvent {
+            kind: NseCapabilityKind::NetworkTcp,
+            operation: "socket.connect".to_string(),
+            target: Some("10.0.0.1:80".to_string()),
+            allowed: true,
+            reason: Some("network connection allowed with warning".to_string()),
+            bytes: None,
+        },
+    ];
+
+    let report = NseRunReport::new("10.0.0.1", "test-script")
+        .with_capability_events(events)
+        .compute_compatibility();
+
+    assert_eq!(report.capability_events.len(), 3);
+    assert_eq!(report.capability_events[0].kind, "filesystem_read");
+    assert!(report.capability_events[0].allowed);
+    assert_eq!(report.capability_events[1].kind, "process_exec");
+    assert!(!report.capability_events[1].allowed);
+    assert!(report.capability_events[1]
+        .reason
+        .as_ref()
+        .unwrap()
+        .contains("denies"));
+    assert_eq!(report.capability_events[2].kind, "network_tcp");
+    assert!(report.capability_events[2].allowed);
+
+    // Capability denials should affect compatibility status
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Partial
+    );
+
+    let json = serde_json::to_string(&report).unwrap();
+    let deserialized: NseRunReport = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(deserialized.capability_events.len(), 3);
+    assert_eq!(
+        deserialized.capability_events[0].kind,
+        report.capability_events[0].kind
+    );
+    assert_eq!(
+        deserialized.capability_events[0].operation,
+        report.capability_events[0].operation
+    );
+    assert_eq!(
+        deserialized.capability_events[0].target,
+        report.capability_events[0].target
+    );
+    assert_eq!(
+        deserialized.capability_events[0].allowed,
+        report.capability_events[0].allowed
+    );
+    assert_eq!(
+        deserialized.capability_events[0].reason,
+        report.capability_events[0].reason
+    );
+    assert_eq!(
+        deserialized.capability_events[1].kind,
+        report.capability_events[1].kind
+    );
+    assert_eq!(
+        deserialized.capability_events[1].allowed,
+        report.capability_events[1].allowed
+    );
+    assert_eq!(
+        deserialized.capability_events[2].kind,
+        report.capability_events[2].kind
+    );
+    assert_eq!(
+        deserialized.compatibility.status,
+        NseRunCompatibilityStatus::Partial
+    );
+}

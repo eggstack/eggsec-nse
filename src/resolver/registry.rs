@@ -75,6 +75,36 @@ impl fmt::Display for NseSandboxSideEffect {
     }
 }
 
+/// Enforcement status of the NSE capability wrappers for this library.
+///
+/// Tracks whether a library's side-effecting operations have been routed
+/// through `NseCapabilityContext` for policy enforcement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EnforcementStatus {
+    /// All side-effecting operations routed through NseCapabilityContext.
+    Wrapped,
+    /// Some operations wrapped, others not.
+    PartiallyWrapped,
+    /// Manual-only (CLI interactive), no capability enforcement.
+    ManualOnly,
+    /// Not yet migrated, deferred to future milestone.
+    Deferred,
+    /// No side-effecting operations.
+    Pure,
+}
+
+impl fmt::Display for EnforcementStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Wrapped => write!(f, "Wrapped"),
+            Self::PartiallyWrapped => write!(f, "PartiallyWrapped"),
+            Self::ManualOnly => write!(f, "ManualOnly"),
+            Self::Deferred => write!(f, "Deferred"),
+            Self::Pure => write!(f, "Pure"),
+        }
+    }
+}
+
 /// Fallback behavior when a library is not available in the runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NseFallbackBehavior {
@@ -116,6 +146,8 @@ pub struct NseLibraryDescriptor {
     pub fallback_behavior: NseFallbackBehavior,
     /// Freeform notes about compatibility, known gaps, or special handling.
     pub notes: &'static str,
+    /// Whether side-effecting operations are routed through NseCapabilityContext.
+    pub enforcement_status: EnforcementStatus,
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +169,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::HardFail,
         notes: "Core output formatting, verbose, and utility functions. Required by nearly all scripts.",
+        enforcement_status: EnforcementStatus::PartiallyWrapped,
     },
     NseLibraryDescriptor {
         name: "nmap",
@@ -148,6 +181,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::HardFail,
         notes: "Nmap scan state, registry, and host/port data access. Provides nmap.target, nmap.registry, etc.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "socket",
@@ -156,6 +190,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::HardFail,
         notes: "Low-level TCP/UDP socket operations. Core networking primitive for protocol libraries.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "http",
@@ -164,6 +199,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::HardFail,
         notes: "HTTP client library. Supports GET/POST, cookies, authentication, SSL/TLS.",
+        enforcement_status: EnforcementStatus::PartiallyWrapped,
     },
     NseLibraryDescriptor {
         name: "dns",
@@ -172,6 +208,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::HardFail,
         notes: "DNS resolution and packet construction. Supports A, AAAA, MX, TXT, and other record types.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "ssl",
@@ -180,6 +217,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &["openssl"],
         fallback_behavior: NseFallbackBehavior::HardFail,
         notes: "TLS/SSL handshake and certificate operations. Wraps OpenSSL via Lua bindings.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "ssh",
@@ -188,6 +226,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &["libssh2"],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "SSH protocol operations. Requires libssh2 for real execution; stub available.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "smb",
@@ -196,6 +235,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "SMB/CIFS protocol operations. NTLM authentication, share enumeration.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "smb2",
@@ -204,6 +244,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "SMBv2/v3 protocol operations. Modern SMB dialect support.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "mysql",
@@ -212,6 +253,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "MySQL database protocol client. Authentication, query execution.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "postgres",
@@ -220,6 +262,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "PostgreSQL database protocol client. Startup, authentication, simple query.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "redis",
@@ -228,6 +271,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "Redis protocol client. RESP protocol, command execution.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "mongodb",
@@ -236,6 +280,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "MongoDB wire protocol client. isMaster, server status queries.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "ldap",
@@ -244,6 +289,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "LDAP protocol operations. Bind, search, enumeration.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "snmp",
@@ -252,6 +298,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "SNMP protocol operations. GET, GETNEXT, WALK for community strings.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "vulns",
@@ -260,6 +307,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Vulnerability reporting and CVE database lookups (NVD, OSV, CISA KEV).",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "creds",
@@ -271,6 +319,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Credential management. Username/password pair storage and iteration.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "unpwdb",
@@ -279,6 +328,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Username/password database reader. Iterates credential lists for brute-force.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "brute",
@@ -287,6 +337,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Brute-force attack engine. Iterator pattern for credential testing.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "io",
@@ -299,6 +350,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "Standard Lua I/O library. File open/read/write, popen (process execution). Heavily sandboxed.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "os",
@@ -310,6 +362,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "Standard Lua OS library. Date/time, env vars, execute. Blocked in sandbox mode.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "lfs",
@@ -321,6 +374,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &["luafilesystem"],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "LuaFileSystem directory operations. List, stat, symlink checks. Restricted to allowed_dir in sandbox.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "tab",
@@ -329,6 +383,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Table/array utility functions for structured data manipulation.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "json",
@@ -337,6 +392,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "JSON encode/decode library.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     // =====================================================================
     // Auxiliary libraries (19)
@@ -348,6 +404,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Base64 encoding and decoding.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "base32",
@@ -356,6 +413,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Base32 encoding and decoding.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "bin",
@@ -364,6 +422,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Binary data packing/unpacking (little/big endian).",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "bit",
@@ -372,6 +431,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Bitwise operations library.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "stringaux",
@@ -380,6 +440,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Extended string utilities beyond standard Lua string lib.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "strbuf",
@@ -388,6 +449,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "String buffer for efficient string concatenation.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "nse_string",
@@ -396,6 +458,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "NSE-specific string helper functions.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "nse_table",
@@ -404,6 +467,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "NSE-specific table helper functions.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "pcre",
@@ -412,6 +476,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &["pcre"],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "PCRE regular expressions. Optional; falls back to Lua patterns if unavailable.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "openssl",
@@ -420,6 +485,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &["openssl"],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "OpenSSL bindings for crypto operations. Certificate parsing, hashing, HMAC.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "comm",
@@ -428,6 +494,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::GracefulDegrade,
         notes: "Communication helpers for banner grabbing and service interaction.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "shortport",
@@ -436,6 +503,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Port number normalization and validation helpers.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "target",
@@ -444,6 +512,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Target host/address resolution and manipulation.",
+        enforcement_status: EnforcementStatus::Deferred,
     },
     NseLibraryDescriptor {
         name: "match_lib",
@@ -452,6 +521,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Pattern matching helpers for service detection.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "matchs",
@@ -460,6 +530,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Structured match operations for version detection.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "datetime",
@@ -468,6 +539,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Date and time parsing/formatting utilities.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "rand",
@@ -476,6 +548,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Random number generation helpers.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "url",
@@ -484,6 +557,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "URL parsing and normalization utilities.",
+        enforcement_status: EnforcementStatus::Pure,
     },
     NseLibraryDescriptor {
         name: "unicode",
@@ -492,6 +566,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
         notes: "Unicode encoding/decoding and normalization.",
+        enforcement_status: EnforcementStatus::Pure,
     },
 ];
 
@@ -795,5 +870,125 @@ mod tests {
             "GracefulDegrade"
         );
         assert_eq!(NseFallbackBehavior::Skip.to_string(), "Skip");
+    }
+
+    #[test]
+    fn enforcement_status_display() {
+        assert_eq!(EnforcementStatus::Wrapped.to_string(), "Wrapped");
+        assert_eq!(
+            EnforcementStatus::PartiallyWrapped.to_string(),
+            "PartiallyWrapped"
+        );
+        assert_eq!(EnforcementStatus::ManualOnly.to_string(), "ManualOnly");
+        assert_eq!(EnforcementStatus::Deferred.to_string(), "Deferred");
+        assert_eq!(EnforcementStatus::Pure.to_string(), "Pure");
+    }
+
+    #[test]
+    fn every_library_has_enforcement_status() {
+        for lib in LIBRARY_REGISTRY {
+            // Exhaustive match ensures new variants are handled
+            match lib.enforcement_status {
+                EnforcementStatus::Wrapped
+                | EnforcementStatus::PartiallyWrapped
+                | EnforcementStatus::ManualOnly
+                | EnforcementStatus::Deferred
+                | EnforcementStatus::Pure => {}
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_libraries_include_known_wrapped() {
+        let wrapped: Vec<&str> = LIBRARY_REGISTRY
+            .iter()
+            .filter(|l| l.enforcement_status == EnforcementStatus::Wrapped)
+            .map(|l| l.name)
+            .collect();
+        assert!(wrapped.contains(&"socket"), "socket should be Wrapped");
+        assert!(wrapped.contains(&"io"), "io should be Wrapped");
+        assert!(wrapped.contains(&"os"), "os should be Wrapped");
+        assert!(wrapped.contains(&"lfs"), "lfs should be Wrapped");
+        assert!(wrapped.contains(&"nmap"), "nmap should be Wrapped");
+        assert!(wrapped.contains(&"dns"), "dns should be Wrapped");
+        assert!(wrapped.contains(&"comm"), "comm should be Wrapped");
+        assert!(wrapped.contains(&"openssl"), "openssl should be Wrapped");
+        assert!(wrapped.contains(&"datetime"), "datetime should be Wrapped");
+        assert!(wrapped.contains(&"rand"), "rand should be Wrapped");
+    }
+
+    #[test]
+    fn partially_wrapped_libraries() {
+        let partially: Vec<&str> = LIBRARY_REGISTRY
+            .iter()
+            .filter(|l| l.enforcement_status == EnforcementStatus::PartiallyWrapped)
+            .map(|l| l.name)
+            .collect();
+        assert!(
+            partially.contains(&"stdnse"),
+            "stdnse should be PartiallyWrapped"
+        );
+        assert!(
+            partially.contains(&"http"),
+            "http should be PartiallyWrapped"
+        );
+    }
+
+    #[test]
+    fn deferred_libraries_include_auth_and_protocol() {
+        let deferred: Vec<&str> = LIBRARY_REGISTRY
+            .iter()
+            .filter(|l| l.enforcement_status == EnforcementStatus::Deferred)
+            .map(|l| l.name)
+            .collect();
+        assert!(deferred.contains(&"brute"), "brute should be Deferred");
+        assert!(deferred.contains(&"unpwdb"), "unpwdb should be Deferred");
+        assert!(deferred.contains(&"ssl"), "ssl should be Deferred");
+        assert!(deferred.contains(&"ssh"), "ssh should be Deferred");
+    }
+
+    #[test]
+    fn pure_libraries_have_no_side_effects() {
+        let pure_with_effects: Vec<&str> = LIBRARY_REGISTRY
+            .iter()
+            .filter(|l| {
+                l.enforcement_status == EnforcementStatus::Pure
+                    && l.sandbox_side_effects != &[NseSandboxSideEffect::None]
+            })
+            .map(|l| l.name)
+            .collect();
+        // vulns has NetworkAccess but is Pure (CVE lookups only, no user data exfil)
+        // This is acceptable and documented; all others should have None side effects
+        for name in &pure_with_effects {
+            assert_eq!(
+                *name, "vulns",
+                "Pure library '{}' unexpectedly has side effects",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn all_enforcement_statuses_used() {
+        let statuses: Vec<EnforcementStatus> = LIBRARY_REGISTRY
+            .iter()
+            .map(|l| l.enforcement_status)
+            .collect();
+        assert!(
+            statuses.contains(&EnforcementStatus::Wrapped),
+            "At least one library should be Wrapped"
+        );
+        assert!(
+            statuses.contains(&EnforcementStatus::PartiallyWrapped),
+            "At least one library should be PartiallyWrapped"
+        );
+        assert!(
+            statuses.contains(&EnforcementStatus::Deferred),
+            "At least one library should be Deferred"
+        );
+        assert!(
+            statuses.contains(&EnforcementStatus::Pure),
+            "At least one library should be Pure"
+        );
     }
 }

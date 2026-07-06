@@ -303,8 +303,8 @@ pub use resolver::{
 
 pub use resolver::registry::{
     all_libraries, find_library, libraries_by_category, libraries_missing_from_nmap,
-    libraries_with_side_effects, registry_count, sandbox_policy_for_library, NseFallbackBehavior,
-    NseLibraryCategory, NseLibraryDescriptor, NseSandboxSideEffect,
+    libraries_with_side_effects, registry_count, sandbox_policy_for_library, EnforcementStatus,
+    NseFallbackBehavior, NseLibraryCategory, NseLibraryDescriptor, NseSandboxSideEffect,
 };
 
 #[cfg(feature = "nse")]
@@ -390,7 +390,7 @@ pub async fn run_cli_with_profile(
     let cancellation = crate::limits::NseCancellationToken::new();
     let report_profile = resolved_profile.clone();
 
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, crate::resolver::NseScriptSource, Vec<crate::resolver::NseLoadDiagnostic>, Vec<crate::report::NseRuleEvaluationReport>, Vec<crate::report::NseLibraryUseReport>)> {
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, crate::resolver::NseScriptSource, Vec<crate::resolver::NseLoadDiagnostic>, Vec<crate::report::NseRuleEvaluationReport>, Vec<crate::report::NseLibraryUseReport>, Vec<crate::capabilities::NseCapabilityEvent>)> {
         let mut executor = NseExecutor::with_policy(
             sandbox,
             limits,
@@ -455,12 +455,15 @@ pub async fn run_cli_with_profile(
             }
         }
 
-        Ok((output, script_source, diagnostics, rule_reports, library_reports))
+        let capability_events = executor.capability_events();
+
+        Ok((output, script_source, diagnostics, rule_reports, library_reports, capability_events))
     })
     .await
     .map_err(|e| anyhow::anyhow!("Task execution failed: {}", e))??;
 
-    let (output, script_source, diagnostics, rule_reports, library_reports) = result;
+    let (output, script_source, diagnostics, rule_reports, library_reports, capability_events) =
+        result;
 
     if json {
         let report = crate::report::NseRunReport::new(&config.target, &config.script)
@@ -469,6 +472,7 @@ pub async fn run_cli_with_profile(
             .with_resolver_diagnostics(&diagnostics)
             .with_libraries(library_reports)
             .with_rules(rule_reports)
+            .with_capability_events(capability_events)
             .with_output(&output)
             .compute_compatibility();
         println!("{}", serde_json::to_string_pretty(&report)?);
