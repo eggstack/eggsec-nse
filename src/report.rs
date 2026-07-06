@@ -7,6 +7,70 @@ use crate::limits::{NseExecutionLimits, NseExecutionStats};
 use crate::profile::ResolvedNseExecutionProfile;
 use crate::resolver::{registry, NseLoadDiagnostic, NseScriptSource};
 
+/// Category of evidence extracted from NSE execution.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NseEvidenceKind {
+    ServiceFingerprint,
+    VersionInfo,
+    CertificateInfo,
+    VulnerabilitySignal,
+    Misconfiguration,
+    CapabilityDenial,
+    CompatibilityWarning,
+    ScriptOutput,
+}
+
+impl fmt::Display for NseEvidenceKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ServiceFingerprint => write!(f, "service-fingerprint"),
+            Self::VersionInfo => write!(f, "version-info"),
+            Self::CertificateInfo => write!(f, "certificate-info"),
+            Self::VulnerabilitySignal => write!(f, "vulnerability-signal"),
+            Self::Misconfiguration => write!(f, "misconfiguration"),
+            Self::CapabilityDenial => write!(f, "capability-denial"),
+            Self::CompatibilityWarning => write!(f, "compatibility-warning"),
+            Self::ScriptOutput => write!(f, "script-output"),
+        }
+    }
+}
+
+/// A single structured evidence item extracted from NSE script output and runtime context.
+///
+/// Evidence items are normalized observations — not findings or vulnerabilities.
+/// They represent factual records from capability events, compatibility diagnostics,
+/// rule evaluation results, and script output capture.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NseEvidenceItem {
+    /// Unique identifier for this evidence item (e.g. "nse-ev-0").
+    pub id: String,
+    /// Category of the evidence.
+    pub kind: NseEvidenceKind,
+    /// Title summarizing the observation.
+    pub title: String,
+    /// Detailed summary of the evidence.
+    pub summary: String,
+    /// Target host/port the evidence relates to.
+    pub target: String,
+    /// Optional port number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Optional service name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// Confidence level: "confirmed", "likely", "possible", "low".
+    pub confidence: String,
+    /// Source module/script that produced this evidence.
+    pub source: String,
+    /// Optional raw excerpt from script output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_excerpt: Option<String>,
+    /// References (CWE, CVE, URLs).
+    pub references: Vec<String>,
+    /// Classification tags.
+    pub tags: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NseRunReport {
     pub target: String,
@@ -25,6 +89,8 @@ pub struct NseRunReport {
     pub compatibility: NseCompatibilitySummary,
     /// Capability events recorded during execution (denials, warnings, allowed ops).
     pub capability_events: Vec<NseCapabilityEventSummary>,
+    /// Structured evidence items extracted from script output and runtime context.
+    pub evidence: Vec<NseEvidenceItem>,
     pub warnings: Vec<String>,
     pub errors: Vec<String>,
 }
@@ -355,6 +421,7 @@ impl NseRunReport {
                 approximations: Vec::new(),
             },
             capability_events: Vec::new(),
+            evidence: Vec::new(),
             warnings: Vec::new(),
             errors: Vec::new(),
         }
@@ -498,6 +565,11 @@ impl NseRunReport {
             line_count,
             truncated,
         };
+        self
+    }
+
+    pub fn with_evidence(mut self, evidence: Vec<NseEvidenceItem>) -> Self {
+        self.evidence = evidence;
         self
     }
 
@@ -762,4 +834,129 @@ impl From<&NseScriptSource> for NseScriptSourceSummary {
             },
         }
     }
+}
+
+/// Extract structured evidence items from report state.
+///
+/// Conservative extraction: only produces evidence from structured sources
+/// (capability events, compatibility state, rule evaluations, output capture).
+/// No fragile prose parsing. Raw output remains available for manual review.
+pub fn extract_evidence(
+    target: &str,
+    script_name: &str,
+    capability_events: &[NseCapabilityEventSummary],
+    compatibility: &NseCompatibilitySummary,
+    rules: &[NseRuleEvaluationReport],
+    output: &NseOutputSummary,
+) -> Vec<NseEvidenceItem> {
+    let mut evidence = Vec::new();
+    let mut counter = 0u32;
+
+    // 1. Capability denials → CapabilityDenial evidence
+    for event in capability_events.iter().filter(|e| !e.allowed) {
+        let id = format!("nse-ev-{}", counter);
+        counter += 1;
+        let target_detail = event.target.as_deref().unwrap_or(target);
+        evidence.push(NseEvidenceItem {
+            id,
+            kind: NseEvidenceKind::CapabilityDenial,
+            title: format!("{} denied by policy", event.kind),
+            summary: event.reason.clone().unwrap_or_else(|| {
+                format!("{} operation '{}' was denied", event.kind, event.operation)
+            }),
+            target: target_detail.to_string(),
+            port: None,
+            service: None,
+            confidence: "confirmed".to_string(),
+            source: script_name.to_string(),
+            raw_excerpt: None,
+            references: Vec::new(),
+            tags: vec!["capability".to_string(), event.kind.clone()],
+        });
+    }
+
+    // 2. Compatibility issues → CompatibilityWarning evidence
+    for feature in &compatibility.unsupported_features {
+        let id = format!("nse-ev-{}", counter);
+        counter += 1;
+        evidence.push(NseEvidenceItem {
+            id,
+            kind: NseEvidenceKind::CompatibilityWarning,
+            title: format!("Unsupported feature: {}", feature),
+            summary: format!("Module '{}' is not supported in this environment", feature),
+            target: target.to_string(),
+            port: None,
+            service: None,
+            confidence: "confirmed".to_string(),
+            source: script_name.to_string(),
+            raw_excerpt: None,
+            references: Vec::new(),
+            tags: vec!["compatibility".to_string(), "unsupported".to_string()],
+        });
+    }
+
+    for approx in &compatibility.approximations {
+        let id = format!("nse-ev-{}", counter);
+        counter += 1;
+        evidence.push(NseEvidenceItem {
+            id,
+            kind: NseEvidenceKind::CompatibilityWarning,
+            title: format!("Approximate result: {}", approx),
+            summary: format!("Rule evaluation is approximate: {}", approx),
+            target: target.to_string(),
+            port: None,
+            service: None,
+            confidence: "likely".to_string(),
+            source: script_name.to_string(),
+            raw_excerpt: None,
+            references: Vec::new(),
+            tags: vec!["compatibility".to_string(), "approximate".to_string()],
+        });
+    }
+
+    // 3. Rule evaluation errors → CompatibilityWarning evidence
+    for rule in rules.iter().filter(|r| r.error.is_some()) {
+        let id = format!("nse-ev-{}", counter);
+        counter += 1;
+        evidence.push(NseEvidenceItem {
+            id,
+            kind: NseEvidenceKind::CompatibilityWarning,
+            title: format!("Rule error: {}", rule.kind),
+            summary: rule.error.clone().unwrap_or_default(),
+            target: target.to_string(),
+            port: None,
+            service: None,
+            confidence: "confirmed".to_string(),
+            source: script_name.to_string(),
+            raw_excerpt: None,
+            references: Vec::new(),
+            tags: vec!["rule-error".to_string(), rule.kind.clone()],
+        });
+    }
+
+    // 4. Script output → ScriptOutput evidence (conservative: only if non-empty)
+    if output.has_output && !output.content.is_empty() {
+        let excerpt = if output.content.len() > 500 {
+            format!("{}...", &output.content[..500])
+        } else {
+            output.content.clone()
+        };
+        let id = format!("nse-ev-{}", counter);
+        evidence.push(NseEvidenceItem {
+            id,
+            kind: NseEvidenceKind::ScriptOutput,
+            title: "Script output captured".to_string(),
+            summary: format!("{} lines of output", output.line_count),
+            target: target.to_string(),
+            port: None,
+            service: None,
+            confidence: "confirmed".to_string(),
+            source: script_name.to_string(),
+            raw_excerpt: Some(excerpt),
+            references: Vec::new(),
+            tags: vec!["output".to_string()],
+        });
+    }
+
+    evidence
 }

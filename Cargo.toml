@@ -44,6 +44,8 @@ openssl = { version = "0.10", features = ["vendored"], optional = true }
 des = { version = "0.8", optional = true }
 ssh2 = { version = "0.9", optional = true }
 ipnetwork = "0.20"
+eggsec-core = { path = "../eggsec-core" }
+eggsec-output = { path = "../eggsec-output" }
 
 [dev-dependencies]
 toml = "0.8"

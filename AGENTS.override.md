@@ -20,6 +20,8 @@ The NSE (Nmap Scripting Engine) module (`crates/eggsec-nse/`) provides Lua VM in
 
 > **Milestone 3 Closure (Phase 06).** All helper-side enforcement is complete for: filesystem (io/lfs/os), process execution (os/nmap), network TCP/UDP (socket/comm), DNS (dns), time (datetime), randomness (rand), environment (os), compression (zlib), and crypto/TLS (openssl/tls/sslcert). Deferred: unpwdb, brute, datafiles, protocol-specific internal helpers beyond network I/O. Capability events are wired into `NseRunReport.capability_events` via `with_capability_events()`. Architecture guard checks 33/33b/33c prevent new direct side-effect bypasses. Check 33 (process exec) is a hard FAIL; 33b (filesystem) and 33c (network) are INFO for unmigrated protocol libraries. New side-effect helpers must route through `NseCapabilityContext` wrappers. See `architecture/nse_capability_inventory.md` for the capability class catalog.
 
+> **Milestone 4 complete (2026-07-06).** Evidence model (`NseEvidenceKind`, `NseEvidenceItem`), extraction (`extract_evidence()`), bridge (`to_report_envelope()`), CLI UX (`print_human_report()`), 40 corpus fixtures, 43 library registry. See [architecture/nse_integration.md](../architecture/nse_integration.md).
+
 ## Recent Bug Fixes (2026-05-28)
 
 | Component | Issue | Fix |
