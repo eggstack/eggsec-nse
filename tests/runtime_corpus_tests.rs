@@ -31,6 +31,8 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::LazyLock;
+use std::time::Instant;
 
 use eggsec_nse::capabilities::NseCapabilityKind;
 use eggsec_nse::limits::NseExecutionLimits;
@@ -48,6 +50,30 @@ use eggsec_nse::NseExecutor;
 /// gets a unique temp dir even when multiple test functions run the same fixture
 /// concurrently (same PID, different threads).
 static INVOCATION_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+/// Cached manifest parsed once for the entire test binary lifetime.
+/// Avoids repeated TOML parsing across test functions.
+static MANIFEST: LazyLock<Manifest> = LazyLock::new(|| load_manifest());
+
+/// Per-fixture timing data collected via thread-local side channel.
+/// `run_fixture_runtime()` pushes timing entries here so the performance
+/// baseline test can report per-fixture durations without changing the
+/// function signature.
+thread_local! {
+    static TIMING_ENTRIES: std::cell::RefCell<Vec<TimingEntry>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[derive(Clone, Debug)]
+struct TimingEntry {
+    fixture_id: String,
+    duration_ms: u64,
+}
+
+/// Return a reference to the cached manifest.
+fn get_manifest() -> &'static Manifest {
+    &MANIFEST
+}
 
 // ---------------------------------------------------------------------------
 // Manifest types — minimal in-test subset of the corpus manifest schema.
@@ -470,8 +496,9 @@ fn run_fixture_runtime(
 
     let diagnostics = resolver.take_diagnostics();
 
-    // Real execution
+    // Real execution — timed for performance baseline
     let script_content = script_content.expect("script_content resolved above");
+    let exec_start = Instant::now();
     let (output, _raw, rule_reports) = match executor.run_script_with_rules(&script_content) {
         Ok(result) => result,
         Err(err) => {
@@ -496,6 +523,18 @@ fn run_fixture_runtime(
             )
         }
     };
+    let exec_duration = exec_start.elapsed();
+    TIMING_ENTRIES.with(|t| {
+        t.borrow_mut().push(TimingEntry {
+            fixture_id: entry.id.clone(),
+            duration_ms: exec_duration.as_millis() as u64,
+        });
+    });
+    tracing::debug!(
+        fixture = %entry.id,
+        duration_ms = exec_duration.as_millis() as u64,
+        "fixture execution completed"
+    );
 
     // Real observed library reports
     let mut library_reports = executor.library_reports();
@@ -557,7 +596,7 @@ fn run_fixture_runtime(
 /// Then assert observed behavior against manifest expectations.
 #[test]
 fn corpus_runtime_all_fixtures_execute_and_assert() {
-    let manifest = load_manifest();
+    let manifest = get_manifest();
     assert!(
         !manifest.fixture.is_empty(),
         "manifest should have fixtures"
@@ -682,7 +721,7 @@ fn corpus_runtime_upstream_fixtures() {
 }
 
 fn run_category_runtime(category: &str) {
-    let manifest = load_manifest();
+    let manifest = get_manifest();
     let entries: Vec<_> = manifest
         .fixture
         .iter()
@@ -720,7 +759,7 @@ fn run_category_runtime(category: &str) {
 /// When harness `allow_missing_runtime_libraries` is true, misses are log-only.
 #[test]
 fn corpus_runtime_observed_libraries_match_expected() {
-    let manifest = load_manifest();
+    let manifest = get_manifest();
     for entry in &manifest.fixture {
         if entry.expected_block || entry.local_service.is_some() {
             continue;
@@ -761,7 +800,7 @@ fn corpus_runtime_observed_libraries_match_expected() {
 /// empty rules are acceptable for those.
 #[test]
 fn corpus_runtime_observed_rules_match_expected() {
-    let manifest = load_manifest();
+    let manifest = get_manifest();
     for entry in &manifest.fixture {
         if entry.expected_block || entry.local_service.is_some() {
             continue;
@@ -810,7 +849,7 @@ fn corpus_runtime_observed_rules_match_expected() {
 /// manifest specifies them.
 #[test]
 fn corpus_runtime_observed_capability_events_match_expected() {
-    let manifest = load_manifest();
+    let manifest = get_manifest();
     let mut denial_fixtures_checked = 0u32;
 
     for entry in &manifest.fixture {
@@ -897,7 +936,7 @@ fn corpus_runtime_observed_capability_events_match_expected() {
 /// specifies events that should produce evidence.
 #[test]
 fn corpus_runtime_observed_evidence_includes_capability_denials() {
-    let manifest = load_manifest();
+    let manifest = get_manifest();
     for entry in &manifest.fixture {
         let has_expected_denials = entry.expected_capability_events.iter().any(|e| !e.allowed);
         if !has_expected_denials || entry.expected_block || entry.local_service.is_some() {
@@ -928,7 +967,7 @@ fn corpus_runtime_observed_evidence_includes_capability_denials() {
 /// and `optional_evidence_kinds` are informational (logged but not asserted).
 #[test]
 fn corpus_runtime_strict_evidence_assertions() {
-    let manifest = load_manifest();
+    let manifest = get_manifest();
     for entry in &manifest.fixture {
         if entry.expected_evidence_kinds.is_empty() && entry.optional_evidence_kinds.is_empty() {
             continue;
@@ -970,7 +1009,7 @@ fn corpus_runtime_strict_evidence_assertions() {
 /// Report JSON round-trip works for runtime-built reports.
 #[test]
 fn corpus_runtime_report_json_roundtrip() {
-    let manifest = load_manifest();
+    let manifest = get_manifest();
     for entry in manifest.fixture.iter().take(5) {
         let (report, _) = run_fixture_runtime(entry);
         let json = serde_json::to_string(&report).expect("report serializes to JSON");
@@ -991,7 +1030,7 @@ fn corpus_runtime_report_json_roundtrip() {
 /// Verify report envelope bridge produces a valid envelope for a runtime report.
 #[test]
 fn corpus_runtime_report_to_envelope_bridge() {
-    let manifest = load_manifest();
+    let manifest = get_manifest();
     let entry = manifest
         .fixture
         .iter()
@@ -1003,6 +1042,90 @@ fn corpus_runtime_report_to_envelope_bridge() {
     assert!(
         !envelope.findings.is_empty(),
         "envelope should have findings"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Performance baseline (diagnostic-only, never fails on timing)
+// ---------------------------------------------------------------------------
+
+/// Measure wall-clock time for the runtime corpus.
+///
+/// This test is diagnostic only — it does NOT fail on performance thresholds.
+/// It logs per-fixture timing, total elapsed, and the top 5 slowest fixtures
+/// via `println!` (visible with `--nocapture`).
+#[test]
+fn corpus_runtime_performance_baseline() {
+    let manifest = get_manifest();
+
+    // Clear timing entries from any prior test runs in this thread
+    TIMING_ENTRIES.with(|t| t.borrow_mut().clear());
+
+    let mut executed = 0u32;
+    let mut skipped = 0u32;
+    let total_start = Instant::now();
+
+    for entry in &manifest.fixture {
+        // Skip fixtures requiring local servers — tested by local_protocol_tests.rs
+        if entry.local_service.is_some() {
+            skipped += 1;
+            continue;
+        }
+
+        let (_report, _evidence) = run_fixture_runtime(entry);
+        executed += 1;
+    }
+
+    let total_elapsed = total_start.elapsed();
+
+    // Collect per-fixture timings from the thread-local side channel
+    let mut timings: Vec<TimingEntry> = TIMING_ENTRIES.with(|t| t.borrow_mut().drain(..).collect());
+    timings.sort_by(|a, b| b.duration_ms.cmp(&a.duration_ms));
+
+    let total_timing_ms: u64 = timings.iter().map(|t| t.duration_ms).sum();
+    let avg_ms = if !timings.is_empty() {
+        total_timing_ms / timings.len() as u64
+    } else {
+        0
+    };
+    let p95_idx = if !timings.is_empty() {
+        (timings.len() as f64 * 0.95) as usize
+    } else {
+        0
+    };
+    let p95_ms = timings.get(p95_idx).map_or(0, |t| t.duration_ms);
+    let max_ms = timings.first().map_or(0, |t| t.duration_ms);
+    let min_ms = timings.last().map_or(0, |t| t.duration_ms);
+
+    println!(
+        "corpus runtime performance baseline: executed={} skipped={} total_elapsed={}ms total_execution={}ms avg={}ms p95={}ms max={}ms min={}ms",
+        executed, skipped,
+        total_elapsed.as_millis(),
+        total_timing_ms,
+        avg_ms, p95_ms, max_ms, min_ms,
+    );
+
+    // Log per-fixture timing
+    for entry in &timings {
+        println!("  fixture {}: {}ms", entry.fixture_id, entry.duration_ms);
+    }
+
+    // Log top 5 slowest
+    println!("top 5 slowest fixtures:");
+    for (rank, entry) in timings.iter().take(5).enumerate() {
+        println!(
+            "  #{} {}: {}ms",
+            rank + 1,
+            entry.fixture_id,
+            entry.duration_ms
+        );
+    }
+
+    // Diagnostic-only: assert we executed something, but never fail on timing
+    assert!(
+        executed >= 30,
+        "expected at least 30 runtime-executed fixtures, got {}",
+        executed
     );
 }
 

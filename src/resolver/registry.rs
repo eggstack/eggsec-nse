@@ -915,8 +915,14 @@ mod tests {
         assert!(wrapped.contains(&"openssl"), "openssl should be Wrapped");
         assert!(wrapped.contains(&"datetime"), "datetime should be Wrapped");
         assert!(wrapped.contains(&"rand"), "rand should be Wrapped");
-        assert!(wrapped.contains(&"unpwdb"), "unpwdb should be Wrapped (Milestone 5 Phase 04)");
-        assert!(wrapped.contains(&"ssl"), "ssl should be Wrapped (Milestone 3 Phase 05)");
+        assert!(
+            wrapped.contains(&"unpwdb"),
+            "unpwdb should be Wrapped (Milestone 5 Phase 04)"
+        );
+        assert!(
+            wrapped.contains(&"ssl"),
+            "ssl should be Wrapped (Milestone 3 Phase 05)"
+        );
     }
 
     #[test]

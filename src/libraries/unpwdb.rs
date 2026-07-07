@@ -86,8 +86,8 @@ pub fn register_unpwdb_library(lua: &Lua, capability_ctx: &NseCapabilityContext)
     let unpwdb = lua.create_table()?;
 
     let ctx = capability_ctx.clone();
-    let usernames_fn =
-        lua.create_function(move |lua, (filename, limit): (Option<String>, Option<usize>)| {
+    let usernames_fn = lua.create_function(
+        move |lua, (filename, limit): (Option<String>, Option<usize>)| {
             let usernames = lua.create_table()?;
 
             let user_list = if let Some(ref f) = filename {
@@ -109,12 +109,13 @@ pub fn register_unpwdb_library(lua: &Lua, capability_ctx: &NseCapabilityContext)
             }
 
             Ok(usernames)
-        })?;
+        },
+    )?;
     unpwdb.set("usernames", usernames_fn)?;
 
     let ctx = capability_ctx.clone();
-    let passwords_fn =
-        lua.create_function(move |lua, (filename, limit): (Option<String>, Option<usize>)| {
+    let passwords_fn = lua.create_function(
+        move |lua, (filename, limit): (Option<String>, Option<usize>)| {
             let passwords = lua.create_table()?;
 
             let pass_list = if let Some(ref f) = filename {
@@ -136,65 +137,65 @@ pub fn register_unpwdb_library(lua: &Lua, capability_ctx: &NseCapabilityContext)
             }
 
             Ok(passwords)
-        })?;
+        },
+    )?;
     unpwdb.set("passwords", passwords_fn)?;
 
     let ctx = capability_ctx.clone();
-    let combined_fn =
-        lua.create_function(
-            move |lua,
-                  (username_file, password_file, limit): (
-                Option<String>,
-                Option<String>,
-                Option<usize>,
-            )| {
-                let result = lua.create_table()?;
+    let combined_fn = lua.create_function(
+        move |lua,
+              (username_file, password_file, limit): (
+            Option<String>,
+            Option<String>,
+            Option<usize>,
+        )| {
+            let result = lua.create_table()?;
 
-                let users = if let Some(ref f) = username_file {
-                    match wrappers::nse_fs_read_to_string(&ctx, f) {
-                        Ok(content) => content
-                            .lines()
-                            .map(|s| s.to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect::<Vec<_>>(),
-                        Err(_) => get_default_usernames(),
-                    }
-                } else {
-                    get_default_usernames()
-                };
-
-                let passes = if let Some(ref f) = password_file {
-                    match wrappers::nse_fs_read_to_string(&ctx, f) {
-                        Ok(content) => content
-                            .lines()
-                            .map(|s| s.to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect::<Vec<_>>(),
-                        Err(_) => get_default_passwords(),
-                    }
-                } else {
-                    get_default_passwords()
-                };
-
-                let max = limit.unwrap_or(usize::MAX);
-                let mut count = 0;
-
-                for user in &users {
-                    for pass in &passes {
-                        if count >= max {
-                            break;
-                        }
-                        let pair = lua.create_table()?;
-                        pair.set("username", user.clone())?;
-                        pair.set("password", pass.clone())?;
-                        result.set(count + 1, pair)?;
-                        count += 1;
-                    }
+            let users = if let Some(ref f) = username_file {
+                match wrappers::nse_fs_read_to_string(&ctx, f) {
+                    Ok(content) => content
+                        .lines()
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>(),
+                    Err(_) => get_default_usernames(),
                 }
+            } else {
+                get_default_usernames()
+            };
 
-                Ok(result)
-            },
-        )?;
+            let passes = if let Some(ref f) = password_file {
+                match wrappers::nse_fs_read_to_string(&ctx, f) {
+                    Ok(content) => content
+                        .lines()
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect::<Vec<_>>(),
+                    Err(_) => get_default_passwords(),
+                }
+            } else {
+                get_default_passwords()
+            };
+
+            let max = limit.unwrap_or(usize::MAX);
+            let mut count = 0;
+
+            for user in &users {
+                for pass in &passes {
+                    if count >= max {
+                        break;
+                    }
+                    let pair = lua.create_table()?;
+                    pair.set("username", user.clone())?;
+                    pair.set("password", pass.clone())?;
+                    result.set(count + 1, pair)?;
+                    count += 1;
+                }
+            }
+
+            Ok(result)
+        },
+    )?;
     unpwdb.set("combined", combined_fn)?;
 
     let expand_password_fn = lua.create_function(|_lua, password: String| {

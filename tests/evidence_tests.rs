@@ -1,6 +1,10 @@
 #![cfg(feature = "nse")]
 
+use eggsec_core::types::Severity;
+use eggsec_nse::capabilities::NseCapabilityEvent;
+use eggsec_nse::capabilities::NseCapabilityKind;
 use eggsec_nse::report::*;
+use eggsec_output::envelope::EvidenceKind as OutputEvidenceKind;
 
 fn empty_compatibility() -> NseCompatibilitySummary {
     NseCompatibilitySummary {
@@ -360,4 +364,334 @@ fn evidence_confidence_values() {
             ev.confidence
         );
     }
+}
+
+#[test]
+fn bridge_compatible_run_envelope() {
+    let report = NseRunReport::new("10.0.0.1", "ssl-cert").compute_compatibility();
+
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Compatible
+    );
+    assert_eq!(report.compatibility.fidelity, NseRunFidelity::Full);
+
+    let envelope = eggsec_nse::bridge::to_report_envelope(&report);
+
+    // Only the metadata finding exists (no evidence findings)
+    assert_eq!(envelope.findings.len(), 1);
+    let metadata = &envelope.findings[0];
+    assert_eq!(metadata.id, "metadata-nse");
+    assert_eq!(metadata.severity, Severity::Info);
+    assert!(metadata.description.contains("compatible"));
+
+    // No CapabilityDenial findings
+    let denial_findings: Vec<_> = envelope
+        .findings
+        .iter()
+        .filter(|f| f.category.contains("capability-denial"))
+        .collect();
+    assert!(denial_findings.is_empty());
+}
+
+#[test]
+fn bridge_partial_run_envelope() {
+    let summaries = vec![NseCapabilityEventSummary {
+        kind: "process_exec".to_string(),
+        operation: "io.popen".to_string(),
+        target: Some("ls".to_string()),
+        allowed: false,
+        reason: Some("denied by AgentSafe policy".to_string()),
+    }];
+
+    let events = vec![NseCapabilityEvent {
+        kind: NseCapabilityKind::ProcessExec,
+        operation: "io.popen".to_string(),
+        target: Some("ls".to_string()),
+        allowed: false,
+        reason: Some("denied by AgentSafe policy".to_string()),
+        bytes: None,
+    }];
+
+    let evidence = extract_evidence(
+        "10.0.0.1",
+        "test_script",
+        &summaries,
+        &empty_compatibility(),
+        &[],
+        &empty_output(),
+    );
+
+    let report = NseRunReport::new("10.0.0.1", "test_script")
+        .with_evidence(evidence)
+        .with_capability_events(events)
+        .compute_compatibility();
+
+    assert_eq!(
+        report.compatibility.status,
+        NseRunCompatibilityStatus::Partial
+    );
+
+    let envelope = eggsec_nse::bridge::to_report_envelope(&report);
+
+    // Should have 1 capability denial finding + 1 metadata finding
+    assert_eq!(envelope.findings.len(), 2);
+
+    let denial_findings: Vec<_> = envelope
+        .findings
+        .iter()
+        .filter(|f| f.category.contains("capability-denial"))
+        .collect();
+    assert_eq!(denial_findings.len(), 1);
+    assert_eq!(denial_findings[0].severity, Severity::Info);
+
+    // Metadata should reflect partial status
+    let metadata = &envelope.findings[1];
+    assert!(metadata.description.contains("partial"));
+}
+
+#[test]
+fn bridge_capability_denial_evidence_severity() {
+    let summaries = vec![
+        NseCapabilityEventSummary {
+            kind: "process_exec".to_string(),
+            operation: "io.popen".to_string(),
+            target: Some("ls".to_string()),
+            allowed: false,
+            reason: Some("denied by policy".to_string()),
+        },
+        NseCapabilityEventSummary {
+            kind: "filesystem_write".to_string(),
+            operation: "io.write".to_string(),
+            target: Some("/tmp/test".to_string()),
+            allowed: false,
+            reason: Some("denied by policy".to_string()),
+        },
+    ];
+
+    let events = vec![
+        NseCapabilityEvent {
+            kind: NseCapabilityKind::ProcessExec,
+            operation: "io.popen".to_string(),
+            target: Some("ls".to_string()),
+            allowed: false,
+            reason: Some("denied by policy".to_string()),
+            bytes: None,
+        },
+        NseCapabilityEvent {
+            kind: NseCapabilityKind::FilesystemWrite,
+            operation: "io.write".to_string(),
+            target: Some("/tmp/test".to_string()),
+            allowed: false,
+            reason: Some("denied by policy".to_string()),
+            bytes: None,
+        },
+    ];
+
+    let evidence = extract_evidence(
+        "10.0.0.1",
+        "test_script",
+        &summaries,
+        &empty_compatibility(),
+        &[],
+        &empty_output(),
+    );
+
+    let report = NseRunReport::new("10.0.0.1", "test_script")
+        .with_evidence(evidence)
+        .with_capability_events(events)
+        .compute_compatibility();
+
+    let envelope = eggsec_nse::bridge::to_report_envelope(&report);
+
+    // All CapabilityDenial findings must be Severity::Info
+    for finding in &envelope.findings {
+        if finding.category.contains("capability-denial") {
+            assert_eq!(
+                finding.severity,
+                Severity::Info,
+                "CapabilityDenial finding '{}' must be Info, not {:?}",
+                finding.id,
+                finding.severity
+            );
+        }
+    }
+}
+
+#[test]
+fn bridge_rule_error_evidence() {
+    let rules = vec![NseRuleEvaluationReport {
+        kind: "portrule".to_string(),
+        evaluated: false,
+        matched: false,
+        exactness: "exact".to_string(),
+        error: Some("lua runtime error: attempt to call nil".to_string()),
+        summary: "rule error: lua runtime error".to_string(),
+        unsupported: None,
+        host_context_source: None,
+        port_context_source: None,
+        service_context_available: None,
+        fidelity_reason: None,
+    }];
+
+    let evidence = extract_evidence(
+        "10.0.0.1",
+        "test_script",
+        &[],
+        &empty_compatibility(),
+        &rules,
+        &empty_output(),
+    );
+
+    let report = NseRunReport::new("10.0.0.1", "test_script")
+        .with_evidence(evidence)
+        .with_rules(rules)
+        .compute_compatibility();
+
+    let envelope = eggsec_nse::bridge::to_report_envelope(&report);
+
+    // Should have 1 rule-error finding + 1 metadata finding
+    let rule_error_findings: Vec<_> = envelope
+        .findings
+        .iter()
+        .filter(|f| f.category.contains("compatibility-warning"))
+        .collect();
+    assert_eq!(rule_error_findings.len(), 1);
+
+    let finding = &rule_error_findings[0];
+    assert_eq!(finding.severity, Severity::Info);
+    assert!(finding.description.contains("lua runtime error"));
+
+    // The finding should have an evidence item of kind LogLine
+    assert!(!finding.evidence.is_empty());
+    assert_eq!(finding.evidence[0].kind, OutputEvidenceKind::LogLine);
+}
+
+#[test]
+fn bridge_raw_output_evidence() {
+    let report = NseRunReport::new("10.0.0.1", "http-server-header")
+        .with_output("HTTP/1.1 200 OK\nServer: nginx/1.18.0")
+        .with_evidence(vec![NseEvidenceItem {
+            id: "nse-ev-0".to_string(),
+            kind: NseEvidenceKind::ScriptOutput,
+            title: "Script output captured".to_string(),
+            summary: "2 lines of output".to_string(),
+            target: "10.0.0.1".to_string(),
+            port: None,
+            service: None,
+            confidence: "confirmed".to_string(),
+            source: "http-server-header".to_string(),
+            raw_excerpt: Some("HTTP/1.1 200 OK\nServer: nginx/1.18.0".to_string()),
+            references: Vec::new(),
+            tags: vec!["output".to_string()],
+        }])
+        .compute_compatibility();
+
+    let envelope = eggsec_nse::bridge::to_report_envelope(&report);
+
+    let output_findings: Vec<_> = envelope
+        .findings
+        .iter()
+        .filter(|f| f.category.contains("script-output"))
+        .collect();
+    assert_eq!(output_findings.len(), 1);
+
+    let finding = &output_findings[0];
+    assert_eq!(finding.severity, Severity::Info);
+
+    // Evidence item should preserve raw excerpt
+    assert!(!finding.evidence.is_empty());
+    let ev = &finding.evidence[0];
+    assert_eq!(ev.kind, OutputEvidenceKind::Generic);
+}
+
+#[test]
+fn bridge_weak_evidence_not_high_severity() {
+    let summaries = vec![NseCapabilityEventSummary {
+        kind: "process_exec".to_string(),
+        operation: "io.popen".to_string(),
+        target: Some("ls".to_string()),
+        allowed: false,
+        reason: Some("denied".to_string()),
+    }];
+
+    let events = vec![NseCapabilityEvent {
+        kind: NseCapabilityKind::ProcessExec,
+        operation: "io.popen".to_string(),
+        target: Some("ls".to_string()),
+        allowed: false,
+        reason: Some("denied".to_string()),
+        bytes: None,
+    }];
+
+    let rules = vec![NseRuleEvaluationReport {
+        kind: "portrule".to_string(),
+        evaluated: false,
+        matched: false,
+        exactness: "exact".to_string(),
+        error: Some("timeout".to_string()),
+        summary: "rule error: timeout".to_string(),
+        unsupported: None,
+        host_context_source: None,
+        port_context_source: None,
+        service_context_available: None,
+        fidelity_reason: None,
+    }];
+
+    let output = NseOutputSummary {
+        has_output: true,
+        content: "some output".to_string(),
+        line_count: 1,
+        truncated: false,
+    };
+
+    let compat = NseCompatibilitySummary {
+        status: NseRunCompatibilityStatus::Partial,
+        fidelity: NseRunFidelity::Minimal,
+        unsupported_features: vec!["nmap.socket".to_string()],
+        approximations: vec!["portrule: synthetic context".to_string()],
+    };
+
+    let evidence = extract_evidence(
+        "10.0.0.1",
+        "test_script",
+        &summaries,
+        &compat,
+        &rules,
+        &output,
+    );
+
+    let report = NseRunReport::new("10.0.0.1", "test_script")
+        .with_evidence(evidence)
+        .with_capability_events(events)
+        .with_rules(rules)
+        .compute_compatibility();
+
+    let envelope = eggsec_nse::bridge::to_report_envelope(&report);
+
+    // No finding should have severity > Info except VulnerabilitySignal and Misconfiguration
+    // Since we don't include VulnerabilitySignal or Misconfiguration evidence, all should be Info
+    for finding in &envelope.findings {
+        assert!(
+            finding.severity == Severity::Info,
+            "Finding '{}' has unexpected severity {:?} (should be Info for weak evidence)",
+            finding.id,
+            finding.severity
+        );
+    }
+}
+
+#[test]
+fn bridge_envelope_metadata_fields() {
+    let report = NseRunReport::new("10.0.0.1", "ssl-cert").compute_compatibility();
+
+    let envelope = eggsec_nse::bridge::to_report_envelope(&report);
+
+    assert_eq!(envelope.domain_id.as_deref(), Some("nse"));
+    assert_eq!(envelope.target.as_deref(), Some("10.0.0.1"));
+
+    let tool = envelope.tool_metadata.as_ref().unwrap();
+    assert_eq!(tool.tool_name, "eggsec-nse");
+    assert!(tool.tool_version.is_none());
+    assert!(tool.eggsec_version.is_none());
 }

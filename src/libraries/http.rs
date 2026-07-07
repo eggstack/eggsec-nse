@@ -291,14 +291,11 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "get",
         lua.create_function(
             move |lua, (host, port, path, options): (String, u16, String, Option<Table>)| {
-                let decision =
-                    wrappers::check_network_tcp(&ctx, &host, "http.get");
+                let decision = wrappers::check_network_tcp(&ctx, &host, "http.get");
                 if !decision.is_allowed() {
                     return denied_response(
                         lua,
-                        decision
-                            .deny_reason()
-                            .unwrap_or("network access denied"),
+                        decision.deny_reason().unwrap_or("network access denied"),
                     );
                 }
 
@@ -333,25 +330,21 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 String,
                 Option<Table>,
             )| {
-                let decision =
-                    wrappers::check_network_tcp(&ctx, &host, "http.post");
+                let decision = wrappers::check_network_tcp(&ctx, &host, "http.post");
                 if !decision.is_allowed() {
                     return denied_response(
                         lua,
-                        decision
-                            .deny_reason()
-                            .unwrap_or("network access denied"),
+                        decision.deny_reason().unwrap_or("network access denied"),
                     );
                 }
 
                 let url = build_url(&host, port, &path);
 
                 let client = if let Some(opts) = options.as_ref() {
-                    match opts.get::<u64>("timeout") { Ok(timeout) => {
-                        make_client_with_tls(timeout, None, None)
-                    } _ => {
-                        get_client(&url).clone()
-                    }}
+                    match opts.get::<u64>("timeout") {
+                        Ok(timeout) => make_client_with_tls(timeout, None, None),
+                        _ => get_client(&url).clone(),
+                    }
                 } else {
                     get_client(&url).clone()
                 };
@@ -376,25 +369,21 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 String,
                 Option<Table>,
             )| {
-                let decision =
-                    wrappers::check_network_tcp(&ctx, &host, "http.put");
+                let decision = wrappers::check_network_tcp(&ctx, &host, "http.put");
                 if !decision.is_allowed() {
                     return denied_response(
                         lua,
-                        decision
-                            .deny_reason()
-                            .unwrap_or("network access denied"),
+                        decision.deny_reason().unwrap_or("network access denied"),
                     );
                 }
 
                 let url = build_url(&host, port, &path);
 
                 let client = if let Some(opts) = options.as_ref() {
-                    match opts.get::<u64>("timeout") { Ok(timeout) => {
-                        make_client_with_tls(timeout, None, None)
-                    } _ => {
-                        get_client(&url).clone()
-                    }}
+                    match opts.get::<u64>("timeout") {
+                        Ok(timeout) => make_client_with_tls(timeout, None, None),
+                        _ => get_client(&url).clone(),
+                    }
                 } else {
                     get_client(&url).clone()
                 };
@@ -412,14 +401,11 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "delete",
         lua.create_function(
             move |lua, (host, port, path, _options): (String, u16, String, Option<Table>)| {
-                let decision =
-                    wrappers::check_network_tcp(&ctx, &host, "http.delete");
+                let decision = wrappers::check_network_tcp(&ctx, &host, "http.delete");
                 if !decision.is_allowed() {
                     return denied_response(
                         lua,
-                        decision
-                            .deny_reason()
-                            .unwrap_or("network access denied"),
+                        decision.deny_reason().unwrap_or("network access denied"),
                     );
                 }
 
@@ -438,14 +424,11 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     http.set(
         "head",
         lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
-            let decision =
-                wrappers::check_network_tcp(&ctx, &host, "http.head");
+            let decision = wrappers::check_network_tcp(&ctx, &host, "http.head");
             if !decision.is_allowed() {
                 return denied_response(
                     lua,
-                    decision
-                        .deny_reason()
-                        .unwrap_or("network access denied"),
+                    decision.deny_reason().unwrap_or("network access denied"),
                 );
             }
 
@@ -480,14 +463,11 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     http.set(
         "options",
         lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
-            let decision =
-                wrappers::check_network_tcp(&ctx, &host, "http.options");
+            let decision = wrappers::check_network_tcp(&ctx, &host, "http.options");
             if !decision.is_allowed() {
                 return denied_response(
                     lua,
-                    decision
-                        .deny_reason()
-                        .unwrap_or("network access denied"),
+                    decision.deny_reason().unwrap_or("network access denied"),
                 );
             }
 
@@ -513,14 +493,11 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 String,
                 Option<Table>,
             )| {
-                let decision =
-                    wrappers::check_network_tcp(&ctx, &host, "http.request");
+                let decision = wrappers::check_network_tcp(&ctx, &host, "http.request");
                 if !decision.is_allowed() {
                     return denied_response(
                         lua,
-                        decision
-                            .deny_reason()
-                            .unwrap_or("network access denied"),
+                        decision.deny_reason().unwrap_or("network access denied"),
                     );
                 }
 
@@ -528,8 +505,7 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
                 let client = get_client(&url).clone();
 
-                let mut req =
-                    client.request(method.parse().unwrap_or(reqwest::Method::GET), &url);
+                let mut req = client.request(method.parse().unwrap_or(reqwest::Method::GET), &url);
 
                 if let Some(opts) = options {
                     if let Ok(body) = opts.get::<String>("body") {
@@ -687,15 +663,19 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     http.set(
         "post_host",
         lua.create_function(
-            move |lua, (host, port, path, data, options): (String, u16, String, String, Option<Table>)| {
-                let decision =
-                    wrappers::check_network_tcp(&ctx, &host, "http.post_host");
+            move |lua,
+                  (host, port, path, data, options): (
+                String,
+                u16,
+                String,
+                String,
+                Option<Table>,
+            )| {
+                let decision = wrappers::check_network_tcp(&ctx, &host, "http.post_host");
                 if !decision.is_allowed() {
                     return denied_response(
                         lua,
-                        decision
-                            .deny_reason()
-                            .unwrap_or("network access denied"),
+                        decision.deny_reason().unwrap_or("network access denied"),
                     );
                 }
 
@@ -730,15 +710,19 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     http.set(
         "put_data",
         lua.create_function(
-            move |lua, (host, port, path, data, options): (String, u16, String, String, Option<Table>)| {
-                let decision =
-                    wrappers::check_network_tcp(&ctx, &host, "http.put_data");
+            move |lua,
+                  (host, port, path, data, options): (
+                String,
+                u16,
+                String,
+                String,
+                Option<Table>,
+            )| {
+                let decision = wrappers::check_network_tcp(&ctx, &host, "http.put_data");
                 if !decision.is_allowed() {
                     return denied_response(
                         lua,
-                        decision
-                            .deny_reason()
-                            .unwrap_or("network access denied"),
+                        decision.deny_reason().unwrap_or("network access denied"),
                     );
                 }
 
@@ -849,14 +833,11 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     http.set(
         "async_get",
         lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
-            let decision =
-                wrappers::check_network_tcp(&ctx, &host, "http.async_get");
+            let decision = wrappers::check_network_tcp(&ctx, &host, "http.async_get");
             if !decision.is_allowed() {
                 return denied_response(
                     lua,
-                    decision
-                        .deny_reason()
-                        .unwrap_or("network access denied"),
+                    decision.deny_reason().unwrap_or("network access denied"),
                 );
             }
 
@@ -880,14 +861,11 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "async_post",
         lua.create_function(
             move |lua, (host, port, path, data): (String, u16, String, String)| {
-                let decision =
-                    wrappers::check_network_tcp(&ctx, &host, "http.async_post");
+                let decision = wrappers::check_network_tcp(&ctx, &host, "http.async_post");
                 if !decision.is_allowed() {
                     return denied_response(
                         lua,
-                        decision
-                            .deny_reason()
-                            .unwrap_or("network access denied"),
+                        decision.deny_reason().unwrap_or("network access denied"),
                     );
                 }
 
@@ -911,14 +889,11 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "async_request",
         lua.create_function(
             move |lua, (method, host, port, path): (String, String, u16, String)| {
-                let decision =
-                    wrappers::check_network_tcp(&ctx, &host, "http.async_request");
+                let decision = wrappers::check_network_tcp(&ctx, &host, "http.async_request");
                 if !decision.is_allowed() {
                     return denied_response(
                         lua,
-                        decision
-                            .deny_reason()
-                            .unwrap_or("network access denied"),
+                        decision.deny_reason().unwrap_or("network access denied"),
                     );
                 }
 
