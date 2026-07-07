@@ -198,7 +198,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         sandbox_side_effects: &[NseSandboxSideEffect::NetworkAccess],
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::HardFail,
-        notes: "HTTP client library. Supports GET/POST, cookies, authentication, SSL/TLS.",
+        notes: "HTTP client library. Supports GET/POST, cookies, authentication, SSL/TLS. Network checks via NseCapabilityContext; reqwest performs actual I/O.",
         enforcement_status: EnforcementStatus::PartiallyWrapped,
     },
     NseLibraryDescriptor {
@@ -216,8 +216,8 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         sandbox_side_effects: &[NseSandboxSideEffect::NetworkAccess],
         optional_deps: &["openssl"],
         fallback_behavior: NseFallbackBehavior::HardFail,
-        notes: "TLS/SSL handshake and certificate operations. Wraps OpenSSL via Lua bindings.",
-        enforcement_status: EnforcementStatus::Deferred,
+        notes: "TLS/SSL handshake and certificate operations. Wraps OpenSSL via Lua bindings. Wrapped since Milestone 3 Phase 05.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "ssh",
@@ -327,8 +327,8 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         sandbox_side_effects: &[NseSandboxSideEffect::FileSystemRead],
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
-        notes: "Username/password database reader. Iterates credential lists for brute-force.",
-        enforcement_status: EnforcementStatus::Deferred,
+        notes: "Username/password database reader. Iterates credential lists for brute-force. Filesystem reads routed through NseCapabilityContext.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "brute",
@@ -915,6 +915,8 @@ mod tests {
         assert!(wrapped.contains(&"openssl"), "openssl should be Wrapped");
         assert!(wrapped.contains(&"datetime"), "datetime should be Wrapped");
         assert!(wrapped.contains(&"rand"), "rand should be Wrapped");
+        assert!(wrapped.contains(&"unpwdb"), "unpwdb should be Wrapped (Milestone 5 Phase 04)");
+        assert!(wrapped.contains(&"ssl"), "ssl should be Wrapped (Milestone 3 Phase 05)");
     }
 
     #[test]
@@ -942,8 +944,6 @@ mod tests {
             .map(|l| l.name)
             .collect();
         assert!(deferred.contains(&"brute"), "brute should be Deferred");
-        assert!(deferred.contains(&"unpwdb"), "unpwdb should be Deferred");
-        assert!(deferred.contains(&"ssl"), "ssl should be Deferred");
         assert!(deferred.contains(&"ssh"), "ssh should be Deferred");
     }
 

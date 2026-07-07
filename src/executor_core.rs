@@ -896,7 +896,7 @@ impl ExecutorCore {
     fn register_libraries(&self) -> LuaResult<()> {
         crate::libraries::stdnse::register_stdlib(&self.lua)?;
         crate::libraries::nmap::register_nmap_library(&self.lua, &self.capability_context)?;
-        crate::libraries::http::register_http_library(&self.lua)?;
+        crate::libraries::http::register_http_library(&self.lua, &self.capability_context)?;
         crate::libraries::comm::register_comm_library(&self.lua, &self.capability_context)?;
         crate::libraries::sslcert::register_sslcert_library(&self.lua, &self.capability_context)?;
         crate::libraries::tls::register_tls_library(&self.lua, &self.capability_context)?;
@@ -974,7 +974,7 @@ impl ExecutorCore {
         crate::libraries::bin::register_bin_library(&self.lua)?;
         crate::libraries::bit::register_bit_library(&self.lua)?;
         crate::libraries::vulns::register_vulns_library(&self.lua)?;
-        crate::libraries::unpwdb::register_unpwdb_library(&self.lua)?;
+        crate::libraries::unpwdb::register_unpwdb_library(&self.lua, &self.capability_context)?;
         crate::libraries::brute::register_brute_library(&self.lua)?;
         crate::libraries::datafiles::register_datafiles_library(&self.lua)?;
         crate::libraries::json::register_json_library(&self.lua)?;

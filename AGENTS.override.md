@@ -30,6 +30,7 @@ The NSE (Nmap Scripting Engine) module (`crates/eggsec-nse/`) provides Lua VM in
 > Architecture guards 42/43/44 enforce the separation: the runtime test binary must exist, must use `NseExecutor::with_profile`, and the static harness must not call `run_script_with_rules`. See the [Milestone 4 Closure Verification](../../architecture/nse_integration.md#milestone-4-closure-verification) for the full verification table.
 
 > **Milestone 5 Phase 03 (2026-07-06, local protocol fixtures).** Local TCP/HTTP/UDP fixture harness (`local_fixtures.rs`), 5 new `.nse` scripts (`tcp_connect_echo`, `tcp_connect_denied`, `http_get_local`, `http_post_local`, `udp_echo`), 16 runtime tests (`local_protocol_tests.rs`). Manifest `local_service` metadata + runtime harness skip for all 7 iteration sites. Architecture guard Check 47. Known limitation: HTTP library (reqwest) bypasses `NseCapabilityContext` — no TCP denial events under AgentSafe. 452 NSE tests pass (1 ignored), 47 architecture guards pass.
+> **Milestone 5 Phase 04 (2026-07-06, deferred library migration).** `unpwdb.rs` migrated from Deferred to Wrapped (FS reads through `nse_fs_read_to_string`). `http.rs` migrated to PartiallyWrapped (advisory network checks via `check_network_tcp`). `ssl` registry entry corrected to Wrapped (stale since Milestone 3 Phase 05). Registry tests updated. 182 lib tests, 43 corpus tests, 47 architecture guards pass.
 
 ## Recent Bug Fixes (2026-05-28)
 

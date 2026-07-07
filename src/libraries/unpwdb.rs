@@ -6,6 +6,9 @@
 use mlua::{Lua, Result as LuaResult};
 use std::sync::Mutex;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 static USERNAMES: std::sync::LazyLock<Mutex<Vec<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(get_default_usernames()));
 static PASSWORDS: std::sync::LazyLock<Mutex<Vec<String>>> =
@@ -78,25 +81,24 @@ fn get_default_passwords() -> Vec<String> {
     ]
 }
 
-pub fn register_unpwdb_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_unpwdb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let unpwdb = lua.create_table()?;
 
+    let ctx = capability_ctx.clone();
     let usernames_fn =
-        lua.create_function(|lua, (filename, limit): (Option<String>, Option<usize>)| {
+        lua.create_function(move |lua, (filename, limit): (Option<String>, Option<usize>)| {
             let usernames = lua.create_table()?;
 
             let user_list = if let Some(ref f) = filename {
-                std::fs::read_to_string(f)
-                    .ok()
-                    .map(|content| {
-                        content
-                            .lines()
-                            .map(|s| s.to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_else(get_default_usernames)
+                match wrappers::nse_fs_read_to_string(&ctx, f) {
+                    Ok(content) => content
+                        .lines()
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                    Err(_) => get_default_usernames(),
+                }
             } else {
                 get_default_usernames()
             };
@@ -110,21 +112,20 @@ pub fn register_unpwdb_library(lua: &Lua) -> LuaResult<()> {
         })?;
     unpwdb.set("usernames", usernames_fn)?;
 
+    let ctx = capability_ctx.clone();
     let passwords_fn =
-        lua.create_function(|lua, (filename, limit): (Option<String>, Option<usize>)| {
+        lua.create_function(move |lua, (filename, limit): (Option<String>, Option<usize>)| {
             let passwords = lua.create_table()?;
 
             let pass_list = if let Some(ref f) = filename {
-                std::fs::read_to_string(f)
-                    .ok()
-                    .map(|content| {
-                        content
-                            .lines()
-                            .map(|s| s.to_string())
-                            .filter(|s| !s.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_else(get_default_passwords)
+                match wrappers::nse_fs_read_to_string(&ctx, f) {
+                    Ok(content) => content
+                        .lines()
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect(),
+                    Err(_) => get_default_passwords(),
+                }
             } else {
                 get_default_passwords()
             };
@@ -138,10 +139,11 @@ pub fn register_unpwdb_library(lua: &Lua) -> LuaResult<()> {
         })?;
     unpwdb.set("passwords", passwords_fn)?;
 
+    let ctx = capability_ctx.clone();
     let combined_fn =
         lua.create_function(
-            |lua,
-             (username_file, password_file, limit): (
+            move |lua,
+                  (username_file, password_file, limit): (
                 Option<String>,
                 Option<String>,
                 Option<usize>,
@@ -149,29 +151,27 @@ pub fn register_unpwdb_library(lua: &Lua) -> LuaResult<()> {
                 let result = lua.create_table()?;
 
                 let users = if let Some(ref f) = username_file {
-                    std::fs::read_to_string(f)
-                        .ok()
-                        .map(|c| {
-                            c.lines()
-                                .map(|s| s.to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_else(get_default_usernames)
+                    match wrappers::nse_fs_read_to_string(&ctx, f) {
+                        Ok(content) => content
+                            .lines()
+                            .map(|s| s.to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>(),
+                        Err(_) => get_default_usernames(),
+                    }
                 } else {
                     get_default_usernames()
                 };
 
                 let passes = if let Some(ref f) = password_file {
-                    std::fs::read_to_string(f)
-                        .ok()
-                        .map(|c| {
-                            c.lines()
-                                .map(|s| s.to_string())
-                                .filter(|s| !s.is_empty())
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_else(get_default_passwords)
+                    match wrappers::nse_fs_read_to_string(&ctx, f) {
+                        Ok(content) => content
+                            .lines()
+                            .map(|s| s.to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>(),
+                        Err(_) => get_default_passwords(),
+                    }
                 } else {
                     get_default_passwords()
                 };
@@ -220,17 +220,17 @@ pub fn register_unpwdb_library(lua: &Lua) -> LuaResult<()> {
     })?;
     unpwdb.set("expand_password", expand_password_fn)?;
 
-    let username_iterator_fn = lua.create_function(|lua, filename: Option<String>| {
+    let ctx = capability_ctx.clone();
+    let username_iterator_fn = lua.create_function(move |lua, filename: Option<String>| {
         let users = if let Some(ref f) = filename {
-            std::fs::read_to_string(f)
-                .ok()
-                .map(|c| {
-                    c.lines()
-                        .map(|s| s.to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_else(get_default_usernames)
+            match wrappers::nse_fs_read_to_string(&ctx, f) {
+                Ok(content) => content
+                    .lines()
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>(),
+                Err(_) => get_default_usernames(),
+            }
         } else {
             get_default_usernames()
         };
@@ -244,17 +244,17 @@ pub fn register_unpwdb_library(lua: &Lua) -> LuaResult<()> {
     })?;
     unpwdb.set("username_iterator", username_iterator_fn)?;
 
-    let password_iterator_fn = lua.create_function(|lua, filename: Option<String>| {
+    let ctx = capability_ctx.clone();
+    let password_iterator_fn = lua.create_function(move |lua, filename: Option<String>| {
         let passes = if let Some(ref f) = filename {
-            std::fs::read_to_string(f)
-                .ok()
-                .map(|c| {
-                    c.lines()
-                        .map(|s| s.to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_else(get_default_passwords)
+            match wrappers::nse_fs_read_to_string(&ctx, f) {
+                Ok(content) => content
+                    .lines()
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>(),
+                Err(_) => get_default_passwords(),
+            }
         } else {
             get_default_passwords()
         };
