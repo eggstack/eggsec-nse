@@ -33,6 +33,8 @@ The NSE (Nmap Scripting Engine) module (`crates/eggsec-nse/`) provides Lua VM in
 > **Milestone 5 Phase 04 (2026-07-06, deferred library migration).** `unpwdb.rs` migrated from Deferred to Wrapped (FS reads through `nse_fs_read_to_string`). `http.rs` migrated to Wrapped (all network operations gated via `check_network_tcp()`; denied requests never reach reqwest). `ssl` registry entry corrected to Wrapped (stale since Milestone 3 Phase 05). Registry tests updated. 182 lib tests, 43 corpus tests, 47 architecture guards pass.
 > **Milestone 6 Phase 01 (2026-07-06, HTTP capability bypass and runtime strictness).** HTTP library `http.rs` promoted from `PartiallyWrapped` to `Wrapped` — all network operations gated via `check_network_tcp()`; denied requests never reach reqwest. Local HTTP fixtures gained atomic hit counters proving denied requests don't reach server. AgentSafe HTTP tests upgraded from permissive to strict denial assertions. CiSafe HTTP test added. Runtime library assertions tightened from lenient to hard failures. Architecture guards 48-50 added. 494 NSE tests pass, 50 architecture guards pass.
 
+> **Milestone 6 Phase 02 (2026-07-07, HTTP method coverage and guard hardening).** All HTTP methods (GET/POST/PUT/DELETE/HEAD/OPTIONS/request) now have ManualPermissive success tests and AgentSafe/CiSafe zero-hit denial tests. `maybe_denied_response()` helper centralizes HTTP policy checks. HttpServer tracks method/path. Architecture guards 48b-48d added. All tests pass, architecture guards pass.
+
 ## Recent Bug Fixes (2026-05-28)
 
 | Component | Issue | Fix |

@@ -198,7 +198,7 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         sandbox_side_effects: &[NseSandboxSideEffect::NetworkAccess],
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::HardFail,
-        notes: "HTTP client library. Supports GET/POST, cookies, authentication, SSL/TLS. All network operations gated via check_network_tcp(); denied requests never reach reqwest.",
+        notes: "HTTP client library. Supports GET/POST/PUT/DELETE/HEAD/OPTIONS/request, cookies, authentication, SSL/TLS. All network operations gated via check_network_tcp() (or maybe_denied_response helper); denied requests never reach reqwest.",
         enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {

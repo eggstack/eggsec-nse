@@ -418,6 +418,405 @@ fn local_http_post_success() {
     );
 }
 
+/// HTTP PUT against local HTTP server.
+#[test]
+fn local_http_put_success() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_manual_permissive_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_put_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    assert!(
+        report.output.content.contains("PUT status=200"),
+        "output should contain PUT status: {}",
+        report.output.content,
+    );
+    assert!(
+        matches!(
+            report.compatibility.status,
+            eggsec_nse::report::NseRunCompatibilityStatus::Compatible
+                | eggsec_nse::report::NseRunCompatibilityStatus::CompatibleWithWarnings
+        ),
+        "HTTP PUT should be compatible: status={:?}, errors={:?}",
+        report.compatibility.status,
+        report.errors,
+    );
+    assert!(
+        server.hits() > 0,
+        "ManualPermissive HTTP PUT must reach the server"
+    );
+}
+
+/// HTTP DELETE against local HTTP server.
+#[test]
+fn local_http_delete_success() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_manual_permissive_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_delete_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    assert!(
+        report.output.content.contains("DELETE status=200"),
+        "output should contain DELETE status: {}",
+        report.output.content,
+    );
+    assert!(
+        matches!(
+            report.compatibility.status,
+            eggsec_nse::report::NseRunCompatibilityStatus::Compatible
+                | eggsec_nse::report::NseRunCompatibilityStatus::CompatibleWithWarnings
+        ),
+        "HTTP DELETE should be compatible: status={:?}, errors={:?}",
+        report.compatibility.status,
+        report.errors,
+    );
+    assert!(
+        server.hits() > 0,
+        "ManualPermissive HTTP DELETE must reach the server"
+    );
+}
+
+/// HTTP HEAD against local HTTP server.
+#[test]
+fn local_http_head_success() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_manual_permissive_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_head_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    assert!(
+        report.output.content.contains("HEAD status=200"),
+        "output should contain HEAD status: {}",
+        report.output.content,
+    );
+    assert!(
+        matches!(
+            report.compatibility.status,
+            eggsec_nse::report::NseRunCompatibilityStatus::Compatible
+                | eggsec_nse::report::NseRunCompatibilityStatus::CompatibleWithWarnings
+        ),
+        "HTTP HEAD should be compatible: status={:?}, errors={:?}",
+        report.compatibility.status,
+        report.errors,
+    );
+    assert!(
+        server.hits() > 0,
+        "ManualPermissive HTTP HEAD must reach the server"
+    );
+}
+
+/// HTTP OPTIONS against local HTTP server.
+#[test]
+fn local_http_options_success() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_manual_permissive_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_options_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    assert!(
+        report.output.content.contains("OPTIONS status=200"),
+        "output should contain OPTIONS status: {}",
+        report.output.content,
+    );
+    assert!(
+        matches!(
+            report.compatibility.status,
+            eggsec_nse::report::NseRunCompatibilityStatus::Compatible
+                | eggsec_nse::report::NseRunCompatibilityStatus::CompatibleWithWarnings
+        ),
+        "HTTP OPTIONS should be compatible: status={:?}, errors={:?}",
+        report.compatibility.status,
+        report.errors,
+    );
+    assert!(
+        server.hits() > 0,
+        "ManualPermissive HTTP OPTIONS must reach the server"
+    );
+}
+
+/// Generic HTTP request (GET) against local HTTP server.
+#[test]
+fn local_http_request_success() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_manual_permissive_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_request_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    assert!(
+        report.output.content.contains("REQUEST status=200"),
+        "output should contain REQUEST status: {}",
+        report.output.content,
+    );
+    assert!(
+        matches!(
+            report.compatibility.status,
+            eggsec_nse::report::NseRunCompatibilityStatus::Compatible
+                | eggsec_nse::report::NseRunCompatibilityStatus::CompatibleWithWarnings
+        ),
+        "HTTP request should be compatible: status={:?}, errors={:?}",
+        report.compatibility.status,
+        report.errors,
+    );
+    assert!(
+        server.hits() > 0,
+        "ManualPermissive HTTP request must reach the server"
+    );
+}
+
+/// HTTP POST under AgentSafe: network TCP denied, zero hits.
+#[test]
+fn local_http_post_agent_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_post_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe HTTP POST must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "AgentSafe HTTP POST must not reach the server"
+    );
+}
+
+/// HTTP POST under CiSafe: network TCP denied, zero hits.
+#[test]
+fn local_http_post_ci_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_post_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe HTTP POST must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "CiSafe HTTP POST must not reach the server"
+    );
+}
+
+/// HTTP PUT under AgentSafe: network TCP denied, zero hits.
+#[test]
+fn local_http_put_agent_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_put_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe HTTP PUT must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "AgentSafe HTTP PUT must not reach the server"
+    );
+}
+
+/// HTTP DELETE under AgentSafe: network TCP denied, zero hits.
+#[test]
+fn local_http_delete_agent_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_delete_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe HTTP DELETE must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "AgentSafe HTTP DELETE must not reach the server"
+    );
+}
+
+/// HTTP HEAD under AgentSafe: network TCP denied, zero hits.
+#[test]
+fn local_http_head_agent_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_head_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe HTTP HEAD must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "AgentSafe HTTP HEAD must not reach the server"
+    );
+}
+
+/// HTTP OPTIONS under AgentSafe: network TCP denied, zero hits.
+#[test]
+fn local_http_options_agent_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_options_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe HTTP OPTIONS must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "AgentSafe HTTP OPTIONS must not reach the server"
+    );
+}
+
+/// Generic HTTP request under AgentSafe: network TCP denied, zero hits.
+#[test]
+fn local_http_request_agent_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_request_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe HTTP request must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "AgentSafe HTTP request must not reach the server"
+    );
+}
+
 /// HTTP GET under AgentSafe: capability context denies network TCP, so reqwest
 /// is never reached and the server receives zero hits.
 #[test]

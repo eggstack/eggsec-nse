@@ -10,7 +10,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -108,6 +108,8 @@ pub struct HttpServer {
     shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
     hits: Arc<AtomicUsize>,
+    last_method: Arc<Mutex<Option<String>>>,
+    last_path: Arc<Mutex<Option<String>>>,
 }
 
 impl HttpServer {
@@ -119,6 +121,10 @@ impl HttpServer {
         let shutdown_clone = shutdown.clone();
         let hits = Arc::new(AtomicUsize::new(0));
         let hits_clone = hits.clone();
+        let last_method = Arc::new(Mutex::new(None));
+        let last_method_clone = last_method.clone();
+        let last_path = Arc::new(Mutex::new(None));
+        let last_path_clone = last_path.clone();
 
         listener.set_nonblocking(true).unwrap();
 
@@ -130,7 +136,11 @@ impl HttpServer {
                         stream
                             .set_read_timeout(Some(Duration::from_secs(3)))
                             .unwrap();
-                        Self::handle_connection(stream);
+                        Self::handle_connection(
+                            stream,
+                            last_method_clone.clone(),
+                            last_path_clone.clone(),
+                        );
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         thread::sleep(Duration::from_millis(10));
@@ -145,10 +155,16 @@ impl HttpServer {
             shutdown,
             handle: Some(handle),
             hits,
+            last_method,
+            last_path,
         }
     }
 
-    fn handle_connection(mut stream: TcpStream) {
+    fn handle_connection(
+        mut stream: TcpStream,
+        last_method: Arc<Mutex<Option<String>>>,
+        last_path: Arc<Mutex<Option<String>>>,
+    ) {
         let reader = BufReader::new(stream.try_clone().unwrap());
 
         // Read request line + headers
@@ -185,6 +201,13 @@ impl HttpServer {
         let method = request_line.split_whitespace().next().unwrap_or("GET");
         let path = request_line.split_whitespace().nth(1).unwrap_or("/");
 
+        if let Ok(mut m) = last_method.lock() {
+            *m = Some(method.to_string());
+        }
+        if let Ok(mut p) = last_path.lock() {
+            *p = Some(path.to_string());
+        }
+
         let (status, response_body) = match (method, path) {
             ("GET", "/") => (
                 200,
@@ -199,20 +222,39 @@ impl HttpServer {
                 let body_str = String::from_utf8_lossy(&body);
                 (200, format!("POST received: {}", body_str))
             }
+            ("PUT", "/api/test") => {
+                let body_str = String::from_utf8_lossy(&body);
+                (200, format!("PUT received: {}", body_str))
+            }
+            ("DELETE", "/api/test") => (200, "DELETE received".to_string()),
+            ("HEAD", "/") => (200, String::new()),
+            ("OPTIONS", "/") => (200, String::new()),
             _ => (404, "Not Found".to_string()),
         };
 
-        let response = format!(
-            "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            status,
-            match status {
-                200 => "OK",
-                404 => "Not Found",
-                _ => "Unknown",
-            },
-            response_body.len(),
-            response_body,
-        );
+        let response = if method == "HEAD" {
+            format!(
+                "HTTP/1.1 {} {}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                status,
+                match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    _ => "Unknown",
+                },
+            )
+        } else {
+            format!(
+                "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                status,
+                match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    _ => "Unknown",
+                },
+                response_body.len(),
+                response_body,
+            )
+        };
 
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.flush();
@@ -231,6 +273,16 @@ impl HttpServer {
     /// The number of connections accepted by this server.
     pub fn hits(&self) -> usize {
         self.hits.load(Ordering::Relaxed)
+    }
+
+    /// The last HTTP method received by the server.
+    pub fn last_method(&self) -> Option<String> {
+        self.last_method.lock().ok().and_then(|m| m.clone())
+    }
+
+    /// The last HTTP path requested from the server.
+    pub fn last_path(&self) -> Option<String> {
+        self.last_path.lock().ok().and_then(|p| p.clone())
     }
 }
 

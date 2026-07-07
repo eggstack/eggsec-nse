@@ -282,6 +282,25 @@ fn denied_response(lua: &Lua, reason: &str) -> LuaResult<Table> {
     Ok(result)
 }
 
+/// Check network TCP capability and return a denied response table if not allowed.
+/// Returns `Some(table)` if the request should be denied, `None` if allowed.
+fn maybe_denied_response(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        Ok(Some(denied_response(
+            lua,
+            decision.deny_reason().unwrap_or("network access denied"),
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let http = lua.create_table()?;
@@ -291,12 +310,8 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "get",
         lua.create_function(
             move |lua, (host, port, path, options): (String, u16, String, Option<Table>)| {
-                let decision = wrappers::check_network_tcp(&ctx, &host, "http.get");
-                if !decision.is_allowed() {
-                    return denied_response(
-                        lua,
-                        decision.deny_reason().unwrap_or("network access denied"),
-                    );
+                if let Some(resp) = maybe_denied_response(lua, &ctx, &host, "http.get")? {
+                    return Ok(resp);
                 }
 
                 let url = build_url(&host, port, &path);
@@ -330,12 +345,8 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 String,
                 Option<Table>,
             )| {
-                let decision = wrappers::check_network_tcp(&ctx, &host, "http.post");
-                if !decision.is_allowed() {
-                    return denied_response(
-                        lua,
-                        decision.deny_reason().unwrap_or("network access denied"),
-                    );
+                if let Some(resp) = maybe_denied_response(lua, &ctx, &host, "http.post")? {
+                    return Ok(resp);
                 }
 
                 let url = build_url(&host, port, &path);
@@ -369,12 +380,8 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 String,
                 Option<Table>,
             )| {
-                let decision = wrappers::check_network_tcp(&ctx, &host, "http.put");
-                if !decision.is_allowed() {
-                    return denied_response(
-                        lua,
-                        decision.deny_reason().unwrap_or("network access denied"),
-                    );
+                if let Some(resp) = maybe_denied_response(lua, &ctx, &host, "http.put")? {
+                    return Ok(resp);
                 }
 
                 let url = build_url(&host, port, &path);
@@ -401,12 +408,8 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "delete",
         lua.create_function(
             move |lua, (host, port, path, _options): (String, u16, String, Option<Table>)| {
-                let decision = wrappers::check_network_tcp(&ctx, &host, "http.delete");
-                if !decision.is_allowed() {
-                    return denied_response(
-                        lua,
-                        decision.deny_reason().unwrap_or("network access denied"),
-                    );
+                if let Some(resp) = maybe_denied_response(lua, &ctx, &host, "http.delete")? {
+                    return Ok(resp);
                 }
 
                 let url = build_url(&host, port, &path);
@@ -424,12 +427,8 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     http.set(
         "head",
         lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
-            let decision = wrappers::check_network_tcp(&ctx, &host, "http.head");
-            if !decision.is_allowed() {
-                return denied_response(
-                    lua,
-                    decision.deny_reason().unwrap_or("network access denied"),
-                );
+            if let Some(resp) = maybe_denied_response(lua, &ctx, &host, "http.head")? {
+                return Ok(resp);
             }
 
             let url = build_url(&host, port, &path);
@@ -463,12 +462,8 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     http.set(
         "options",
         lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
-            let decision = wrappers::check_network_tcp(&ctx, &host, "http.options");
-            if !decision.is_allowed() {
-                return denied_response(
-                    lua,
-                    decision.deny_reason().unwrap_or("network access denied"),
-                );
+            if let Some(resp) = maybe_denied_response(lua, &ctx, &host, "http.options")? {
+                return Ok(resp);
             }
 
             let url = build_url(&host, port, &path);
@@ -493,12 +488,8 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 String,
                 Option<Table>,
             )| {
-                let decision = wrappers::check_network_tcp(&ctx, &host, "http.request");
-                if !decision.is_allowed() {
-                    return denied_response(
-                        lua,
-                        decision.deny_reason().unwrap_or("network access denied"),
-                    );
+                if let Some(resp) = maybe_denied_response(lua, &ctx, &host, "http.request")? {
+                    return Ok(resp);
                 }
 
                 let url = build_url(&host, port, &path);
@@ -671,12 +662,8 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 String,
                 Option<Table>,
             )| {
-                let decision = wrappers::check_network_tcp(&ctx, &host, "http.post_host");
-                if !decision.is_allowed() {
-                    return denied_response(
-                        lua,
-                        decision.deny_reason().unwrap_or("network access denied"),
-                    );
+                if let Some(resp) = maybe_denied_response(lua, &ctx, &host, "http.post_host")? {
+                    return Ok(resp);
                 }
 
                 let url = build_url(&host, port, &path);
@@ -718,12 +705,8 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 String,
                 Option<Table>,
             )| {
-                let decision = wrappers::check_network_tcp(&ctx, &host, "http.put_data");
-                if !decision.is_allowed() {
-                    return denied_response(
-                        lua,
-                        decision.deny_reason().unwrap_or("network access denied"),
-                    );
+                if let Some(resp) = maybe_denied_response(lua, &ctx, &host, "http.put_data")? {
+                    return Ok(resp);
                 }
 
                 let url = build_url(&host, port, &path);

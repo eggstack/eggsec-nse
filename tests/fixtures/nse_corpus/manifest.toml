@@ -1053,6 +1053,156 @@ state = "open"
 service = "http"
 
 [[fixture]]
+id = "http-put-local"
+name = "http_put_local.nse"
+category = "protocol"
+path = "scripts/protocol/http_put_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["http", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "http.put() API endpoint testing pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "HTTP PUT against local server. reqwest bypasses capability context."
+
+[fixture.local_service]
+type = "http"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+service = "http"
+
+[[fixture]]
+id = "http-delete-local"
+name = "http_delete_local.nse"
+category = "protocol"
+path = "scripts/protocol/http_delete_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["http", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "http.delete() API endpoint testing pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "HTTP DELETE against local server. reqwest bypasses capability context."
+
+[fixture.local_service]
+type = "http"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+service = "http"
+
+[[fixture]]
+id = "http-head-local"
+name = "http_head_local.nse"
+category = "protocol"
+path = "scripts/protocol/http_head_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["http", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "http.head() API endpoint testing pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "HTTP HEAD against local server. reqwest bypasses capability context."
+
+[fixture.local_service]
+type = "http"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+service = "http"
+
+[[fixture]]
+id = "http-options-local"
+name = "http_options_local.nse"
+category = "protocol"
+path = "scripts/protocol/http_options_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["http", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "http.options() API endpoint testing pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "HTTP OPTIONS against local server. reqwest bypasses capability context."
+
+[fixture.local_service]
+type = "http"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+service = "http"
+
+[[fixture]]
+id = "http-request-local"
+name = "http_request_local.nse"
+category = "protocol"
+path = "scripts/protocol/http_request_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["http", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "http.request() API endpoint testing pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Generic HTTP request (GET) against local server. reqwest bypasses capability context."
+
+[fixture.local_service]
+type = "http"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+service = "http"
+
+[[fixture]]
 id = "udp-echo"
 name = "udp_echo.nse"
 category = "protocol"
