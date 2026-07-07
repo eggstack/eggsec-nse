@@ -76,6 +76,14 @@ struct FixtureEntry {
     #[serde(default)]
     expected_capability_events: Vec<ExpectedCapabilityEvent>,
     #[serde(default)]
+    optional_libraries: Vec<String>,
+    #[serde(default)]
+    optional_rules: Vec<String>,
+    #[serde(default)]
+    expected_evidence_kinds: Vec<String>,
+    #[serde(default)]
+    optional_evidence_kinds: Vec<String>,
+    #[serde(default)]
     target: Option<FixtureTarget>,
     #[serde(default)]
     ports: Vec<FixturePort>,
@@ -92,6 +100,8 @@ struct FixtureHarness {
     expect_runtime_error: bool,
     allow_static_require_fallback: bool,
     runtime_profile: Option<String>,
+    allow_missing_runtime_libraries: bool,
+    allow_missing_runtime_rules: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -125,6 +135,8 @@ fn default_state() -> String {
 struct ExpectedCapabilityEvent {
     kind: String,
     allowed: bool,
+    #[serde(default)]
+    required: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -307,6 +319,20 @@ fn parse_capability_kind(s: &str) -> NseCapabilityKind {
         "compression" => NseCapabilityKind::Compression,
         "environment" => NseCapabilityKind::Environment,
         other => panic!("unknown capability kind: {}", other),
+    }
+}
+
+fn parse_evidence_kind(s: &str) -> eggsec_nse::report::NseEvidenceKind {
+    match s {
+        "ServiceFingerprint" => eggsec_nse::report::NseEvidenceKind::ServiceFingerprint,
+        "VersionInfo" => eggsec_nse::report::NseEvidenceKind::VersionInfo,
+        "CertificateInfo" => eggsec_nse::report::NseEvidenceKind::CertificateInfo,
+        "VulnerabilitySignal" => eggsec_nse::report::NseEvidenceKind::VulnerabilitySignal,
+        "Misconfiguration" => eggsec_nse::report::NseEvidenceKind::Misconfiguration,
+        "CapabilityDenial" => eggsec_nse::report::NseEvidenceKind::CapabilityDenial,
+        "CompatibilityWarning" => eggsec_nse::report::NseEvidenceKind::CompatibilityWarning,
+        "ScriptOutput" => eggsec_nse::report::NseEvidenceKind::ScriptOutput,
+        other => panic!("unknown evidence kind: {}", other),
     }
 }
 
@@ -677,6 +703,7 @@ fn run_category_runtime(category: &str) {
 
 /// Assert that runtime libraries include all `expected_libraries`.
 /// Skip for fixtures marked `expected_block` (resolver-blocked, no execution).
+/// When harness `allow_missing_runtime_libraries` is true, misses are log-only.
 #[test]
 fn corpus_runtime_observed_libraries_match_expected() {
     let manifest = load_manifest();
@@ -685,25 +712,36 @@ fn corpus_runtime_observed_libraries_match_expected() {
             continue;
         }
         let (report, _) = run_fixture_runtime(entry);
+        let soft = entry.harness.as_ref().is_some_and(|h| h.allow_missing_runtime_libraries);
         for expected_lib in &entry.expected_libraries {
             let found = report.libraries.iter().any(|l| l.name == *expected_lib);
-            // For runtime verification, library matching is the canonical observed list.
-            // When the runtime didn't observe the require (e.g., execution short-circuited),
-            // an empty list is acceptable since the manifest can mark runtime-detected
-            // libraries from a subsequent execution. We log misses for visibility.
-            if !found && !report.libraries.is_empty() {
-                tracing::debug!(
-                    fixture = %entry.id,
-                    expected = %expected_lib,
-                    observed = ?report.libraries.iter().map(|l| &l.name).collect::<Vec<_>>(),
-                    "expected library not in runtime-observed libraries"
-                );
+            if !found {
+                if soft {
+                    tracing::debug!(
+                        fixture = %entry.id,
+                        expected = %expected_lib,
+                        observed = ?report.libraries.iter().map(|l| &l.name).collect::<Vec<_>>(),
+                        "expected library not in runtime-observed libraries (soft assertion)"
+                    );
+                } else {
+                    assert!(
+                        report.libraries.is_empty() || found,
+                        "fixture '{}': expected library '{}' not observed in runtime libraries: {:?}",
+                        entry.id,
+                        expected_lib,
+                        report.libraries.iter().map(|l| &l.name).collect::<Vec<_>>(),
+                    );
+                }
             }
         }
     }
 }
 
 /// Assert that runtime rules include all `expected_rules` kinds.
+/// When harness `allow_missing_runtime_rules` is true, empty rule lists are
+/// acceptable. When expected_rules is empty, no assertion is made.
+/// Fixtures without [[fixture.ports]] cannot trigger rule evaluation, so
+/// empty rules are acceptable for those.
 #[test]
 fn corpus_runtime_observed_rules_match_expected() {
     let manifest = load_manifest();
@@ -711,11 +749,29 @@ fn corpus_runtime_observed_rules_match_expected() {
         if entry.expected_block {
             continue;
         }
-        let (report, _) = run_fixture_runtime(entry);
-        if report.rules.is_empty() {
-            // For unsupported-rule / false-portrule / error-portrule fixtures, runtime
-            // may observe zero rules. Accept that. Other fixtures MUST have rules.
+        if entry.expected_rules.is_empty() {
             continue;
+        }
+        let (report, _) = run_fixture_runtime(entry);
+        let soft = entry.harness.as_ref().is_some_and(|h| h.allow_missing_runtime_rules);
+        let has_ports = !entry.ports.is_empty();
+        if report.rules.is_empty() {
+            if soft || !has_ports {
+                tracing::debug!(
+                    fixture = %entry.id,
+                    expected = ?entry.expected_rules,
+                    has_ports = has_ports,
+                    soft = soft,
+                    "runtime observed zero rules (skipped — no ports or soft assertion)"
+                );
+                continue;
+            }
+            assert!(
+                !report.rules.is_empty(),
+                "fixture '{}': expected rules {:?} but runtime observed zero rules (fixture has ports)",
+                entry.id,
+                entry.expected_rules,
+            );
         }
         for expected_rule in &entry.expected_rules {
             let found = report.rules.iter().any(|r| r.kind == *expected_rule);
@@ -773,15 +829,26 @@ fn corpus_runtime_observed_capability_events_match_expected() {
                 if has_denial {
                     denial_fixtures_checked += 1;
                 }
-                // Some fixtures (e.g. fs-read-denied) might be blocked at resolver level
-                // before the capability wrapper runs. Accept that as well.
-                assert!(
-                    has_denial || report.resolver.blocked_count > 0 || !report.errors.is_empty(),
-                    "fixture '{}': expected denial of kind '{}' (allowed=false), but no denial event observed and no block/error recorded. events={:?}",
-                    entry.id,
-                    expected_ev.kind,
-                    report.capability_events,
-                );
+                if expected_ev.required {
+                    // Hard assertion: required denial event MUST be observed.
+                    assert!(
+                        has_denial,
+                        "fixture '{}': REQUIRED denial of kind '{}' (allowed=false, required=true) was not observed. events={:?}",
+                        entry.id,
+                        expected_ev.kind,
+                        report.capability_events,
+                    );
+                } else {
+                    // Some fixtures (e.g. fs-read-denied) might be blocked at resolver level
+                    // before the capability wrapper runs. Accept that as well.
+                    assert!(
+                        has_denial || report.resolver.blocked_count > 0 || !report.errors.is_empty(),
+                        "fixture '{}': expected denial of kind '{}' (allowed=false), but no denial event observed and no block/error recorded. events={:?}",
+                        entry.id,
+                        expected_ev.kind,
+                        report.capability_events,
+                    );
+                }
             } else {
                 // Allowed events may or may not appear in capability_events because
                 // successful operations don't always record capability events.
@@ -834,6 +901,49 @@ fn corpus_runtime_observed_evidence_includes_capability_denials() {
             report.capability_events,
             evidence,
         );
+    }
+}
+
+/// Assert that `expected_evidence_kinds` are present in the report evidence
+/// and `optional_evidence_kinds` are informational (logged but not asserted).
+#[test]
+fn corpus_runtime_strict_evidence_assertions() {
+    let manifest = load_manifest();
+    for entry in &manifest.fixture {
+        if entry.expected_evidence_kinds.is_empty() && entry.optional_evidence_kinds.is_empty() {
+            continue;
+        }
+        if entry.expected_block {
+            continue;
+        }
+
+        let (report, evidence) = run_fixture_runtime(entry);
+
+        // Check expected_evidence_kinds: each MUST be present
+        for expected_kind_str in &entry.expected_evidence_kinds {
+            let expected_kind = parse_evidence_kind(expected_kind_str);
+            let found = evidence.iter().any(|e| e.kind == expected_kind);
+            assert!(
+                found,
+                "fixture '{}': expected evidence kind '{}' not found in report evidence (kinds={:?})",
+                entry.id,
+                expected_kind_str,
+                evidence.iter().map(|e| &e.kind).collect::<Vec<_>>(),
+            );
+        }
+
+        // Check optional_evidence_kinds: informational only
+        for optional_kind_str in &entry.optional_evidence_kinds {
+            let optional_kind = parse_evidence_kind(optional_kind_str);
+            let found = evidence.iter().any(|e| e.kind == optional_kind);
+            if !found {
+                tracing::debug!(
+                    fixture = %entry.id,
+                    kind = %optional_kind_str,
+                    "optional evidence kind not observed (informational)",
+                );
+            }
+        }
     }
 }
 

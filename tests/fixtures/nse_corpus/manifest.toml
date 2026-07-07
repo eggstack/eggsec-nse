@@ -305,6 +305,7 @@ expected_block = true
 expected_libraries = []
 expected_rules = []
 expected_capability_events = []
+expected_evidence_kinds = ["CapabilityDenial"]
 provenance = "clean-room"
 upstream_reference = "AgentSafe policy enforcement"
 license_note = "No upstream source copied"
@@ -325,7 +326,8 @@ expected_resolved = true
 expected_block = false
 expected_libraries = ["stdnse"]
 expected_rules = ["portrule"]
-expected_capability_events = [{ kind = "process_exec", allowed = false }]
+expected_capability_events = [{ kind = "process_exec", allowed = false, required = true }]
+expected_evidence_kinds = ["CapabilityDenial"]
 provenance = "clean-room"
 upstream_reference = "io.popen() pattern from NSE scripts"
 license_note = "No upstream source copied"
@@ -454,7 +456,8 @@ expected_resolved = true
 expected_block = false
 expected_libraries = ["stdnse"]
 expected_rules = ["portrule"]
-expected_capability_events = [{ kind = "filesystem_read", allowed = false }]
+expected_capability_events = [{ kind = "filesystem_read", allowed = false, required = true }]
+expected_evidence_kinds = ["CapabilityDenial"]
 provenance = "clean-room"
 upstream_reference = "Capability enforcement regression test"
 license_note = "No upstream source copied"
