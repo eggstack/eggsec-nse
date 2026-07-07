@@ -1011,7 +1011,7 @@ license_note = "No upstream source copied"
 local_fixture = true
 public_network_required = false
 gap_classification = "supported"
-notes = "HTTP GET against local server, extracts <title>. reqwest bypasses capability context."
+notes = "HTTP GET against local server, extracts <title>. Capability-gated via check_network_tcp()."
 
 [fixture.local_service]
 type = "http"
@@ -1041,7 +1041,7 @@ license_note = "No upstream source copied"
 local_fixture = true
 public_network_required = false
 gap_classification = "supported"
-notes = "HTTP POST against local server. reqwest bypasses capability context."
+notes = "HTTP POST against local server. Capability-gated via check_network_tcp()."
 
 [fixture.local_service]
 type = "http"
@@ -1071,7 +1071,7 @@ license_note = "No upstream source copied"
 local_fixture = true
 public_network_required = false
 gap_classification = "supported"
-notes = "HTTP PUT against local server. reqwest bypasses capability context."
+notes = "HTTP PUT against local server. Capability-gated via check_network_tcp()."
 
 [fixture.local_service]
 type = "http"
@@ -1101,7 +1101,7 @@ license_note = "No upstream source copied"
 local_fixture = true
 public_network_required = false
 gap_classification = "supported"
-notes = "HTTP DELETE against local server. reqwest bypasses capability context."
+notes = "HTTP DELETE against local server. Capability-gated via check_network_tcp()."
 
 [fixture.local_service]
 type = "http"
@@ -1131,7 +1131,7 @@ license_note = "No upstream source copied"
 local_fixture = true
 public_network_required = false
 gap_classification = "supported"
-notes = "HTTP HEAD against local server. reqwest bypasses capability context."
+notes = "HTTP HEAD against local server. Capability-gated via check_network_tcp()."
 
 [fixture.local_service]
 type = "http"
@@ -1161,7 +1161,7 @@ license_note = "No upstream source copied"
 local_fixture = true
 public_network_required = false
 gap_classification = "supported"
-notes = "HTTP OPTIONS against local server. reqwest bypasses capability context."
+notes = "HTTP OPTIONS against local server. Capability-gated via check_network_tcp()."
 
 [fixture.local_service]
 type = "http"
@@ -1191,7 +1191,7 @@ license_note = "No upstream source copied"
 local_fixture = true
 public_network_required = false
 gap_classification = "supported"
-notes = "Generic HTTP request (GET) against local server. reqwest bypasses capability context."
+notes = "Generic HTTP request (GET) against local server. Capability-gated via check_network_tcp()."
 
 [fixture.local_service]
 type = "http"
