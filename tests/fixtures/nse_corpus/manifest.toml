@@ -1263,7 +1263,7 @@ notes = "TLS certificate retrieval against local TLS server. Real TLS connectivi
 type = "tls_echo"
 
 [[fixture.ports]]
-number = 0  # dynamic
+number = 0
 protocol = "tcp"
 state = "open"
 service = "https"
@@ -1387,4 +1387,152 @@ number = 0
 protocol = "tcp"
 state = "open"
 service = "https"
+
+# =========================================================================
+# Upstream-style fixtures (Phase 04: corpus growth)
+# =========================================================================
+
+[[fixture]]
+id = "upstream-ssh-hostkey"
+name = "ssh_hostkey_check.nse"
+category = "upstream"
+path = "scripts/upstream/ssh_hostkey_check.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["ssh", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "network_tcp", operation = "ssh.connect", allowed = true }]
+expected_profile_set = ["compatibility_lab", "manual_permissive"]
+expected_evidence_kinds = []
+expected_denial_kinds = []
+provenance = "clean-room"
+upstream_reference = "ssh.connect() host key verification pattern from ssh-hostkey.nse"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "approximate"
+notes = "Upstream-style SSH host key check pattern. ssh library available but connection may fail locally."
+
+[[fixture]]
+id = "upstream-smb-discovery"
+name = "smb_discovery.nse"
+category = "upstream"
+path = "scripts/upstream/smb_discovery.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["smb", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "network_tcp", operation = "smb.start", allowed = true }]
+expected_profile_set = ["compatibility_lab", "manual_permissive"]
+expected_evidence_kinds = []
+expected_denial_kinds = []
+provenance = "clean-room"
+upstream_reference = "smb.start() / smb.get_server_info() pattern from smb-os-discovery.nse"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "approximate"
+notes = "Upstream-style SMB discovery pattern. smb library available but connection may fail locally."
+
+[[fixture]]
+id = "upstream-ldap-search"
+name = "ldap_search.nse"
+category = "upstream"
+path = "scripts/upstream/ldap_search.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["ldap", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "network_tcp", operation = "ldap.open", allowed = true }]
+expected_profile_set = ["compatibility_lab", "manual_permissive"]
+expected_evidence_kinds = []
+expected_denial_kinds = []
+provenance = "clean-room"
+upstream_reference = "ldap.open() / ldap.search() pattern from ldap-brute.nse and ldap-search.nse"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "approximate"
+notes = "Upstream-style LDAP search pattern. ldap library available but connection may fail locally."
+
+[[fixture]]
+id = "upstream-multi-step-discovery"
+name = "multi_step_discovery.nse"
+category = "upstream"
+path = "scripts/upstream/multi_step_discovery.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "approximate"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse", "nmap"]
+expected_rules = ["hostrule"]
+expected_capability_events = []
+expected_profile_set = ["compatibility_lab", "manual_permissive", "agent_safe", "ci_safe"]
+expected_evidence_kinds = []
+expected_denial_kinds = []
+provenance = "clean-room"
+upstream_reference = "Multi-step discovery pattern using nmap.get_ports() / stdnse.output_table()"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Upstream-style multi-step discovery chaining stdnse and nmap helpers. Pure output, no side effects."
+
+[[fixture]]
+id = "upstream-conditional-portrule"
+name = "conditional_portrule.nse"
+category = "upstream"
+path = "scripts/upstream/conditional_portrule.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+expected_profile_set = ["compatibility_lab", "manual_permissive", "agent_safe", "ci_safe"]
+expected_evidence_kinds = []
+expected_denial_kinds = []
+provenance = "clean-room"
+upstream_reference = "SCRIPT_NAME / stdnse.get_script_args() conditional portrule pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Upstream-style conditional portrule with script args and table lookups. Pure logic, no side effects."
+
+[[fixture]]
+id = "upstream-timestamp-extract"
+name = "timestamp_extract.nse"
+category = "upstream"
+path = "scripts/upstream/timestamp_extract.nse"
+profile = "compatibility_lab"
+expected_status = "compatible"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+expected_profile_set = ["compatibility_lab", "manual_permissive", "agent_safe", "ci_safe"]
+expected_evidence_kinds = []
+expected_denial_kinds = []
+provenance = "clean-room"
+upstream_reference = "os.date() / stdnse.output_table() structured output pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Upstream-style timestamp extraction for structured logging. Pure output, no side effects."
 
