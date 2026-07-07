@@ -379,6 +379,17 @@ fn local_http_get_title_success() {
         server.hits() > 0,
         "ManualPermissive HTTP GET must reach the server"
     );
+    // Verify the expected method and path reached the server
+    assert_eq!(
+        server.last_method().as_deref(),
+        Some("GET"),
+        "server should have received GET method"
+    );
+    assert_eq!(
+        server.last_path().as_deref(),
+        Some("/"),
+        "server should have received / path"
+    );
 }
 
 /// HTTP POST against local HTTP server.
@@ -416,6 +427,16 @@ fn local_http_post_success() {
         server.hits() > 0,
         "ManualPermissive HTTP POST must reach the server"
     );
+    assert_eq!(
+        server.last_method().as_deref(),
+        Some("POST"),
+        "server should have received POST method"
+    );
+    assert_eq!(
+        server.last_path().as_deref(),
+        Some("/api/test"),
+        "server should have received /api/test path"
+    );
 }
 
 /// HTTP PUT against local HTTP server.
@@ -450,6 +471,16 @@ fn local_http_put_success() {
     assert!(
         server.hits() > 0,
         "ManualPermissive HTTP PUT must reach the server"
+    );
+    assert_eq!(
+        server.last_method().as_deref(),
+        Some("PUT"),
+        "server should have received PUT method"
+    );
+    assert_eq!(
+        server.last_path().as_deref(),
+        Some("/api/test"),
+        "server should have received /api/test path"
     );
 }
 
@@ -486,6 +517,16 @@ fn local_http_delete_success() {
         server.hits() > 0,
         "ManualPermissive HTTP DELETE must reach the server"
     );
+    assert_eq!(
+        server.last_method().as_deref(),
+        Some("DELETE"),
+        "server should have received DELETE method"
+    );
+    assert_eq!(
+        server.last_path().as_deref(),
+        Some("/api/test"),
+        "server should have received /api/test path"
+    );
 }
 
 /// HTTP HEAD against local HTTP server.
@@ -520,6 +561,16 @@ fn local_http_head_success() {
     assert!(
         server.hits() > 0,
         "ManualPermissive HTTP HEAD must reach the server"
+    );
+    assert_eq!(
+        server.last_method().as_deref(),
+        Some("HEAD"),
+        "server should have received HEAD method"
+    );
+    assert_eq!(
+        server.last_path().as_deref(),
+        Some("/"),
+        "server should have received / path"
     );
 }
 
@@ -556,6 +607,16 @@ fn local_http_options_success() {
         server.hits() > 0,
         "ManualPermissive HTTP OPTIONS must reach the server"
     );
+    assert_eq!(
+        server.last_method().as_deref(),
+        Some("OPTIONS"),
+        "server should have received OPTIONS method"
+    );
+    assert_eq!(
+        server.last_path().as_deref(),
+        Some("/"),
+        "server should have received / path"
+    );
 }
 
 /// Generic HTTP request (GET) against local HTTP server.
@@ -590,6 +651,16 @@ fn local_http_request_success() {
     assert!(
         server.hits() > 0,
         "ManualPermissive HTTP request must reach the server"
+    );
+    assert_eq!(
+        server.last_method().as_deref(),
+        Some("GET"),
+        "server should have received GET method via http.request"
+    );
+    assert_eq!(
+        server.last_path().as_deref(),
+        Some("/"),
+        "server should have received / path via http.request"
     );
 }
 
@@ -860,6 +931,166 @@ fn local_http_get_agent_safe_documentation() {
         server.hits(),
         0,
         "AgentSafe HTTP GET must not reach the server"
+    );
+}
+
+/// HTTP PUT under CiSafe: network TCP denied, zero hits.
+#[test]
+fn local_http_put_ci_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_put_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe HTTP PUT must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "CiSafe HTTP PUT must not reach the server"
+    );
+}
+
+/// HTTP DELETE under CiSafe: network TCP denied, zero hits.
+#[test]
+fn local_http_delete_ci_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_delete_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe HTTP DELETE must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "CiSafe HTTP DELETE must not reach the server"
+    );
+}
+
+/// HTTP HEAD under CiSafe: network TCP denied, zero hits.
+#[test]
+fn local_http_head_ci_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_head_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe HTTP HEAD must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "CiSafe HTTP HEAD must not reach the server"
+    );
+}
+
+/// HTTP OPTIONS under CiSafe: network TCP denied, zero hits.
+#[test]
+fn local_http_options_ci_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_options_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe HTTP OPTIONS must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "CiSafe HTTP OPTIONS must not reach the server"
+    );
+}
+
+/// Generic HTTP request (GET) under CiSafe: network TCP denied, zero hits.
+#[test]
+fn local_http_request_ci_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_request_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe HTTP request must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "CiSafe HTTP request must not reach the server"
     );
 }
 
