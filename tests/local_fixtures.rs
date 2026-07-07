@@ -354,9 +354,178 @@ impl Drop for UdpEchoServer {
     }
 }
 
-// NOTE: TLS echo server deferred — the NSE socket library does raw TCP, not TLS.
-// TLS testing requires the sslcert library's TlsConnector path, which is a
-// separate test concern. See Milestone 5 Phase 03 plan.
+// ---------------------------------------------------------------------------
+// TLS echo server
+// ---------------------------------------------------------------------------
+
+/// A lightweight TLS echo server bound to `127.0.0.1:<random>`.
+///
+/// Generates a self-signed X.509 certificate at startup. Accepts TLS
+/// connections, reads lines, echoes each line back prefixed with
+/// `TLS_ECHO: `. Shuts down when the handle is dropped.
+pub struct TlsEchoServer {
+    port: u16,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+    cert_subject: String,
+    cert_der: Vec<u8>,
+    cert_pem: String,
+}
+
+impl TlsEchoServer {
+    /// Start a TLS echo server on an ephemeral port.
+    pub fn start() -> Self {
+        use native_tls::{Identity, TlsAcceptor};
+        use openssl::pkey::PKey;
+        use openssl::rsa::Rsa;
+        use openssl::x509::X509Builder;
+        use openssl::x509::X509NameBuilder;
+
+        let rsa = Rsa::generate(2048).expect("generate RSA key");
+        let pkey = PKey::from_rsa(rsa).expect("create PKey");
+
+        let mut name_builder = X509NameBuilder::new().expect("create X509NameBuilder");
+        name_builder
+            .append_entry_by_text("CN", "localhost")
+            .expect("set CN");
+        let name = name_builder.build();
+
+        let mut cert_builder = X509Builder::new().expect("create X509Builder");
+        cert_builder.set_version(2).expect("set version");
+        cert_builder
+            .set_subject_name(&name)
+            .expect("set subject");
+        cert_builder.set_issuer_name(&name).expect("set issuer");
+        cert_builder.set_pubkey(&pkey).expect("set pubkey");
+
+        let not_before = openssl::asn1::Asn1Time::days_from_now(0).expect("not_before");
+        let not_after = openssl::asn1::Asn1Time::days_from_now(365).expect("not_after");
+        cert_builder
+            .set_not_before(&not_before)
+            .expect("set not_before");
+        cert_builder
+            .set_not_after(&not_after)
+            .expect("set not_after");
+
+        cert_builder
+            .sign(&pkey, openssl::hash::MessageDigest::sha256())
+            .expect("self-sign cert");
+        let cert = cert_builder.build();
+
+        let cert_der = cert.to_der().expect("cert to DER");
+        let cert_pem =
+            String::from_utf8(cert.to_pem().expect("cert to PEM")).expect("PEM is valid UTF-8");
+
+        let pkcs12 = openssl::pkcs12::Pkcs12::builder()
+            .pkey(&pkey)
+            .cert(&cert)
+            .build2("")
+            .expect("build PKCS12");
+        let pkcs12_der = pkcs12.to_der().expect("PKCS12 to DER");
+
+        let identity = Identity::from_pkcs12(&pkcs12_der, "").expect("create Identity");
+        let acceptor = TlsAcceptor::new(identity).expect("create TlsAcceptor");
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind TLS echo server");
+        let port = listener.local_addr().unwrap().port();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = shutdown.clone();
+
+        listener.set_nonblocking(true).unwrap();
+
+        let handle = thread::spawn(move || {
+            while !shutdown_clone.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(3)))
+                            .unwrap();
+                        let acceptor = acceptor.clone();
+                        thread::spawn(move || {
+                            if let Ok(tls_stream) = acceptor.accept(stream) {
+                                Self::handle_connection(tls_stream);
+                            }
+                        });
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            port,
+            shutdown,
+            handle: Some(handle),
+            cert_subject: "CN=localhost".to_string(),
+            cert_der,
+            cert_pem,
+        }
+    }
+
+    fn handle_connection(mut stream: native_tls::TlsStream<TcpStream>) {
+        use std::io::Read;
+        let mut line_buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match stream.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if byte[0] == b'\n' {
+                        let line = String::from_utf8_lossy(&line_buf)
+                            .trim()
+                            .to_string();
+                        let response = format!("TLS_ECHO: {}\n", line);
+                        if stream.write_all(response.as_bytes()).is_err() {
+                            return;
+                        }
+                        let _ = stream.flush();
+                        line_buf.clear();
+                    } else {
+                        line_buf.push(byte[0]);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
+    /// The port this server is listening on.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// The address as `host:port` string.
+    pub fn addr(&self) -> String {
+        format!("127.0.0.1:{}", self.port)
+    }
+
+    /// The CN subject of the generated certificate.
+    pub fn cert_subject(&self) -> String {
+        self.cert_subject.clone()
+    }
+
+    /// The DER-encoded self-signed certificate.
+    pub fn cert_der(&self) -> Vec<u8> {
+        self.cert_der.clone()
+    }
+
+    /// The PEM-encoded self-signed certificate.
+    pub fn cert_pem(&self) -> String {
+        self.cert_pem.clone()
+    }
+}
+
+impl Drop for TlsEchoServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -400,5 +569,36 @@ mod tests {
         assert_eq!(response.status(), 200);
         let body = response.text().unwrap();
         assert!(body.contains("Eggsec Test Page"), "body: {}", body);
+    }
+
+    #[test]
+    fn tls_echo_server_roundtrip() {
+        use native_tls::TlsConnector;
+        use std::io::{BufRead, BufReader, Write};
+
+        let server = TlsEchoServer::start();
+        let connector = TlsConnector::builder()
+            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_hostnames(true)
+            .build()
+            .expect("build TLS connector");
+
+        let tcp = TcpStream::connect(server.addr()).expect("connect to TLS server");
+        tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        let mut tls = connector
+            .connect("localhost", tcp)
+            .expect("TLS handshake");
+
+        tls.write_all(b"hello from tls\n").expect("write");
+        tls.flush().expect("flush");
+
+        let mut reader = BufReader::new(tls);
+        let mut buf = String::new();
+        reader.read_line(&mut buf).expect("read response");
+        assert!(
+            buf.contains("TLS_ECHO: hello from tls"),
+            "got: {}",
+            buf
+        );
     }
 }

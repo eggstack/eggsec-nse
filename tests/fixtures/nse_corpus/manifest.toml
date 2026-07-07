@@ -1231,3 +1231,160 @@ number = 0  # dynamic
 protocol = "udp"
 state = "open"
 
+# ---------------------------------------------------------------------------
+# Local TLS/sslcert Fixtures (Phase 03)
+#
+# These fixtures connect to a real local TLS server started by the test harness.
+# They verify sslcert library functions work against actual TLS connections.
+# ---------------------------------------------------------------------------
+
+[[fixture]]
+id = "sslcert-get-certificate-local"
+name = "sslcert_get_certificate_local.nse"
+category = "protocol"
+path = "scripts/protocol/sslcert_get_certificate_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["sslcert"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "crypto", operation = "sslcert.get_certificate", allowed = true }]
+provenance = "clean-room"
+upstream_reference = "sslcert.get_certificate() TLS handshake pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "TLS certificate retrieval against local TLS server. Real TLS connectivity test."
+
+[fixture.local_service]
+type = "tls_echo"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+service = "https"
+
+[[fixture]]
+id = "sslcert-parse-cert-local"
+name = "sslcert_parse_cert_local.nse"
+category = "protocol"
+path = "scripts/protocol/sslcert_parse_cert_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["sslcert"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "crypto", operation = "sslcert.get_certificate", allowed = true }]
+provenance = "clean-room"
+upstream_reference = "sslcert.parse_cert() PEM parsing pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Certificate PEM parsing against local TLS server."
+
+[fixture.local_service]
+type = "tls_echo"
+
+[[fixture.ports]]
+number = 0
+protocol = "tcp"
+state = "open"
+service = "https"
+
+[[fixture]]
+id = "sslcert-get-subject-local"
+name = "sslcert_get_subject_local.nse"
+category = "protocol"
+path = "scripts/protocol/sslcert_get_subject_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["sslcert"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "crypto", operation = "sslcert.get_certificate", allowed = true }]
+provenance = "clean-room"
+upstream_reference = "sslcert.get_subject() pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Certificate subject extraction against local TLS server."
+
+[fixture.local_service]
+type = "tls_echo"
+
+[[fixture.ports]]
+number = 0
+protocol = "tcp"
+state = "open"
+service = "https"
+
+[[fixture]]
+id = "sslcert-get-chain-certs-local"
+name = "sslcert_get_chain_certs_local.nse"
+category = "protocol"
+path = "scripts/protocol/sslcert_get_chain_certs_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["sslcert"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "crypto", operation = "sslcert.get_chain_certs", allowed = true }]
+provenance = "clean-room"
+upstream_reference = "sslcert.get_chain_certs() pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Certificate chain retrieval against local TLS server."
+
+[fixture.local_service]
+type = "tls_echo"
+
+[[fixture.ports]]
+number = 0
+protocol = "tcp"
+state = "open"
+service = "https"
+
+[[fixture]]
+id = "sslcert-is-valid-local"
+name = "sslcert_is_valid_local.nse"
+category = "protocol"
+path = "scripts/protocol/sslcert_is_valid_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["sslcert"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "crypto", operation = "sslcert.get_certificate", allowed = true }]
+provenance = "clean-room"
+upstream_reference = "sslcert.is_valid() pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "Certificate validity check against local TLS server."
+
+[fixture.local_service]
+type = "tls_echo"
+
+[[fixture.ports]]
+number = 0
+protocol = "tcp"
+state = "open"
+service = "https"
+

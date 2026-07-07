@@ -79,19 +79,25 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
             }
         };
 
-        if let Some(cert) = stream.peer_certificate().ok().flatten() {
-            let cert = X509::from_der(&cert.to_der().unwrap_or_default()).ok();
-            if let Some(cert) = cert {
-                result.set("subject", parse_x509_name(cert.subject_name()))?;
-                result.set("issuer", parse_x509_name(cert.issuer_name()))?;
-                result.set("notbefore", cert.not_before().to_string())?;
-                result.set("notafter", cert.not_after().to_string())?;
-                result.set("serial", "unknown")?;
-                result.set("version", 1i32)?;
+        if let Some(native_cert) = stream.peer_certificate().ok().flatten() {
+            if let Ok(der) = native_cert.to_der() {
+                if let Ok(x509) = X509::from_der(&der) {
+                    result.set("subject", parse_x509_name(x509.subject_name()))?;
+                    result.set("issuer", parse_x509_name(x509.issuer_name()))?;
+                    result.set("notbefore", x509.not_before().to_string())?;
+                    result.set("notafter", x509.not_after().to_string())?;
+                    result.set("serial", "unknown")?;
+                    result.set("version", 1i32)?;
+                    if let Ok(pem_bytes) = x509.to_pem() {
+                        result.set("pem", String::from_utf8_lossy(&pem_bytes).to_string())?;
+                    } else {
+                        result.set("pem", "")?;
+                    }
+                }
             }
+        } else {
+            result.set("pem", "")?;
         }
-
-        result.set("pem", "placeholder")?;
         Ok(result)
     })?;
     sslcert.set("get_certificate", get_cert_fn)?;

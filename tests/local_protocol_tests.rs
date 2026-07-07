@@ -1294,9 +1294,139 @@ fn local_dns_denied_agent_safe() {
     );
 }
 
-// NOTE: TLS local protocol test deferred — the NSE socket library does raw
-// TCP, not TLS. TLS testing requires the sslcert library's TlsConnector path.
-// See Milestone 5 Phase 03 plan.
+// ---------------------------------------------------------------------------
+// Tests: TLS/sslcert Local Protocol
+// ---------------------------------------------------------------------------
+
+/// TLS certificate retrieval against local TLS server — ManualPermissive.
+#[test]
+fn local_sslcert_get_certificate_success() {
+    let server = local_fixtures::TlsEchoServer::start();
+    let profile = make_manual_permissive_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/sslcert_get_certificate_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("https"),
+        &profile,
+    );
+    assert!(
+        report.output.content.contains("subject="),
+        "TLS cert fixture should return subject: output={}, errors={:?}",
+        report.output.content,
+        report.errors,
+    );
+    assert!(
+        matches!(
+            report.compatibility.status,
+            eggsec_nse::report::NseRunCompatibilityStatus::Compatible
+                | eggsec_nse::report::NseRunCompatibilityStatus::CompatibleWithWarnings
+        ),
+        "TLS cert should be compatible (possibly with warnings): status={:?}, errors={:?}",
+        report.compatibility.status,
+        report.errors,
+    );
+    // Crypto capability events should be recorded
+    let crypto_events: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "crypto")
+        .collect();
+    assert!(
+        !crypto_events.is_empty(),
+        "should have crypto capability events"
+    );
+}
+
+/// TLS certificate parsing (get_certificate + parse_cert) against local TLS server.
+#[test]
+fn local_sslcert_parse_cert_success() {
+    let server = local_fixtures::TlsEchoServer::start();
+    let profile = make_manual_permissive_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/sslcert_parse_cert_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("https"),
+        &profile,
+    );
+    assert!(
+        report.output.content.contains("subject="),
+        "TLS parse_cert fixture should return parsed cert fields: output={}, errors={:?}",
+        report.output.content,
+        report.errors,
+    );
+}
+
+/// TLS get_subject against local TLS server.
+#[test]
+fn local_sslcert_get_subject_success() {
+    let server = local_fixtures::TlsEchoServer::start();
+    let profile = make_manual_permissive_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/sslcert_get_subject_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("https"),
+        &profile,
+    );
+    assert!(
+        report.output.content.contains("subject="),
+        "TLS get_subject fixture should return subject: output={}, errors={:?}",
+        report.output.content,
+        report.errors,
+    );
+}
+
+/// TLS get_chain_certs against local TLS server.
+#[test]
+fn local_sslcert_get_chain_certs_success() {
+    let server = local_fixtures::TlsEchoServer::start();
+    let profile = make_manual_permissive_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/sslcert_get_chain_certs_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("https"),
+        &profile,
+    );
+    assert!(
+        report.output.content.contains("chain_count="),
+        "TLS get_chain_certs fixture should return chain count: output={}, errors={:?}",
+        report.output.content,
+        report.errors,
+    );
+}
+
+/// TLS is_valid against local TLS server.
+#[test]
+fn local_sslcert_is_valid_success() {
+    let server = local_fixtures::TlsEchoServer::start();
+    let profile = make_manual_permissive_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/sslcert_is_valid_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("https"),
+        &profile,
+    );
+    assert!(
+        report.output.content.contains("valid="),
+        "TLS is_valid fixture should return validity: output={}, errors={:?}",
+        report.output.content,
+        report.errors,
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Tests: Report Integrity
