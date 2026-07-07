@@ -198,8 +198,8 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
         sandbox_side_effects: &[NseSandboxSideEffect::NetworkAccess],
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::HardFail,
-        notes: "HTTP client library. Supports GET/POST, cookies, authentication, SSL/TLS. Network checks via NseCapabilityContext; reqwest performs actual I/O.",
-        enforcement_status: EnforcementStatus::PartiallyWrapped,
+        notes: "HTTP client library. Supports GET/POST, cookies, authentication, SSL/TLS. All network operations gated via check_network_tcp(); denied requests never reach reqwest.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "dns",
@@ -936,10 +936,7 @@ mod tests {
             partially.contains(&"stdnse"),
             "stdnse should be PartiallyWrapped"
         );
-        assert!(
-            partially.contains(&"http"),
-            "http should be PartiallyWrapped"
-        );
+        // http was PartiallyWrapped but is now Wrapped (Milestone 6: check_network_tcp blocks before reqwest)
     }
 
     #[test]

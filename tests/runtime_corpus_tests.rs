@@ -781,11 +781,12 @@ fn corpus_runtime_observed_libraries_match_expected() {
                     );
                 } else {
                     assert!(
-                        report.libraries.is_empty() || found,
-                        "fixture '{}': expected library '{}' not observed in runtime libraries: {:?}",
+                        found,
+                        "Fixture '{}' declares expected_library '{}' but it was not observed in runtime require() tracking. \
+                         Observed libraries: {:?}",
                         entry.id,
                         expected_lib,
-                        report.libraries.iter().map(|l| &l.name).collect::<Vec<_>>(),
+                        report.libraries.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
                     );
                 }
             }

@@ -374,6 +374,11 @@ fn local_http_get_title_success() {
         report.compatibility.status,
         report.errors,
     );
+    // ManualPermissive must actually reach the server
+    assert!(
+        server.hits() > 0,
+        "ManualPermissive HTTP GET must reach the server"
+    );
 }
 
 /// HTTP POST against local HTTP server.
@@ -406,10 +411,15 @@ fn local_http_post_success() {
         report.compatibility.status,
         report.errors,
     );
+    // ManualPermissive must actually reach the server
+    assert!(
+        server.hits() > 0,
+        "ManualPermissive HTTP POST must reach the server"
+    );
 }
 
-/// HTTP GET under AgentSafe: reqwest bypasses the capability context,
-/// so no TCP denial events are produced. This documents the gap.
+/// HTTP GET under AgentSafe: capability context denies network TCP, so reqwest
+/// is never reached and the server receives zero hits.
 #[test]
 fn local_http_get_agent_safe_documentation() {
     let server = local_fixtures::HttpServer::start();
@@ -424,31 +434,79 @@ fn local_http_get_agent_safe_documentation() {
         &profile,
     );
 
-    // The HTTP library (reqwest) bypasses the NSE capability context,
-    // so no NetworkTcp denial events are produced even under AgentSafe.
-    // This is a known gap documented in the plan.
+    // Script should complete without crashing
+    assert!(
+        report.output.content.contains("HTTP GET failed")
+            || report.output.content.contains("title:")
+            || report.output.content.is_empty(),
+        "AgentSafe HTTP GET should complete without crash: {}",
+        report.output.content,
+    );
+
+    // Must have at least one network_tcp denial event
     let tcp_denials: Vec<_> = report
         .capability_events
         .iter()
         .filter(|e| e.kind == "network_tcp" && !e.allowed)
         .collect();
-    // We don't assert denial — we document the behavior
-    eprintln!(
-        "HTTP under AgentSafe: {} TCP denial events (reqwest bypasses capability context)",
-        tcp_denials.len()
-    );
-    // The reqwest HTTP library bypasses NseCapabilityContext, so under AgentSafe
-    // the Lua script's http.get() may fail or succeed depending on whether the
-    // reqwest layer itself is subject to the capability gate.  We accept either
-    // outcome and document the gap rather than asserting a hard requirement.
-    let got_output = report.output.content.contains("title: Eggsec Test Page");
-    let got_failure = report.output.content.contains("HTTP GET failed")
-        || report.output.content.contains("connection refused")
-        || report.output.content.is_empty();
     assert!(
-        got_output || got_failure,
-        "HTTP GET under AgentSafe should either succeed (reqwest bypass) or fail gracefully: {}",
+        !tcp_denials.is_empty(),
+        "AgentSafe HTTP GET must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
         report.output.content,
+    );
+
+    // Server must not have been contacted
+    assert_eq!(
+        server.hits(),
+        0,
+        "AgentSafe HTTP GET must not reach the server"
+    );
+}
+
+/// HTTP GET under CiSafe: capability context denies network TCP, so reqwest
+/// is never reached and the server receives zero hits.
+#[test]
+fn local_http_get_ci_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/http_get_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+
+    // Script should complete without crashing
+    assert!(
+        report.output.content.contains("HTTP GET failed")
+            || report.output.content.contains("title:")
+            || report.output.content.is_empty(),
+        "CiSafe HTTP GET should complete without crash: {}",
+        report.output.content,
+    );
+
+    // Must have at least one network_tcp denial event
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe HTTP GET must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+
+    // Server must not have been contacted
+    assert_eq!(
+        server.hits(),
+        0,
+        "CiSafe HTTP GET must not reach the server"
     );
 }
 

@@ -157,6 +157,7 @@ local_fixture = true
 public_network_required = false
 gap_classification = "supported"
 notes = "Script requiring a builtin module."
+harness = { allow_missing_runtime_libraries = true }
 
 [[fixture]]
 id = "stdnse-output"

@@ -9,7 +9,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -107,6 +107,7 @@ pub struct HttpServer {
     port: u16,
     shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    hits: Arc<AtomicUsize>,
 }
 
 impl HttpServer {
@@ -116,6 +117,8 @@ impl HttpServer {
         let port = listener.local_addr().unwrap().port();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = shutdown.clone();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = hits.clone();
 
         listener.set_nonblocking(true).unwrap();
 
@@ -123,6 +126,7 @@ impl HttpServer {
             while !shutdown_clone.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        hits_clone.fetch_add(1, Ordering::Relaxed);
                         stream
                             .set_read_timeout(Some(Duration::from_secs(3)))
                             .unwrap();
@@ -140,6 +144,7 @@ impl HttpServer {
             port,
             shutdown,
             handle: Some(handle),
+            hits,
         }
     }
 
@@ -221,6 +226,11 @@ impl HttpServer {
     /// The base URL (e.g. `http://127.0.0.1:<port>`).
     pub fn base_url(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
+    }
+
+    /// The number of connections accepted by this server.
+    pub fn hits(&self) -> usize {
+        self.hits.load(Ordering::Relaxed)
     }
 }
 
