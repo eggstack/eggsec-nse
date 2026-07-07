@@ -314,11 +314,12 @@ pub use resolver::registry::{
 
 #[cfg(feature = "nse")]
 pub use report::{
-    NseCompatibilitySummary, NseEvidenceItem, NseEvidenceKind, NseExecutionStatsSummary,
-    NseLibraryUseReport, NseLimitsSummary, NseOutputSummary, NseProfileSummary,
-    NseRequiredModuleReport, NseRequiredModuleSource, NseResolverDiagnosticSummary,
-    NseResolverSummary, NseRuleEvaluationReport, NseRunCompatibilityStatus, NseRunFidelity,
-    NseRunReport, NseSandboxSummary, NseScriptSourceSummary,
+    NseCapabilityEventSummary, NseCompatibilitySummary, NseEvidenceItem, NseEvidenceKind,
+    NseExecutionStatsSummary, NseLibraryUseReport, NseLimitsSummary, NseOutputSummary,
+    NseProfileSummary, NseRequiredModuleReport, NseRequiredModuleSource,
+    NseResolverDiagnosticSummary, NseResolverSummary, NseRuleEvaluationReport,
+    NseRunCompatibilityStatus, NseRunFidelity, NseRunReport, NseSandboxSummary,
+    NseScriptSourceSummary,
 };
 
 #[cfg(feature = "nse")]
