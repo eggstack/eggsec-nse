@@ -91,6 +91,16 @@ struct FixtureEntry {
     script_args: Option<String>,
     #[serde(default)]
     harness: Option<FixtureHarness>,
+    /// Fixtures with `local_service` are executed by `local_protocol_tests.rs`
+    /// which starts real local servers. The runtime corpus harness skips them.
+    #[serde(default)]
+    local_service: Option<LocalService>,
+}
+
+#[derive(serde::Deserialize)]
+struct LocalService {
+    #[serde(default)]
+    r#type: String,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -558,6 +568,10 @@ fn corpus_runtime_all_fixtures_execute_and_assert() {
     let mut approved = 0u32;
 
     for entry in &manifest.fixture {
+        // Skip fixtures requiring local servers — tested by local_protocol_tests.rs
+        if entry.local_service.is_some() {
+            continue;
+        }
         let (report, _evidence) = run_fixture_runtime(entry);
         let expected_status = parse_status(&entry.expected_status);
         let expected_fidelity = parse_fidelity(&entry.expected_fidelity);
@@ -672,7 +686,7 @@ fn run_category_runtime(category: &str) {
     let entries: Vec<_> = manifest
         .fixture
         .iter()
-        .filter(|e| e.category == category)
+        .filter(|e| e.category == category && e.local_service.is_none())
         .collect();
     assert!(
         !entries.is_empty(),
@@ -708,11 +722,14 @@ fn run_category_runtime(category: &str) {
 fn corpus_runtime_observed_libraries_match_expected() {
     let manifest = load_manifest();
     for entry in &manifest.fixture {
-        if entry.expected_block {
+        if entry.expected_block || entry.local_service.is_some() {
             continue;
         }
         let (report, _) = run_fixture_runtime(entry);
-        let soft = entry.harness.as_ref().is_some_and(|h| h.allow_missing_runtime_libraries);
+        let soft = entry
+            .harness
+            .as_ref()
+            .is_some_and(|h| h.allow_missing_runtime_libraries);
         for expected_lib in &entry.expected_libraries {
             let found = report.libraries.iter().any(|l| l.name == *expected_lib);
             if !found {
@@ -746,14 +763,17 @@ fn corpus_runtime_observed_libraries_match_expected() {
 fn corpus_runtime_observed_rules_match_expected() {
     let manifest = load_manifest();
     for entry in &manifest.fixture {
-        if entry.expected_block {
+        if entry.expected_block || entry.local_service.is_some() {
             continue;
         }
         if entry.expected_rules.is_empty() {
             continue;
         }
         let (report, _) = run_fixture_runtime(entry);
-        let soft = entry.harness.as_ref().is_some_and(|h| h.allow_missing_runtime_rules);
+        let soft = entry
+            .harness
+            .as_ref()
+            .is_some_and(|h| h.allow_missing_runtime_rules);
         let has_ports = !entry.ports.is_empty();
         if report.rules.is_empty() {
             if soft || !has_ports {
@@ -794,7 +814,7 @@ fn corpus_runtime_observed_capability_events_match_expected() {
     let mut denial_fixtures_checked = 0u32;
 
     for entry in &manifest.fixture {
-        if entry.expected_block {
+        if entry.expected_block || entry.local_service.is_some() {
             continue;
         }
         if entry.expected_capability_events.is_empty() {
@@ -880,7 +900,7 @@ fn corpus_runtime_observed_evidence_includes_capability_denials() {
     let manifest = load_manifest();
     for entry in &manifest.fixture {
         let has_expected_denials = entry.expected_capability_events.iter().any(|e| !e.allowed);
-        if !has_expected_denials || entry.expected_block {
+        if !has_expected_denials || entry.expected_block || entry.local_service.is_some() {
             continue;
         }
 
@@ -913,7 +933,7 @@ fn corpus_runtime_strict_evidence_assertions() {
         if entry.expected_evidence_kinds.is_empty() && entry.optional_evidence_kinds.is_empty() {
             continue;
         }
-        if entry.expected_block {
+        if entry.expected_block || entry.local_service.is_some() {
             continue;
         }
 

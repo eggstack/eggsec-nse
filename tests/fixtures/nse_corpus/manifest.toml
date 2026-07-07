@@ -924,3 +924,159 @@ protocol = "tcp"
 state = "open"
 service = "http"
 
+
+# ---------------------------------------------------------------------------
+# Local Protocol Fixtures (Milestone 5 Phase 03)
+#
+# These fixtures connect to real local servers started by the test harness.
+# They verify actual TCP/HTTP/UDP connectivity through NSE libraries.
+# The [local_service] table declares the server type for harness startup.
+# ---------------------------------------------------------------------------
+
+[[fixture]]
+id = "tcp-connect-echo"
+name = "tcp_connect_echo.nse"
+category = "protocol"
+path = "scripts/protocol/tcp_connect_echo.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["nmap", "socket"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "network_tcp", operation = "socket.connect", allowed = true }]
+provenance = "clean-room"
+upstream_reference = "socket.tcp() connect/send/receive pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "TCP connect + echo against local server. Real connectivity test."
+
+[fixture.local_service]
+type = "tcp_echo"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+
+[[fixture]]
+id = "tcp-connect-denied"
+name = "tcp_connect_denied.nse"
+category = "protocol"
+path = "scripts/protocol/tcp_connect_denied.nse"
+profile = "agent_safe_runtime"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["nmap", "socket"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "network_tcp", operation = "socket.connect", allowed = false }]
+provenance = "clean-room"
+upstream_reference = "socket.tcp() connect pattern with denial expectation"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "TCP connect denied under AgentSafe/CiSafe profiles."
+
+[fixture.local_service]
+type = "tcp_echo"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+
+[[fixture]]
+id = "http-get-local"
+name = "http_get_local.nse"
+category = "protocol"
+path = "scripts/protocol/http_get_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["http", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "http.get() title extraction pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "HTTP GET against local server, extracts <title>. reqwest bypasses capability context."
+
+[fixture.local_service]
+type = "http"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+service = "http"
+
+[[fixture]]
+id = "http-post-local"
+name = "http_post_local.nse"
+category = "protocol"
+path = "scripts/protocol/http_post_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["http", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "http.post() API endpoint testing pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "HTTP POST against local server. reqwest bypasses capability context."
+
+[fixture.local_service]
+type = "http"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+service = "http"
+
+[[fixture]]
+id = "udp-echo"
+name = "udp_echo.nse"
+category = "protocol"
+path = "scripts/protocol/udp_echo.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["nmap", "socket"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "network_udp", operation = "socket.sendto", allowed = true }]
+provenance = "clean-room"
+upstream_reference = "socket.udp() sendto/receive_from pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "UDP echo against local server. Real connectivity test."
+
+[fixture.local_service]
+type = "udp_echo"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "udp"
+state = "open"
+
