@@ -1338,6 +1338,10 @@ fn local_sslcert_get_certificate_success() {
         !crypto_events.is_empty(),
         "should have crypto capability events"
     );
+    assert!(
+        server.hits() > 0,
+        "ManualPermissive sslcert get_certificate must reach the TLS server"
+    );
 }
 
 /// TLS certificate parsing (get_certificate + parse_cert) against local TLS server.
@@ -1359,6 +1363,10 @@ fn local_sslcert_parse_cert_success() {
         "TLS parse_cert fixture should return parsed cert fields: output={}, errors={:?}",
         report.output.content,
         report.errors,
+    );
+    assert!(
+        server.hits() > 0,
+        "ManualPermissive sslcert parse_cert must reach the TLS server"
     );
 }
 
@@ -1382,6 +1390,10 @@ fn local_sslcert_get_subject_success() {
         report.output.content,
         report.errors,
     );
+    assert!(
+        server.hits() > 0,
+        "ManualPermissive sslcert get_subject must reach the TLS server"
+    );
 }
 
 /// TLS get_chain_certs against local TLS server.
@@ -1403,6 +1415,10 @@ fn local_sslcert_get_chain_certs_success() {
         "TLS get_chain_certs fixture should return chain count: output={}, errors={:?}",
         report.output.content,
         report.errors,
+    );
+    assert!(
+        server.hits() > 0,
+        "ManualPermissive sslcert get_chain_certs must reach the TLS server"
     );
 }
 
@@ -1521,6 +1537,38 @@ fn local_sslcert_get_certificate_ci_safe_denied() {
         server.hits(),
         0,
         "CiSafe sslcert get_certificate must not reach the server"
+    );
+}
+
+/// TLS get_chain_certs under CiSafe: network TCP denied, zero server hits.
+#[test]
+fn local_sslcert_get_chain_certs_ci_safe_denied() {
+    let server = local_fixtures::TlsEchoServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/sslcert_get_chain_certs_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("https"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe sslcert get_chain_certs must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "CiSafe sslcert get_chain_certs must not reach the server"
     );
 }
 
