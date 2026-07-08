@@ -4,7 +4,6 @@
 //! Based on Nmap's sslcert library: https://nmap.org/nsedoc/lib/sslcert.html
 
 use mlua::{Lua, Result as LuaResult, Table};
-use native_tls::TlsConnector;
 use openssl::x509::X509;
 use std::net::TcpStream;
 
@@ -13,6 +12,69 @@ extern crate hex;
 
 use crate::capabilities::NseCapabilityContext;
 use crate::wrappers;
+
+/// Construct a denied error table for the sslcert library.
+fn denied_table(lua: &Lua, kind: &str, reason: &str) -> LuaResult<Table> {
+    let result = lua.create_table()?;
+    result.set("error", format!("{} denied: {}", kind, reason))?;
+    Ok(result)
+}
+
+/// Check crypto capability and return a denied response table if not allowed.
+/// Returns `Some(table)` if the operation should be denied, `None` if allowed.
+fn maybe_crypto_denied_response(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    operation: &'static str,
+) -> LuaResult<Option<Table>> {
+    let decision = wrappers::check_crypto(ctx, operation);
+    if decision.is_denied() {
+        Ok(Some(denied_table(
+            lua,
+            "Crypto",
+            decision.deny_reason().unwrap_or("policy violation"),
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Check network TCP capability and return a denied response table if not allowed.
+/// Returns `Some(table)` if the operation should be denied, `None` if allowed.
+fn maybe_network_denied_response(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if decision.is_denied() {
+        Ok(Some(denied_table(
+            lua,
+            "Network",
+            decision.deny_reason().unwrap_or("network access denied"),
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Build a TLS connection to the given host and port.
+/// Returns `Ok(TlsStream)` on success, or `Err(error_message)` on failure.
+fn tls_connect(host: &str, port: u16) -> Result<native_tls::TlsStream<TcpStream>, String> {
+    let connector = native_tls::TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_hostnames(true)
+        .build()
+        .map_err(|e| format!("TLS connector error: {}", e))?;
+
+    let stream = TcpStream::connect(format!("{}:{}", host, port))
+        .map_err(|e| format!("Connection error: {}", e))?;
+
+    connector
+        .connect(host, stream)
+        .map_err(|e| format!("TLS handshake error: {}", e))
+}
 
 fn parse_x509_name(name: &openssl::x509::X509NameRef) -> String {
     name.entries()
@@ -36,62 +98,26 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
 
     let cap_ctx = capability_ctx.clone();
     let get_cert_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
-        let decision = wrappers::check_crypto(&cap_ctx, "sslcert.get_certificate");
-        if decision.is_denied() {
-            let result = lua.create_table()?;
-            result.set(
-                "error",
-                format!(
-                    "Crypto denied: {}",
-                    decision.deny_reason().unwrap_or("policy violation")
-                ),
-            )?;
-            return Ok(result);
+        if let Some(resp) = maybe_crypto_denied_response(lua, &cap_ctx, "sslcert.get_certificate")?
+        {
+            return Ok(resp);
+        }
+        if let Some(resp) =
+            maybe_network_denied_response(lua, &cap_ctx, &host, "sslcert.get_certificate")?
+        {
+            return Ok(resp);
         }
 
-        let decision = wrappers::check_network_tcp(&cap_ctx, &host, "sslcert.get_certificate");
-        if decision.is_denied() {
-            let result = lua.create_table()?;
-            result.set(
-                "error",
-                format!(
-                    "Network denied: {}",
-                    decision.deny_reason().unwrap_or("network access denied")
-                ),
-            )?;
-            return Ok(result);
-        }
+        let stream = match tls_connect(&host, port) {
+            Ok(s) => s,
+            Err(e) => {
+                let result = lua.create_table()?;
+                result.set("error", e)?;
+                return Ok(result);
+            }
+        };
 
         let result = lua.create_table()?;
-
-        let connector = match TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                result.set("error", format!("TLS connector error: {}", e))?;
-                return Ok(result);
-            }
-        };
-
-        let stream = match TcpStream::connect(format!("{}:{}", host, port)) {
-            Ok(s) => s,
-            Err(e) => {
-                result.set("error", format!("Connection error: {}", e))?;
-                return Ok(result);
-            }
-        };
-
-        let stream = match connector.connect(&host, stream) {
-            Ok(s) => s,
-            Err(e) => {
-                result.set("error", format!("TLS handshake error: {}", e))?;
-                return Ok(result);
-            }
-        };
-
         if let Some(native_cert) = stream.peer_certificate().ok().flatten() {
             if let Ok(der) = native_cert.to_der() {
                 if let Ok(x509) = X509::from_der(&der) {
@@ -117,62 +143,26 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
 
     let cap_ctx = capability_ctx.clone();
     let get_chain_certs_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
-        let decision = wrappers::check_crypto(&cap_ctx, "sslcert.get_chain_certs");
-        if decision.is_denied() {
-            let result = lua.create_table()?;
-            result.set(
-                "error",
-                format!(
-                    "Crypto denied: {}",
-                    decision.deny_reason().unwrap_or("policy violation")
-                ),
-            )?;
-            return Ok(result);
+        if let Some(resp) = maybe_crypto_denied_response(lua, &cap_ctx, "sslcert.get_chain_certs")?
+        {
+            return Ok(resp);
+        }
+        if let Some(resp) =
+            maybe_network_denied_response(lua, &cap_ctx, &host, "sslcert.get_chain_certs")?
+        {
+            return Ok(resp);
         }
 
-        let decision = wrappers::check_network_tcp(&cap_ctx, &host, "sslcert.get_chain_certs");
-        if decision.is_denied() {
-            let result = lua.create_table()?;
-            result.set(
-                "error",
-                format!(
-                    "Network denied: {}",
-                    decision.deny_reason().unwrap_or("network access denied")
-                ),
-            )?;
-            return Ok(result);
-        }
+        let tls_stream = match tls_connect(&host, port) {
+            Ok(s) => s,
+            Err(e) => {
+                let result = lua.create_table()?;
+                result.set("error", e)?;
+                return Ok(result);
+            }
+        };
 
         let result = lua.create_table()?;
-
-        let connector = match native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                result.set("error", format!("TLS connector error: {}", e))?;
-                return Ok(result);
-            }
-        };
-
-        let stream = match TcpStream::connect(format!("{}:{}", host, port)) {
-            Ok(s) => s,
-            Err(e) => {
-                result.set("error", format!("Connection error: {}", e))?;
-                return Ok(result);
-            }
-        };
-
-        let tls_stream = match connector.connect(&host, stream) {
-            Ok(s) => s,
-            Err(e) => {
-                result.set("error", format!("TLS handshake error: {}", e))?;
-                return Ok(result);
-            }
-        };
-
         let certs = lua.create_table()?;
         if let Some(cert) = tls_stream.peer_certificate().ok().flatten() {
             if let Ok(der) = cert.to_der() {
@@ -345,7 +335,7 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
     sslcert.set("is_valid", is_valid_fn)?;
 
     let cap_ctx = capability_ctx.clone();
-    let version = lua.create_function(move |lua, (host, port): (String, u16)| {
+    let version = lua.create_function(move |_lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "sslcert.version");
         if decision.is_denied() {
             return Ok(String::new());
@@ -356,25 +346,7 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
             return Ok(String::new());
         }
 
-        let _result = lua.create_table()?;
-
-        let connector = match native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-        {
-            Ok(c) => c,
-            Err(_e) => {
-                return Ok(String::new());
-            }
-        };
-
-        let stream = match TcpStream::connect(format!("{}:{}", host, port)) {
-            Ok(s) => s,
-            Err(_) => return Ok(String::new()),
-        };
-
-        let tls_stream = match connector.connect(&host, stream) {
+        let tls_stream = match tls_connect(&host, port) {
             Ok(s) => s,
             Err(_) => return Ok(String::new()),
         };
