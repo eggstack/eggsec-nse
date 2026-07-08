@@ -84,7 +84,22 @@ pub fn get_connection(host: &str, port: u16) -> Option<TcpStream> {
     None
 }
 
-fn reconnect_stream(host: &str, port: u16, timeout_secs: i64) -> Option<TcpStream> {
+fn reconnect_stream(
+    host: &str,
+    port: u16,
+    timeout_secs: i64,
+    ctx: &NseCapabilityContext,
+) -> Option<TcpStream> {
+    let decision = crate::wrappers::check_network_tcp(ctx, host, "nmap.reconnect");
+    if decision.is_denied() {
+        tracing::warn!(
+            "nmap reconnect to {}:{} denied: {}",
+            host,
+            port,
+            decision.deny_reason().unwrap_or("network TCP denied")
+        );
+        return None;
+    }
     let addr = format!("{}:{}", host, port).parse().ok()?;
     let stream =
         TcpStream::connect_timeout(&addr, Duration::from_secs(timeout_secs as u64)).ok()?;
@@ -306,92 +321,118 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         })?,
     )?;
 
+    let cap_for_connect = capability_ctx.clone();
     nmap.set(
         "socket_connect",
-        lua.create_function(|lua, (socket_table, host, port): (Table, String, u16)| {
-            let result = lua.create_table()?;
+        lua.create_function(
+            move |lua, (socket_table, host, port): (Table, String, u16)| {
+                let result = lua.create_table()?;
 
-            if let Ok(closed) = socket_table.get::<bool>("closed") {
-                if closed {
-                    result.set("status", "error")?;
-                    result.set("error", "socket is closed")?;
-                    return Ok(result);
+                if let Ok(closed) = socket_table.get::<bool>("closed") {
+                    if closed {
+                        result.set("status", "error")?;
+                        result.set("error", "socket is closed")?;
+                        return Ok(result);
+                    }
                 }
-            }
 
-            let timeout = socket_table.get::<i64>("timeout").unwrap_or(10);
-            let addr = format!("{}:{}", host, port);
-            let socket_addr: std::net::SocketAddr = match addr.parse() {
-                Ok(a) => a,
-                Err(e) => {
+                let decision = crate::wrappers::check_network_tcp(
+                    &cap_for_connect,
+                    &host,
+                    "nmap.socket_connect",
+                );
+                if decision.is_denied() {
                     result.set("status", "error")?;
-                    result.set("error", format!("Address parse error: {}", e))?;
-                    return Ok(result);
-                }
-            };
-
-            match std::net::TcpStream::connect_timeout(
-                &socket_addr,
-                Duration::from_secs(timeout as u64),
-            ) {
-                Ok(stream) => {
-                    if let Err(e) =
-                        stream.set_read_timeout(Some(Duration::from_secs(timeout as u64)))
-                    {
-                        tracing::warn!("nmap socket_connect: failed to set read timeout: {}", e);
-                    }
-                    if let Err(e) =
-                        stream.set_write_timeout(Some(Duration::from_secs(timeout as u64)))
-                    {
-                        tracing::warn!("nmap socket_connect: failed to set write timeout: {}", e);
-                    }
-
-                    let conn_key = get_connection_key(&host, port);
-                    if let Ok(mut reg) = CONNECTION_REGISTRY.write() {
-                        reg.insert(
-                            conn_key.clone(),
-                            ConnectionEntry {
-                                stream,
-                                created_at: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_secs(),
-                            },
-                        );
-                    }
-
-                    let socket_id = format!("socket_{}", conn_key);
-                    if let Err(e) = socket_table.set("socket_key", socket_id) {
-                        tracing::warn!("nmap socket_connect: failed to set socket_key: {}", e);
-                    }
-
-                    result.set("status", "connected")?;
-                    result.set("host", host.clone())?;
-                    result.set("port", port)?;
-                    socket_table.set("connected", true)?;
-                    socket_table.set("remote_host", host)?;
-                    socket_table.set("remote_port", port)?;
-                    socket_table.set(
-                        "connected_at",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs(),
+                    result.set(
+                        "error",
+                        decision
+                            .deny_reason()
+                            .unwrap_or("network TCP connect denied"),
                     )?;
+                    return Ok(result);
                 }
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                }
-            }
 
-            Ok(result)
-        })?,
+                let timeout = socket_table.get::<i64>("timeout").unwrap_or(10);
+                let addr = format!("{}:{}", host, port);
+                let socket_addr: std::net::SocketAddr = match addr.parse() {
+                    Ok(a) => a,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", format!("Address parse error: {}", e))?;
+                        return Ok(result);
+                    }
+                };
+
+                match std::net::TcpStream::connect_timeout(
+                    &socket_addr,
+                    Duration::from_secs(timeout as u64),
+                ) {
+                    Ok(stream) => {
+                        if let Err(e) =
+                            stream.set_read_timeout(Some(Duration::from_secs(timeout as u64)))
+                        {
+                            tracing::warn!(
+                                "nmap socket_connect: failed to set read timeout: {}",
+                                e
+                            );
+                        }
+                        if let Err(e) =
+                            stream.set_write_timeout(Some(Duration::from_secs(timeout as u64)))
+                        {
+                            tracing::warn!(
+                                "nmap socket_connect: failed to set write timeout: {}",
+                                e
+                            );
+                        }
+
+                        let conn_key = get_connection_key(&host, port);
+                        if let Ok(mut reg) = CONNECTION_REGISTRY.write() {
+                            reg.insert(
+                                conn_key.clone(),
+                                ConnectionEntry {
+                                    stream,
+                                    created_at: std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_secs(),
+                                },
+                            );
+                        }
+
+                        let socket_id = format!("socket_{}", conn_key);
+                        if let Err(e) = socket_table.set("socket_key", socket_id) {
+                            tracing::warn!("nmap socket_connect: failed to set socket_key: {}", e);
+                        }
+
+                        result.set("status", "connected")?;
+                        result.set("host", host.clone())?;
+                        result.set("port", port)?;
+                        socket_table.set("connected", true)?;
+                        socket_table.set("remote_host", host)?;
+                        socket_table.set("remote_port", port)?;
+                        socket_table.set(
+                            "connected_at",
+                            std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs(),
+                        )?;
+                    }
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e.to_string())?;
+                    }
+                }
+
+                Ok(result)
+            },
+        )?,
     )?;
 
+    let cap_for_send = capability_ctx.clone();
     nmap.set(
         "socket_send",
-        lua.create_function(|lua, (socket_table, data): (Table, String)| {
+        lua.create_function(move |lua, (socket_table, data): (Table, String)| {
             let result = lua.create_table()?;
 
             if let Ok(closed) = socket_table.get::<bool>("closed") {
@@ -445,7 +486,7 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
             // Reconnect if needed
             if should_reconnect {
-                match reconnect_stream(&host, port, timeout) {
+                match reconnect_stream(&host, port, timeout, &cap_for_send) {
                     Some(new_stream) => {
                         if let Ok(mut reg) = CONNECTION_REGISTRY.write() {
                             reg.insert(
@@ -479,7 +520,9 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                         Err(e) => {
                             // Try one reconnect on write error
                             drop(reg); // Release lock before reconnecting
-                            if let Some(new_stream) = reconnect_stream(&host, port, timeout) {
+                            if let Some(new_stream) =
+                                reconnect_stream(&host, port, timeout, &cap_for_send)
+                            {
                                 if let Ok(mut reg) = CONNECTION_REGISTRY.write() {
                                     reg.insert(
                                         conn_key.clone(),
@@ -520,9 +563,10 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         })?,
     )?;
 
+    let cap_for_recv = capability_ctx.clone();
     nmap.set(
         "socket_receive",
-        lua.create_function(|lua, (socket_table, size): (Table, Option<usize>)| {
+        lua.create_function(move |lua, (socket_table, size): (Table, Option<usize>)| {
             let result = lua.create_table()?;
             let size = size.unwrap_or(1024);
 
@@ -577,7 +621,7 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
             // Attempt reconnect if needed
             if should_reconnect {
-                match reconnect_stream(&host, port, timeout) {
+                match reconnect_stream(&host, port, timeout, &cap_for_recv) {
                     Some(new_stream) => {
                         if let Ok(mut reg) = CONNECTION_REGISTRY.write() {
                             reg.insert(
@@ -1286,10 +1330,79 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
     nmap.set("verbosity", lua.create_function(|_lua, _: ()| Ok(0))?)?;
 
+    let cap_for_async_connect = capability_ctx.clone();
     nmap.set(
         "async_socket_connect",
         lua.create_async_function(
-            |lua, (socket_table, host, port): (Table, String, u16)| async move {
+            move |lua, (socket_table, host, port): (Table, String, u16)| {
+                let cap = cap_for_async_connect.clone();
+                async move {
+                    let result = lua.create_table()?;
+
+                    if let Ok(closed) = socket_table.get::<bool>("closed") {
+                        if closed {
+                            result.set("status", "error")?;
+                            result.set("error", "socket is closed")?;
+                            return Ok(result);
+                        }
+                    }
+
+                    let decision = crate::wrappers::check_network_tcp(
+                        &cap,
+                        &host,
+                        "nmap.async_socket_connect",
+                    );
+                    if decision.is_denied() {
+                        result.set("status", "error")?;
+                        result.set(
+                            "error",
+                            decision
+                                .deny_reason()
+                                .unwrap_or("network TCP connect denied"),
+                        )?;
+                        return Ok(result);
+                    }
+
+                    let timeout = socket_table.get::<i64>("timeout").unwrap_or(10);
+                    let addr = format!("{}:{}", host, port);
+
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(timeout as u64),
+                        tokio::net::TcpStream::connect(&addr),
+                    )
+                    .await
+                    {
+                        Ok(Ok(_stream)) => {
+                            socket_table.set("connected", true)?;
+                            socket_table.set("remote_host", host.clone())?;
+                            socket_table.set("remote_port", port)?;
+
+                            result.set("status", "connected")?;
+                            result.set("host", host)?;
+                            result.set("port", port)?;
+                        }
+                        Ok(Err(e)) => {
+                            result.set("status", "error")?;
+                            result.set("error", e.to_string())?;
+                        }
+                        Err(_) => {
+                            result.set("status", "error")?;
+                            result.set("error", "connection timeout")?;
+                        }
+                    }
+
+                    Ok(result)
+                }
+            },
+        )?,
+    )?;
+
+    let cap_for_async_send = capability_ctx.clone();
+    nmap.set(
+        "async_socket_send",
+        lua.create_async_function(move |lua, (socket_table, data): (Table, String)| {
+            let cap = cap_for_async_send.clone();
+            async move {
                 let result = lua.create_table()?;
 
                 if let Ok(closed) = socket_table.get::<bool>("closed") {
@@ -1300,23 +1413,54 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                     }
                 }
 
-                let timeout = socket_table.get::<i64>("timeout").unwrap_or(10);
-                let addr = format!("{}:{}", host, port);
+                if let Ok(connected) = socket_table.get::<bool>("connected") {
+                    if !connected {
+                        result.set("status", "error")?;
+                        result.set("error", "not connected")?;
+                        return Ok(result);
+                    }
+                }
 
+                let host: String = socket_table.get("remote_host").unwrap_or_default();
+                let port: u16 = socket_table.get("remote_port").unwrap_or(0);
+                let timeout = socket_table.get::<i64>("timeout").unwrap_or(10);
+
+                if host.is_empty() || port == 0 {
+                    result.set("status", "error")?;
+                    result.set("error", "not connected")?;
+                    return Ok(result);
+                }
+
+                let decision =
+                    crate::wrappers::check_network_tcp(&cap, &host, "nmap.async_socket_send");
+                if decision.is_denied() {
+                    result.set("status", "error")?;
+                    result.set(
+                        "error",
+                        decision.deny_reason().unwrap_or("network TCP send denied"),
+                    )?;
+                    return Ok(result);
+                }
+
+                let addr = format!("{}:{}", host, port);
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(timeout as u64),
                     tokio::net::TcpStream::connect(&addr),
                 )
                 .await
                 {
-                    Ok(Ok(_stream)) => {
-                        socket_table.set("connected", true)?;
-                        socket_table.set("remote_host", host.clone())?;
-                        socket_table.set("remote_port", port)?;
-
-                        result.set("status", "connected")?;
-                        result.set("host", host)?;
-                        result.set("port", port)?;
+                    Ok(Ok(mut stream)) => {
+                        use tokio::io::AsyncWriteExt;
+                        match stream.write_all(data.as_bytes()).await {
+                            Ok(()) => {
+                                result.set("status", "sent")?;
+                                result.set("bytes", data.len())?;
+                            }
+                            Err(e) => {
+                                result.set("status", "error")?;
+                                result.set("error", e.to_string())?;
+                            }
+                        }
                     }
                     Ok(Err(e)) => {
                         result.set("status", "error")?;
@@ -1329,79 +1473,16 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 }
 
                 Ok(result)
-            },
-        )?,
-    )?;
-
-    nmap.set(
-        "async_socket_send",
-        lua.create_async_function(|lua, (socket_table, data): (Table, String)| async move {
-            let result = lua.create_table()?;
-
-            if let Ok(closed) = socket_table.get::<bool>("closed") {
-                if closed {
-                    result.set("status", "error")?;
-                    result.set("error", "socket is closed")?;
-                    return Ok(result);
-                }
             }
-
-            if let Ok(connected) = socket_table.get::<bool>("connected") {
-                if !connected {
-                    result.set("status", "error")?;
-                    result.set("error", "not connected")?;
-                    return Ok(result);
-                }
-            }
-
-            let host: String = socket_table.get("remote_host").unwrap_or_default();
-            let port: u16 = socket_table.get("remote_port").unwrap_or(0);
-            let timeout = socket_table.get::<i64>("timeout").unwrap_or(10);
-
-            if host.is_empty() || port == 0 {
-                result.set("status", "error")?;
-                result.set("error", "not connected")?;
-                return Ok(result);
-            }
-
-            let addr = format!("{}:{}", host, port);
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(timeout as u64),
-                tokio::net::TcpStream::connect(&addr),
-            )
-            .await
-            {
-                Ok(Ok(mut stream)) => {
-                    use tokio::io::AsyncWriteExt;
-                    match stream.write_all(data.as_bytes()).await {
-                        Ok(()) => {
-                            result.set("status", "sent")?;
-                            result.set("bytes", data.len())?;
-                        }
-                        Err(e) => {
-                            result.set("status", "error")?;
-                            result.set("error", e.to_string())?;
-                        }
-                    }
-                }
-                Ok(Err(e)) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                }
-                Err(_) => {
-                    result.set("status", "error")?;
-                    result.set("error", "connection timeout")?;
-                }
-            }
-
-            Ok(result)
         })?,
     )?;
 
+    let cap_for_async_recv = capability_ctx.clone();
     nmap.set(
         "async_socket_receive",
-        lua.create_async_function(
-            |lua, (socket_table, size): (Table, Option<usize>)| async move {
+        lua.create_async_function(move |lua, (socket_table, size): (Table, Option<usize>)| {
+            let cap = cap_for_async_recv.clone();
+            async move {
                 let result = lua.create_table()?;
                 let size = size.unwrap_or(1024);
 
@@ -1428,6 +1509,19 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 if host.is_empty() || port == 0 {
                     result.set("status", "error")?;
                     result.set("error", "not connected")?;
+                    return Ok(result);
+                }
+
+                let decision =
+                    crate::wrappers::check_network_tcp(&cap, &host, "nmap.async_socket_receive");
+                if decision.is_denied() {
+                    result.set("status", "error")?;
+                    result.set(
+                        "error",
+                        decision
+                            .deny_reason()
+                            .unwrap_or("network TCP receive denied"),
+                    )?;
                     return Ok(result);
                 }
 
@@ -1465,8 +1559,8 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 }
 
                 Ok(result)
-            },
-        )?,
+            }
+        })?,
     )?;
 
     nmap.set(

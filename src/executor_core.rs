@@ -894,7 +894,7 @@ impl ExecutorCore {
     }
 
     fn register_libraries(&self) -> LuaResult<()> {
-        crate::libraries::stdnse::register_stdlib(&self.lua)?;
+        crate::libraries::stdnse::register_stdlib(&self.lua, &self.capability_context)?;
         crate::libraries::nmap::register_nmap_library(&self.lua, &self.capability_context)?;
         crate::libraries::http::register_http_library(&self.lua, &self.capability_context)?;
         crate::libraries::comm::register_comm_library(&self.lua, &self.capability_context)?;
@@ -1031,7 +1031,7 @@ impl ExecutorCore {
         crate::libraries::omp2::register_omp2_library(&self.lua)?;
         crate::libraries::gps::register_gps_library(&self.lua)?;
         crate::libraries::mobileme::register_mobileme_library(&self.lua)?;
-        crate::libraries::ls::register_ls_library(&self.lua)?;
+        crate::libraries::ls::register_ls_library(&self.lua, &self.capability_context)?;
         crate::libraries::unicode::register_unicode_library(&self.lua)?;
         crate::libraries::bits::register_bits_library(&self.lua)?;
         crate::libraries::formulas::register_formulas_library(&self.lua)?;

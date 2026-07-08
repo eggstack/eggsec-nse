@@ -5,11 +5,21 @@
 
 use mlua::{Lua, Result as LuaResult, Table};
 
-pub fn register_ls_library(lua: &Lua) -> LuaResult<()> {
+use crate::capabilities::NseCapabilityContext;
+
+pub fn register_ls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let ls = lua.create_table()?;
 
-    let dir_fn = lua.create_function(|lua, path: String| {
+    let cap_for_dir = capability_ctx.clone();
+    let dir_fn = lua.create_function(move |lua, path: String| {
+        let decision = crate::wrappers::check_fs_read(&cap_for_dir, &path, "ls.dir");
+        if decision.is_denied() {
+            return Err(mlua::Error::runtime(
+                decision.deny_reason().unwrap_or("filesystem read denied"),
+            ));
+        }
+
         let entries = match std::fs::read_dir(&path) {
             Ok(rd) => {
                 let result = lua.create_table()?;

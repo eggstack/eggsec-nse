@@ -5,8 +5,9 @@
 use mlua::{Lua, Result as LuaResult, Table, Value};
 
 use super::helpers::{fallback_lua_table, parse_hex_pairs};
+use crate::capabilities::NseCapabilityContext;
 
-pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
+pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
 
     let stdnse = lua.create_table()?;
@@ -169,8 +170,23 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
     let verb_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     stdnse.set("version", verb_fn)?;
 
-    let sleep_fn = lua.create_function(|_lua, seconds: f64| {
-        std::thread::sleep(std::time::Duration::from_secs_f64(seconds));
+    let cancel_for_sleep = capability_ctx.cancellation.clone();
+    let sleep_fn = lua.create_function(move |_lua, seconds: f64| {
+        let cancel = cancel_for_sleep.clone();
+        let total = std::time::Duration::from_secs_f64(seconds);
+        let chunk = std::time::Duration::from_millis(100);
+        let mut elapsed = std::time::Duration::ZERO;
+        while elapsed < total {
+            if cancel.is_cancelled() {
+                return Err(mlua::Error::runtime(
+                    "Script execution cancelled during sleep",
+                ));
+            }
+            let remaining = total - elapsed;
+            let step = std::cmp::min(chunk, remaining);
+            std::thread::sleep(step);
+            elapsed += step;
+        }
         Ok(())
     })?;
     stdnse.set("sleep", sleep_fn)?;
@@ -184,8 +200,23 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
     })?;
     stdnse.set("get_time", get_time_fn)?;
 
-    let usleep_fn = lua.create_function(|_lua, microseconds: u64| {
-        std::thread::sleep(std::time::Duration::from_micros(microseconds));
+    let cancel_for_usleep = capability_ctx.cancellation.clone();
+    let usleep_fn = lua.create_function(move |_lua, microseconds: u64| {
+        let cancel = cancel_for_usleep.clone();
+        let total = std::time::Duration::from_micros(microseconds);
+        let chunk = std::time::Duration::from_millis(100);
+        let mut elapsed = std::time::Duration::ZERO;
+        while elapsed < total {
+            if cancel.is_cancelled() {
+                return Err(mlua::Error::runtime(
+                    "Script execution cancelled during usleep",
+                ));
+            }
+            let remaining = total - elapsed;
+            let step = std::cmp::min(chunk, remaining);
+            std::thread::sleep(step);
+            elapsed += step;
+        }
         Ok(())
     })?;
     stdnse.set("usleep", usleep_fn)?;
@@ -288,8 +319,23 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
     let is_visible_fn = lua.create_function(|_lua, _: ()| Ok(true))?;
     stdnse.set("is_visible", is_visible_fn)?;
 
-    let nsleep_fn = lua.create_function(|_lua, nanoseconds: u64| {
-        std::thread::sleep(std::time::Duration::from_nanos(nanoseconds));
+    let cancel_for_nsleep = capability_ctx.cancellation.clone();
+    let nsleep_fn = lua.create_function(move |_lua, nanoseconds: u64| {
+        let cancel = cancel_for_nsleep.clone();
+        let total = std::time::Duration::from_nanos(nanoseconds);
+        let chunk = std::time::Duration::from_millis(100);
+        let mut elapsed = std::time::Duration::ZERO;
+        while elapsed < total {
+            if cancel.is_cancelled() {
+                return Err(mlua::Error::runtime(
+                    "Script execution cancelled during nsleep",
+                ));
+            }
+            let remaining = total - elapsed;
+            let step = std::cmp::min(chunk, remaining);
+            std::thread::sleep(step);
+            elapsed += step;
+        }
         Ok(())
     })?;
     stdnse.set("nsleep", nsleep_fn)?;
@@ -787,46 +833,20 @@ pub fn register_stdlib(lua: &Lua) -> LuaResult<()> {
     static THREAD_RESULTS: std::sync::LazyLock<Mutex<FxHashMap<i64, String>>> =
         std::sync::LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
-    let new_thread_fn =
-        lua.create_function(|_lua, (_func, _args): (mlua::Function, Option<Table>)| {
-            let thread_id = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos() as i64;
-
-            // Spawn a background thread that executes the function
-            // Note: We can't pass mlua::Function across threads, so we'll execute a callback pattern
-            // In a full implementation, you'd use a separate Lua state per thread
-
-            std::thread::spawn(move || {
-                // The thread runs in background
-                // For proper implementation, this would need its own Lua state
-                // Results would be communicated via channels
-                std::thread::sleep(std::time::Duration::from_millis(10));
-            });
-
-            let result = _lua.create_table()?;
-            result.set("thread_id", thread_id)?;
-            result.set("status", "running")?;
-
-            let globals = _lua.globals();
-            if let Ok(stdnse_tbl) = globals.get::<Table>("stdnse") {
-                let threads: Table = stdnse_tbl
-                    .get("_threads")
-                    .unwrap_or_else(|_| fallback_lua_table(_lua));
-                let thread_info = _lua.create_table()?;
-                thread_info.set("id", thread_id)?;
-                thread_info.set("status", "running")?;
-                if let Err(e) = threads.set(thread_id.to_string(), thread_info) {
-                    tracing::warn!("stdnse new_thread: failed to register thread: {}", e);
-                }
-                if let Err(e) = stdnse_tbl.set("_threads", threads) {
-                    tracing::warn!("stdnse new_thread: failed to update _threads table: {}", e);
-                }
-            }
-
-            Ok(result)
-        })?;
+    let new_thread_fn = lua.create_function(
+        |_lua, (_func, _args): (mlua::Function, Option<Table>)| -> mlua::Result<Table> {
+            // NOTE: Proper implementation requires a separate Lua state per thread.
+            // mlua::Function cannot be sent across OS threads. This stub returns
+            // an error to surface the limitation rather than silently no-op.
+            tracing::warn!(
+                "stdnse.new_thread called but is not yet implemented \
+                 (requires per-thread Lua state). Returning error."
+            );
+            Err(mlua::Error::runtime(
+                "stdnse.new_thread is not yet implemented (requires per-thread Lua state)",
+            ))
+        },
+    )?;
     stdnse.set("new_thread", new_thread_fn)?;
 
     let get_thread_count_fn = lua.create_function(|lua, _: ()| {
