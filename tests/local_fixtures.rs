@@ -367,6 +367,7 @@ pub struct TlsEchoServer {
     port: u16,
     shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    hits: Arc<AtomicUsize>,
     cert_subject: String,
     cert_der: Vec<u8>,
     cert_pem: String,
@@ -428,6 +429,8 @@ impl TlsEchoServer {
         let port = listener.local_addr().unwrap().port();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = shutdown.clone();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = hits.clone();
 
         listener.set_nonblocking(true).unwrap();
 
@@ -435,6 +438,7 @@ impl TlsEchoServer {
             while !shutdown_clone.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        hits_clone.fetch_add(1, Ordering::Relaxed);
                         stream
                             .set_read_timeout(Some(Duration::from_secs(3)))
                             .unwrap();
@@ -457,6 +461,7 @@ impl TlsEchoServer {
             port,
             shutdown,
             handle: Some(handle),
+            hits,
             cert_subject: "CN=localhost".to_string(),
             cert_der,
             cert_pem,
@@ -511,6 +516,11 @@ impl TlsEchoServer {
     /// The PEM-encoded self-signed certificate.
     pub fn cert_pem(&self) -> String {
         self.cert_pem.clone()
+    }
+
+    /// The number of connections accepted by this server.
+    pub fn hits(&self) -> usize {
+        self.hits.load(Ordering::Relaxed)
     }
 }
 

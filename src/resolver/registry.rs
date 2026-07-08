@@ -312,10 +312,10 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
     NseLibraryDescriptor {
         name: "creds",
         category: NseLibraryCategory::Auth,
-        sandbox_side_effects: &[],
+        sandbox_side_effects: &[NseSandboxSideEffect::None],
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
-        notes: "Credential management. In-memory username/password pair storage and iteration.",
+        notes: "Pure in-memory credential store. No side effects.",
         enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {

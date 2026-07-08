@@ -1428,6 +1428,102 @@ fn local_sslcert_is_valid_success() {
     );
 }
 
+/// TLS get_certificate under AgentSafe: network TCP denied, zero server hits.
+#[test]
+fn local_sslcert_get_certificate_agent_safe_denied() {
+    let server = local_fixtures::TlsEchoServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/sslcert_get_certificate_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("https"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe sslcert get_certificate must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "AgentSafe sslcert get_certificate must not reach the server"
+    );
+}
+
+/// TLS get_chain_certs under AgentSafe: network TCP denied, zero server hits.
+#[test]
+fn local_sslcert_get_chain_certs_agent_safe_denied() {
+    let server = local_fixtures::TlsEchoServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/sslcert_get_chain_certs_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("https"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe sslcert get_chain_certs must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "AgentSafe sslcert get_chain_certs must not reach the server"
+    );
+}
+
+/// TLS get_certificate under CiSafe: network TCP denied, zero server hits.
+#[test]
+fn local_sslcert_get_certificate_ci_safe_denied() {
+    let server = local_fixtures::TlsEchoServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/sslcert_get_certificate_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("https"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe sslcert get_certificate must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "CiSafe sslcert get_certificate must not reach the server"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Tests: Report Integrity
 // ---------------------------------------------------------------------------

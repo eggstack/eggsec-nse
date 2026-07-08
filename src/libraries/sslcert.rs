@@ -49,6 +49,19 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
             return Ok(result);
         }
 
+        let decision = wrappers::check_network_tcp(&cap_ctx, &host, "sslcert.get_certificate");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                format!(
+                    "Network denied: {}",
+                    decision.deny_reason().unwrap_or("network access denied")
+                ),
+            )?;
+            return Ok(result);
+        }
+
         let result = lua.create_table()?;
 
         let connector = match TlsConnector::builder()
@@ -112,6 +125,19 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
                 format!(
                     "Crypto denied: {}",
                     decision.deny_reason().unwrap_or("policy violation")
+                ),
+            )?;
+            return Ok(result);
+        }
+
+        let decision = wrappers::check_network_tcp(&cap_ctx, &host, "sslcert.get_chain_certs");
+        if decision.is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                format!(
+                    "Network denied: {}",
+                    decision.deny_reason().unwrap_or("network access denied")
                 ),
             )?;
             return Ok(result);
@@ -321,6 +347,11 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
     let cap_ctx = capability_ctx.clone();
     let version = lua.create_function(move |lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "sslcert.version");
+        if decision.is_denied() {
+            return Ok(String::new());
+        }
+
+        let decision = wrappers::check_network_tcp(&cap_ctx, &host, "sslcert.version");
         if decision.is_denied() {
             return Ok(String::new());
         }

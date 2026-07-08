@@ -1250,7 +1250,10 @@ expected_resolved = true
 expected_block = false
 expected_libraries = ["sslcert"]
 expected_rules = ["portrule"]
-expected_capability_events = [{ kind = "crypto", operation = "sslcert.get_certificate", allowed = true }]
+expected_capability_events = [
+    { kind = "crypto", operation = "sslcert.get_certificate", allowed = true },
+    { kind = "network_tcp", operation = "sslcert.get_certificate", allowed = true },
+]
 provenance = "clean-room"
 upstream_reference = "sslcert.get_certificate() TLS handshake pattern"
 license_note = "No upstream source copied"
@@ -1280,7 +1283,10 @@ expected_resolved = true
 expected_block = false
 expected_libraries = ["sslcert"]
 expected_rules = ["portrule"]
-expected_capability_events = [{ kind = "crypto", operation = "sslcert.get_certificate", allowed = true }]
+expected_capability_events = [
+    { kind = "crypto", operation = "sslcert.get_certificate", allowed = true },
+    { kind = "network_tcp", operation = "sslcert.get_certificate", allowed = true },
+]
 provenance = "clean-room"
 upstream_reference = "sslcert.parse_cert() PEM parsing pattern"
 license_note = "No upstream source copied"
@@ -1310,7 +1316,10 @@ expected_resolved = true
 expected_block = false
 expected_libraries = ["sslcert"]
 expected_rules = ["portrule"]
-expected_capability_events = [{ kind = "crypto", operation = "sslcert.get_certificate", allowed = true }]
+expected_capability_events = [
+    { kind = "crypto", operation = "sslcert.get_certificate", allowed = true },
+    { kind = "network_tcp", operation = "sslcert.get_certificate", allowed = true },
+]
 provenance = "clean-room"
 upstream_reference = "sslcert.get_subject() pattern"
 license_note = "No upstream source copied"
@@ -1340,7 +1349,10 @@ expected_resolved = true
 expected_block = false
 expected_libraries = ["sslcert"]
 expected_rules = ["portrule"]
-expected_capability_events = [{ kind = "crypto", operation = "sslcert.get_chain_certs", allowed = true }]
+expected_capability_events = [
+    { kind = "crypto", operation = "sslcert.get_chain_certs", allowed = true },
+    { kind = "network_tcp", operation = "sslcert.get_chain_certs", allowed = true },
+]
 provenance = "clean-room"
 upstream_reference = "sslcert.get_chain_certs() pattern"
 license_note = "No upstream source copied"
@@ -1370,7 +1382,10 @@ expected_resolved = true
 expected_block = false
 expected_libraries = ["sslcert"]
 expected_rules = ["portrule"]
-expected_capability_events = [{ kind = "crypto", operation = "sslcert.get_certificate", allowed = true }]
+expected_capability_events = [
+    { kind = "crypto", operation = "sslcert.get_certificate", allowed = true },
+    { kind = "network_tcp", operation = "sslcert.get_certificate", allowed = true },
+]
 provenance = "clean-room"
 upstream_reference = "sslcert.is_valid() pattern"
 license_note = "No upstream source copied"
