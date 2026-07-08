@@ -7,6 +7,8 @@ use mlua::{Lua, Result as LuaResult};
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::sync::Mutex;
 
+use crate::capabilities::NseCapabilityContext;
+
 static CREDENTIALS_STORE: std::sync::LazyLock<Mutex<FxHashMap<String, Vec<Credential>>>> =
     std::sync::LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
@@ -18,7 +20,7 @@ struct Credential {
     state: String,
 }
 
-pub fn register_creds_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_creds_library(lua: &Lua, _capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let creds = lua.create_table()?;
 

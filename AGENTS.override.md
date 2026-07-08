@@ -148,6 +148,8 @@ New side-effecting code in `eggsec-nse` must go through `ScriptResolver` for fil
 
 9. **NSE Milestone 6 is closed** (2026-07-06). HTTP method coverage complete — all HTTP methods (GET/POST/PUT/DELETE/HEAD/OPTIONS/request) have local fixture scripts with zero-hit denial tests for AgentSafe and CiSafe. HTTP library (`reqwest`) fully migrated to Wrapped status. Architecture guards 48-50 enforce strict assertions. 511 tests pass, 52 architecture guards pass. Remaining deferred: protocol library wrappers, `stdnse.sleep()` cancellation. See `architecture/nse_integration.md#milestone-6-final-verification`.
 
+10. **NSE Expansion Phase 05 is closed** (2026-07-07). Selective deferred library migration: `creds` library migrated from Deferred to Wrapped. Registry corrected: side effects changed from `FileSystemRead, NetworkAccess` to `None` (pure in-memory credential storage). `register_creds_library()` signature updated to accept `&NseCapabilityContext` for API consistency. 4 new runtime corpus fixtures (compatibility_lab, manual_permissive, agent_safe_runtime, ci_safe_runtime) verify creds operations succeed across all profiles with zero capability events. Architecture guard added. 522+ tests pass, 55 architecture guards pass. See `architecture/nse_integration.md#expansion-phase-05`.
+
 ## Dependencies
 
 - `mlua` for Lua VM

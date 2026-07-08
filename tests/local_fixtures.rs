@@ -392,9 +392,7 @@ impl TlsEchoServer {
 
         let mut cert_builder = X509Builder::new().expect("create X509Builder");
         cert_builder.set_version(2).expect("set version");
-        cert_builder
-            .set_subject_name(&name)
-            .expect("set subject");
+        cert_builder.set_subject_name(&name).expect("set subject");
         cert_builder.set_issuer_name(&name).expect("set issuer");
         cert_builder.set_pubkey(&pkey).expect("set pubkey");
 
@@ -474,9 +472,7 @@ impl TlsEchoServer {
                 Ok(0) => break,
                 Ok(_) => {
                     if byte[0] == b'\n' {
-                        let line = String::from_utf8_lossy(&line_buf)
-                            .trim()
-                            .to_string();
+                        let line = String::from_utf8_lossy(&line_buf).trim().to_string();
                         let response = format!("TLS_ECHO: {}\n", line);
                         if stream.write_all(response.as_bytes()).is_err() {
                             return;
@@ -585,9 +581,7 @@ mod tests {
 
         let tcp = TcpStream::connect(server.addr()).expect("connect to TLS server");
         tcp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        let mut tls = connector
-            .connect("localhost", tcp)
-            .expect("TLS handshake");
+        let mut tls = connector.connect("localhost", tcp).expect("TLS handshake");
 
         tls.write_all(b"hello from tls\n").expect("write");
         tls.flush().expect("flush");
@@ -595,10 +589,6 @@ mod tests {
         let mut reader = BufReader::new(tls);
         let mut buf = String::new();
         reader.read_line(&mut buf).expect("read response");
-        assert!(
-            buf.contains("TLS_ECHO: hello from tls"),
-            "got: {}",
-            buf
-        );
+        assert!(buf.contains("TLS_ECHO: hello from tls"), "got: {}", buf);
     }
 }

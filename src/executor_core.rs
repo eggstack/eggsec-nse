@@ -953,7 +953,7 @@ impl ExecutorCore {
         crate::libraries::datetime::register_datetime_library(&self.lua, &self.capability_context)?;
         crate::libraries::rand::register_rand_library(&self.lua, &self.capability_context)?;
         crate::libraries::url::register_url_library(&self.lua)?;
-        crate::libraries::creds::register_creds_library(&self.lua)?;
+        crate::libraries::creds::register_creds_library(&self.lua, &self.capability_context)?;
         crate::libraries::openssl::register_openssl_library(&self.lua, &self.capability_context)?;
         crate::libraries::pcre::register_pcre_library(&self.lua)?;
         crate::libraries::io::register_io_library(

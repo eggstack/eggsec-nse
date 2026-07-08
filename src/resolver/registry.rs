@@ -312,14 +312,11 @@ pub static LIBRARY_REGISTRY: &[NseLibraryDescriptor] = &[
     NseLibraryDescriptor {
         name: "creds",
         category: NseLibraryCategory::Auth,
-        sandbox_side_effects: &[
-            NseSandboxSideEffect::FileSystemRead,
-            NseSandboxSideEffect::NetworkAccess,
-        ],
+        sandbox_side_effects: &[],
         optional_deps: &[],
         fallback_behavior: NseFallbackBehavior::Skip,
-        notes: "Credential management. Username/password pair storage and iteration.",
-        enforcement_status: EnforcementStatus::Deferred,
+        notes: "Credential management. In-memory username/password pair storage and iteration.",
+        enforcement_status: EnforcementStatus::Wrapped,
     },
     NseLibraryDescriptor {
         name: "unpwdb",
