@@ -3,6 +3,7 @@
 //! Verifies that the report/resolver pipeline correctly classifies
 //! supported, partial, approximate, unsupported, denied, and errored
 //! behavior for representative NSE scripts and modules.
+#![cfg(feature = "nse")]
 //!
 //! Run with: `cargo test -p eggsec-nse --features nse compatibility_corpus`
 

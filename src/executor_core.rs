@@ -975,7 +975,7 @@ impl ExecutorCore {
         crate::libraries::bit::register_bit_library(&self.lua)?;
         crate::libraries::vulns::register_vulns_library(&self.lua)?;
         crate::libraries::unpwdb::register_unpwdb_library(&self.lua, &self.capability_context)?;
-        crate::libraries::brute::register_brute_library(&self.lua)?;
+        crate::libraries::brute::register_brute_library(&self.lua, &self.capability_context)?;
         crate::libraries::datafiles::register_datafiles_library(&self.lua)?;
         crate::libraries::json::register_json_library(&self.lua)?;
         crate::libraries::ssh::register_ssh_library(&self.lua)?;

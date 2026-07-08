@@ -1,3 +1,5 @@
+#![cfg(feature = "nse")]
+
 use eggsec_nse::limits::{NseCancellationToken, NseExecutionLimits};
 use eggsec_nse::report::*;
 use eggsec_nse::{NseExecutor, SandboxConfig};

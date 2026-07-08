@@ -1,3 +1,4 @@
+#![cfg(feature = "nse")]
 use eggsec_nse::SandboxConfig;
 use std::net::IpAddr;
 use std::path::PathBuf;

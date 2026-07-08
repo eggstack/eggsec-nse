@@ -3,6 +3,7 @@
 //! Covers: infinite loop interruption, output caps, script size rejection,
 //! timeout violation, cancellation token, compatibility constructors,
 //! and automated vs manual limit profiles.
+#![cfg(feature = "nse")]
 
 use eggsec_nse::limits::{
     NseCancellationToken, NseExecutionLimits, NseLimitViolation, NseResourceCounters,

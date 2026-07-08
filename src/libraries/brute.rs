@@ -11,6 +11,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use super::helpers::fallback_lua_table;
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
 
 static CREDS_STORE: std::sync::LazyLock<Mutex<FxHashMap<String, Vec<(String, String)>>>> =
     std::sync::LazyLock::new(|| Mutex::new(FxHashMap::default()));
@@ -18,7 +20,7 @@ static CREDS_STORE: std::sync::LazyLock<Mutex<FxHashMap<String, Vec<(String, Str
 static ACCOUNT_STORE: std::sync::LazyLock<Mutex<Vec<(String, String, bool)>>> =
     std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
 
-pub fn register_brute_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_brute_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let brute = lua.create_table()?;
 
@@ -85,13 +87,14 @@ pub fn register_brute_library(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
+    let ctx = capability_ctx.clone();
     brute.set(
         "username_iterator",
-        lua.create_function(|lua, (_driver, filename): (Table, Option<String>)| {
+        lua.create_function(move |lua, (_driver, filename): (Table, Option<String>)| {
             let usernames = lua.create_table()?;
 
             let user_list = if let Some(ref f) = filename {
-                std::fs::read_to_string(f)
+                wrappers::nse_fs_read_to_string(&ctx, f)
                     .ok()
                     .map(|content| {
                         content
@@ -113,13 +116,14 @@ pub fn register_brute_library(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
+    let ctx = capability_ctx.clone();
     brute.set(
         "password_iterator",
-        lua.create_function(|lua, (_driver, filename): (Table, Option<String>)| {
+        lua.create_function(move |lua, (_driver, filename): (Table, Option<String>)| {
             let passwords = lua.create_table()?;
 
             let pass_list = if let Some(ref f) = filename {
-                std::fs::read_to_string(f)
+                wrappers::nse_fs_read_to_string(&ctx, f)
                     .ok()
                     .map(|content| {
                         content
@@ -141,12 +145,13 @@ pub fn register_brute_library(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
+    let ctx = capability_ctx.clone();
     brute.set(
         "file_iterator",
-        lua.create_function(|lua, filename: String| {
+        lua.create_function(move |lua, filename: String| {
             let lines = lua.create_table()?;
 
-            if let Ok(content) = std::fs::read_to_string(&filename) {
+            if let Ok(content) = wrappers::nse_fs_read_to_string(&ctx, &filename) {
                 for (i, line) in content.lines().enumerate() {
                     if !line.trim().is_empty() {
                         lines.set(i + 1, line.trim().to_string())?;

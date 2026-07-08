@@ -4,6 +4,8 @@
 //! diagnostics mapping, library metadata, rule evaluation, output truncation,
 //! compatibility computation, serialization roundtrip, and build_report integration.
 
+#![cfg(feature = "nse")]
+
 use eggsec_nse::limits::{NseCancellationToken, NseExecutionLimits};
 use eggsec_nse::profile::ResolvedNseExecutionProfile;
 use eggsec_nse::report::*;
