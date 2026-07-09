@@ -4,10 +4,13 @@
 //! Based on Nmap's smtp library: https://nmap.org/nsedoc/lib/smtp.html
 //! Includes both blocking and async implementations with real SMTP protocol support.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, Result as LuaResult, Table};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
+
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
 
 fn smtp_connect(host: &str, port: u16) -> std::io::Result<(TcpStream, String)> {
     let addr = format!("{}:{}", host, port);
@@ -168,14 +171,42 @@ fn smtp_send_mail(
     }
 }
 
-pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
+/// Check network TCP and return a denied error table, or Ok(None) if allowed.
+fn maybe_denied_smtp(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+pub fn register_smtp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let smtp = lua.create_table()?;
 
+    let cap = capability_ctx.clone();
     smtp.set(
         "connect",
-        lua.create_function(
-            |lua, (host, port): (String, u16)| match smtp_connect(&host, port) {
+        lua.create_function(move |lua, (host, port): (String, u16)| {
+            if let Some(denied) = maybe_denied_smtp(lua, &cap, &host, "smtp.connect")? {
+                return Ok(denied);
+            }
+            match smtp_connect(&host, port) {
                 Ok((_stream, banner)) => {
                     let result = lua.create_table()?;
                     result.set("status", "connected")?;
@@ -188,77 +219,92 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
                     result.set("error", e.to_string())?;
                     Ok(result)
                 }
-            },
-        )?,
-    )?;
-
-    smtp.set(
-        "login",
-        lua.create_function(|lua, (host, user, password): (String, String, String)| {
-            let port = 25;
-            match smtp_connect(&host, port) {
-                Ok((mut stream, _banner)) => {
-                    match smtp_login(&mut stream, &host, &user, &password) {
-                        Ok(success) => {
-                            let result = lua.create_table()?;
-                            result.set("success", success)?;
-                            result.set("user", user)?;
-                            Ok(result)
-                        }
-                        Err(e) => {
-                            let result = lua.create_table()?;
-                            result.set("success", false)?;
-                            result.set("error", e.to_string())?;
-                            Ok(result)
-                        }
-                    }
-                }
-                Err(e) => {
-                    let result = lua.create_table()?;
-                    result.set("success", false)?;
-                    result.set("error", e.to_string())?;
-                    Ok(result)
-                }
             }
         })?,
     )?;
 
+    let cap = capability_ctx.clone();
     smtp.set(
-        "login_ex",
+        "login",
         lua.create_function(
-            |lua, (host, port, user, password): (String, u16, String, String)| match smtp_connect(
-                &host, port,
-            ) {
-                Ok((mut stream, _banner)) => {
-                    match smtp_login(&mut stream, &host, &user, &password) {
-                        Ok(success) => {
-                            let result = lua.create_table()?;
-                            result.set("success", success)?;
-                            result.set("user", user)?;
-                            Ok(result)
-                        }
-                        Err(e) => {
-                            let result = lua.create_table()?;
-                            result.set("success", false)?;
-                            result.set("error", e.to_string())?;
-                            Ok(result)
+            move |lua, (host, user, password): (String, String, String)| {
+                if let Some(denied) = maybe_denied_smtp(lua, &cap, &host, "smtp.login")? {
+                    return Ok(denied);
+                }
+                let port = 25;
+                match smtp_connect(&host, port) {
+                    Ok((mut stream, _banner)) => {
+                        match smtp_login(&mut stream, &host, &user, &password) {
+                            Ok(success) => {
+                                let result = lua.create_table()?;
+                                result.set("success", success)?;
+                                result.set("user", user)?;
+                                Ok(result)
+                            }
+                            Err(e) => {
+                                let result = lua.create_table()?;
+                                result.set("success", false)?;
+                                result.set("error", e.to_string())?;
+                                Ok(result)
+                            }
                         }
                     }
-                }
-                Err(e) => {
-                    let result = lua.create_table()?;
-                    result.set("success", false)?;
-                    result.set("error", e.to_string())?;
-                    Ok(result)
+                    Err(e) => {
+                        let result = lua.create_table()?;
+                        result.set("success", false)?;
+                        result.set("error", e.to_string())?;
+                        Ok(result)
+                    }
                 }
             },
         )?,
     )?;
 
+    let cap = capability_ctx.clone();
+    smtp.set(
+        "login_ex",
+        lua.create_function(
+            move |lua, (host, port, user, password): (String, u16, String, String)| {
+                if let Some(denied) = maybe_denied_smtp(lua, &cap, &host, "smtp.login_ex")? {
+                    return Ok(denied);
+                }
+                match smtp_connect(&host, port) {
+                    Ok((mut stream, _banner)) => {
+                        match smtp_login(&mut stream, &host, &user, &password) {
+                            Ok(success) => {
+                                let result = lua.create_table()?;
+                                result.set("success", success)?;
+                                result.set("user", user)?;
+                                Ok(result)
+                            }
+                            Err(e) => {
+                                let result = lua.create_table()?;
+                                result.set("success", false)?;
+                                result.set("error", e.to_string())?;
+                                Ok(result)
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let result = lua.create_table()?;
+                        result.set("success", false)?;
+                        result.set("error", e.to_string())?;
+                        Ok(result)
+                    }
+                }
+            },
+        )?,
+    )?;
+
+    let cap = capability_ctx.clone();
     smtp.set(
         "send_mail",
         lua.create_function(
-            |lua, (host, from, to, subject, body): (String, String, String, String, String)| {
+            move |lua,
+                  (host, from, to, subject, body): (String, String, String, String, String)| {
+                if let Some(denied) = maybe_denied_smtp(lua, &cap, &host, "smtp.send_mail")? {
+                    return Ok(denied);
+                }
                 let port = 25;
                 match smtp_connect(&host, port) {
                     Ok((mut stream, _banner)) => {
@@ -289,11 +335,12 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
         )?,
     )?;
 
+    let cap = capability_ctx.clone();
     smtp.set(
         "send_mail_ex",
         lua.create_function(
-            |lua,
-             (host, port, from, to, subject, body): (
+            move |lua,
+                  (host, port, from, to, subject, body): (
                 String,
                 u16,
                 String,
@@ -301,6 +348,9 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
                 String,
                 String,
             )| {
+                if let Some(denied) = maybe_denied_smtp(lua, &cap, &host, "smtp.send_mail_ex")? {
+                    return Ok(denied);
+                }
                 match smtp_connect(&host, port) {
                     Ok((mut stream, _banner)) => {
                         match smtp_send_mail(&mut stream, &from, &to, &subject, &body) {
@@ -332,9 +382,15 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
 
     smtp.set("version", lua.create_function(|_lua, _: ()| Ok("1.0.0"))?)?;
 
+    let cap = capability_ctx.clone();
     smtp.set(
         "connect_async",
-        lua.create_function(|lua, (host, port): (String, u16)| {
+        lua.create_function(move |lua, (host, port): (String, u16)| {
+            if let Some(denied) = maybe_denied_smtp(lua, &cap, &host, "smtp.connect_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
             let host_clone = host.clone();
 
             tokio::runtime::Handle::current().block_on(async {
@@ -365,10 +421,19 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
+    let cap = capability_ctx.clone();
     smtp.set(
         "send_mail_async",
         lua.create_function(
-            |lua, (host, from, to, subject, body): (String, String, String, String, String)| {
+            move |lua,
+                  (host, from, to, subject, body): (String, String, String, String, String)| {
+                if let Some(denied) =
+                    maybe_denied_smtp(lua, &cap, &host, "smtp.send_mail_async")?
+                {
+                    return Err(mlua::Error::RuntimeError(
+                        denied.get::<String>("error").unwrap_or_default(),
+                    ));
+                }
                 let host_clone = host.clone();
                 let from_clone = from.clone();
                 let to_clone = to.clone();
@@ -416,9 +481,13 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
     )?;
 
     // smtp.vrfy() - Verify if a user exists
+    let cap = capability_ctx.clone();
     smtp.set(
         "vrfy",
-        lua.create_function(|lua, (host, user): (String, String)| {
+        lua.create_function(move |lua, (host, user): (String, String)| {
+            if let Some(denied) = maybe_denied_smtp(lua, &cap, &host, "smtp.vrfy")? {
+                return Ok(denied);
+            }
             let port = 25;
             match smtp_connect(&host, port) {
                 Ok((mut stream, _banner)) => {
@@ -457,9 +526,13 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
     )?;
 
     // smtp.expn() - Expand a mailing list
+    let cap = capability_ctx.clone();
     smtp.set(
         "expn",
-        lua.create_function(|lua, (host, list): (String, String)| {
+        lua.create_function(move |lua, (host, list): (String, String)| {
+            if let Some(denied) = maybe_denied_smtp(lua, &cap, &host, "smtp.expn")? {
+                return Ok(denied);
+            }
             let port = 25;
             match smtp_connect(&host, port) {
                 Ok((mut stream, _banner)) => {
@@ -512,9 +585,13 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
     )?;
 
     // smtp.help() - Get help information
+    let cap = capability_ctx.clone();
     smtp.set(
         "help",
-        lua.create_function(|lua, (host, command): (String, Option<String>)| {
+        lua.create_function(move |lua, (host, command): (String, Option<String>)| {
+            if let Some(denied) = maybe_denied_smtp(lua, &cap, &host, "smtp.help")? {
+                return Ok(denied);
+            }
             let port = 25;
             match smtp_connect(&host, port) {
                 Ok((mut stream, _banner)) => {
@@ -553,10 +630,14 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
     )?;
 
     // smtp.noop() - No operation (keep connection alive)
+    let cap = capability_ctx.clone();
     smtp.set(
         "noop",
-        lua.create_function(
-            |lua, (host, port): (String, u16)| match smtp_connect(&host, port) {
+        lua.create_function(move |lua, (host, port): (String, u16)| {
+            if let Some(denied) = maybe_denied_smtp(lua, &cap, &host, "smtp.noop")? {
+                return Ok(denied);
+            }
+            match smtp_connect(&host, port) {
                 Ok((mut stream, _banner)) => {
                     if stream.write_all(b"NOOP\r\n").is_err() {
                         tracing::warn!("SMTP: Failed to send NOOP");
@@ -583,15 +664,19 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
                     result.set("error", e.to_string())?;
                     Ok(result)
                 }
-            },
-        )?,
+            }
+        })?,
     )?;
 
     // smtp.rset() - Reset the session
+    let cap = capability_ctx.clone();
     smtp.set(
         "rset",
-        lua.create_function(
-            |lua, (host, port): (String, u16)| match smtp_connect(&host, port) {
+        lua.create_function(move |lua, (host, port): (String, u16)| {
+            if let Some(denied) = maybe_denied_smtp(lua, &cap, &host, "smtp.rset")? {
+                return Ok(denied);
+            }
+            match smtp_connect(&host, port) {
                 Ok((mut stream, _banner)) => {
                     if stream.write_all(b"RSET\r\n").is_err() {
                         tracing::warn!("SMTP: Failed to send RSET");
@@ -618,15 +703,19 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
                     result.set("error", e.to_string())?;
                     Ok(result)
                 }
-            },
-        )?,
+            }
+        })?,
     )?;
 
     // smtp.quit() - Close the connection
+    let cap = capability_ctx.clone();
     smtp.set(
         "quit",
-        lua.create_function(
-            |lua, (host, port): (String, u16)| match smtp_connect(&host, port) {
+        lua.create_function(move |lua, (host, port): (String, u16)| {
+            if let Some(denied) = maybe_denied_smtp(lua, &cap, &host, "smtp.quit")? {
+                return Ok(denied);
+            }
+            match smtp_connect(&host, port) {
                 Ok((mut stream, _banner)) => {
                     if stream.write_all(b"QUIT\r\n").is_err() {
                         tracing::warn!("SMTP: Failed to send QUIT");
@@ -644,8 +733,8 @@ pub fn register_smtp_library(lua: &Lua) -> LuaResult<()> {
                     result.set("error", e.to_string())?;
                     Ok(result)
                 }
-            },
-        )?,
+            }
+        })?,
     )?;
 
     globals.set("smtp", smtp)?;

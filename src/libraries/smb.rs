@@ -4,13 +4,16 @@
 //! Provides real SMB protocol implementation including authentication,
 //! session establishment, and file operations.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, Result as LuaResult, Table};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::net::TcpStream as AsyncTcpStream;
+
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
 
 static SMB_SESSIONS: LazyLock<Mutex<Vec<SmbSession>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 const MAX_SMB_SESSIONS: usize = 64;
@@ -471,11 +474,39 @@ fn smb_list_directory(
     Ok(files)
 }
 
-pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
+/// Check network TCP and return a denied error table, or Ok(None) if allowed.
+fn maybe_denied_smb(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let smb = lua.create_table()?;
 
-    let connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.connect")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         match TcpStream::connect_timeout(
             &addr
@@ -507,8 +538,12 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
     })?;
     smb.set("connect", connect_fn)?;
 
+    let cap = capability_ctx.clone();
     let login_fn = lua.create_function(
-        |lua, (host, port, domain, user, password): (String, u16, String, String, String)| {
+        move |lua, (host, port, domain, user, password): (String, u16, String, String, String)| {
+            if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.login")? {
+                return Ok(denied);
+            }
             match smb_session_setup(&host, port, &user, &password) {
                 Ok((_stream, session_key)) => {
                     if let Ok(mut sessions) = SMB_SESSIONS.lock() {
@@ -539,7 +574,11 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
     )?;
     smb.set("login", login_fn)?;
 
-    let list_shares_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let list_shares_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.list_shares")? {
+            return Ok(denied);
+        }
         match smb_list_shares(&host, port) {
             Ok(shares) => {
                 let result = lua.create_table()?;
@@ -566,25 +605,28 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
     })?;
     smb.set("list_shares", list_shares_fn)?;
 
-    let connect_tree_fn = lua.create_function(
-        |lua, (host, port, share): (String, u16, String)| match smb_tree_connect(
-            &host, port, &share,
-        ) {
-            Ok(tree_id) => {
-                let result = lua.create_table()?;
-                result.set("success", true)?;
-                result.set("share", share)?;
-                result.set("tree_id", tree_id)?;
-                Ok(result)
+    let cap = capability_ctx.clone();
+    let connect_tree_fn =
+        lua.create_function(move |lua, (host, port, share): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.connect_tree")? {
+                return Ok(denied);
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e.to_string())?;
-                Ok(result)
+            match smb_tree_connect(&host, port, &share) {
+                Ok(tree_id) => {
+                    let result = lua.create_table()?;
+                    result.set("success", true)?;
+                    result.set("share", share)?;
+                    result.set("tree_id", tree_id)?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
             }
-        },
-    )?;
+        })?;
     smb.set("connect_tree", connect_tree_fn)?;
 
     let open_file_fn =
@@ -597,8 +639,12 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
         })?;
     smb.set("open_file", open_file_fn)?;
 
+    let cap = capability_ctx.clone();
     let list_directory_fn =
-        lua.create_function(|lua, (host, port, path): (String, u16, String)| {
+        lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.list_directory")? {
+                return Ok(denied);
+            }
             match smb_list_directory(&host, port, "", &path) {
                 Ok(files) => {
                     let result = lua.create_table()?;
@@ -625,8 +671,12 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
         })?;
     smb.set("list_directory", list_directory_fn)?;
 
+    let cap = capability_ctx.clone();
     let get_file_fn = lua.create_function(
-        |lua, (host, port, path, offset, length): (String, u16, String, u64, u32)| {
+        move |lua, (host, port, path, offset, length): (String, u16, String, u64, u32)| {
+            if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.get_file")? {
+                return Ok(denied);
+            }
             match smb_read_file(&host, port, "", &path, offset, length) {
                 Ok(data) => {
                     let result = lua.create_table()?;
@@ -648,49 +698,52 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
     )?;
     smb.set("get_file", get_file_fn)?;
 
+    let cap = capability_ctx.clone();
     let put_file_fn = lua.create_function(
-        |lua, (host, port, path, data): (String, u16, String, String)| match smb_write_file(
-            &host,
-            port,
-            "",
-            &path,
-            data.as_bytes(),
-        ) {
-            Ok(bytes_written) => {
-                let result = lua.create_table()?;
-                result.set("success", true)?;
-                result.set("path", path)?;
-                result.set("bytes_written", bytes_written)?;
-                Ok(result)
+        move |lua, (host, port, path, data): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.put_file")? {
+                return Ok(denied);
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e.to_string())?;
-                Ok(result)
+            match smb_write_file(&host, port, "", &path, data.as_bytes()) {
+                Ok(bytes_written) => {
+                    let result = lua.create_table()?;
+                    result.set("success", true)?;
+                    result.set("path", path)?;
+                    result.set("bytes_written", bytes_written)?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
             }
         },
     )?;
     smb.set("put_file", put_file_fn)?;
 
-    let delete_file_fn = lua.create_function(
-        |lua, (host, port, path): (String, u16, String)| match smb_delete_file(
-            &host, port, "", &path,
-        ) {
-            Ok(success) => {
-                let result = lua.create_table()?;
-                result.set("success", success)?;
-                result.set("path", path)?;
-                Ok(result)
+    let cap = capability_ctx.clone();
+    let delete_file_fn =
+        lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.delete_file")? {
+                return Ok(denied);
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e.to_string())?;
-                Ok(result)
+            match smb_delete_file(&host, port, "", &path) {
+                Ok(success) => {
+                    let result = lua.create_table()?;
+                    result.set("success", success)?;
+                    result.set("path", path)?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
             }
-        },
-    )?;
+        })?;
     smb.set("delete_file", delete_file_fn)?;
 
     let get_services_fn = lua.create_function(|lua, (_host, _port): (String, u16)| {
@@ -720,7 +773,13 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
     })?;
     smb.set("get_domain", get_domain_fn)?;
 
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.connect_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let addr = format!("{}:{}", host, port);
 
         tokio::runtime::Handle::current().block_on(async {
@@ -763,8 +822,14 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
     })?;
     smb.set("connect_async", async_connect_fn)?;
 
+    let cap = capability_ctx.clone();
     let async_login_fn = lua.create_function(
-        |lua, (host, port, domain, user, password): (String, u16, String, String, String)| {
+        move |lua, (host, port, domain, user, password): (String, u16, String, String, String)| {
+            if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.login_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
             let host_clone = host.clone();
             let user_clone = user.clone();
             let _domain_clone = domain.clone();
@@ -820,7 +885,13 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
     )?;
     smb.set("login_async", async_login_fn)?;
 
-    let async_list_shares_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let async_list_shares_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.list_shares_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let host_clone = host.clone();
 
         tokio::runtime::Handle::current().block_on(async move {
@@ -858,8 +929,9 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
 
     // create_directory - Create a directory on the remote share
     // NOTE: Full implementation requires SMB2/SMB3 protocol support
+    let cap = capability_ctx.clone();
     let create_directory_fn = lua.create_function(
-        |lua, (host, port, _share, path): (String, u16, String, String)| {
+        move |lua, (host, port, _share, path): (String, u16, String, String)| {
             let result = lua.create_table()?;
 
             // For now, provide guidance - actual implementation requires SMB2 Create call
@@ -868,6 +940,10 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
                 result.set("success", false)?;
                 result.set("error", "Path cannot be empty")?;
             } else {
+                // Check network capability before attempting connection
+                if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.create_directory")? {
+                    return Ok(denied);
+                }
                 // Attempt basic SMB connection to verify share is accessible
                 let addr = format!("{}:{}", host, port);
                 match std::net::TcpStream::connect_timeout(
@@ -902,14 +978,19 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
 
     // delete_directory - Delete a directory on the remote share
     // NOTE: Full implementation requires SMB2/SMB3 protocol support
+    let cap = capability_ctx.clone();
     let delete_directory_fn = lua.create_function(
-        |lua, (host, port, _share, path): (String, u16, String, String)| {
+        move |lua, (host, port, _share, path): (String, u16, String, String)| {
             let result = lua.create_table()?;
 
             if path.is_empty() {
                 result.set("success", false)?;
                 result.set("error", "Path cannot be empty")?;
             } else {
+                // Check network capability before attempting connection
+                if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.delete_directory")? {
+                    return Ok(denied);
+                }
                 let addr = format!("{}:{}", host, port);
                 match std::net::TcpStream::connect_timeout(
                     &addr.parse::<std::net::SocketAddr>().unwrap_or_else(|_| {
@@ -942,8 +1023,9 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
 
     // get_file_info - Get file/directory information
     // NOTE: Full implementation requires SMB2 QUERY_INFO
+    let cap = capability_ctx.clone();
     let get_file_info_fn = lua.create_function(
-        |lua, (host, port, _share, path): (String, u16, String, String)| {
+        move |lua, (host, port, _share, path): (String, u16, String, String)| {
             let result = lua.create_table()?;
 
             if path.is_empty() {
@@ -955,6 +1037,10 @@ pub fn register_smb_library(lua: &Lua) -> LuaResult<()> {
                 result.set("is_directory", false)?;
                 result.set("note", "Empty path provided - returning defaults")?;
             } else {
+                // Check network capability before attempting connection
+                if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.get_file_info")? {
+                    return Ok(denied);
+                }
                 // Try to connect and get info
                 let addr = format!("{}:{}", host, port);
                 match std::net::TcpStream::connect_timeout(

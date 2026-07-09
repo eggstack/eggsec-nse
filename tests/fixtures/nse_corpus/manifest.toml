@@ -1647,3 +1647,119 @@ public_network_required = false
 gap_classification = "supported"
 notes = "CiSafe profile: creds library in-memory operations succeed (no side effects to deny)."
 
+
+[[fixture]]
+id = "ftp-connect-local"
+name = "ftp_connect_local.nse"
+category = "protocol"
+path = "scripts/protocol/ftp_connect_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["ftp", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "ftp.connect() pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "FTP connect against local fixture server. Capability-gated via check_network_tcp()."
+
+[fixture.local_service]
+type = "tcp_echo"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+
+[[fixture]]
+id = "upnp-get-external-ip-local"
+name = "upnp_get_external_ip_local.nse"
+category = "protocol"
+path = "scripts/protocol/upnp_get_external_ip_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["upnp", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "upnp.get_external_ip() pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "UPnP get_external_ip against local fixture server. Capability-gated via check_network_tcp()."
+
+[fixture.local_service]
+type = "tcp_echo"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+
+[[fixture]]
+id = "httpspider-fetch-local"
+name = "httpspider_fetch_local.nse"
+category = "protocol"
+path = "scripts/protocol/httpspider_fetch_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["httpspider", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "httpspider.fetch() pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "httpspider fetch against local fixture server. Capability-gated via check_network_tcp()."
+
+[fixture.local_service]
+type = "http"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+
+[[fixture]]
+id = "httppipeline-go-local"
+name = "httppipeline_go_local.nse"
+category = "protocol"
+path = "scripts/protocol/httppipeline_go_local.nse"
+profile = "compatibility_lab"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["httppipeline", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = []
+provenance = "clean-room"
+upstream_reference = "httppipeline.go() pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "httppipeline go against local fixture server. Capability-gated via check_network_tcp()."
+
+[fixture.local_service]
+type = "http"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"

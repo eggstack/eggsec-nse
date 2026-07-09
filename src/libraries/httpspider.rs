@@ -11,6 +11,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 use url::Url;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 static CRAWLERS: LazyLock<Mutex<FxHashMap<String, CrawlerState>>> =
     LazyLock::new(|| Mutex::new(FxHashMap::default()));
 static CRAWLER_COUNTER: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(0));
@@ -40,7 +43,10 @@ fn get_next_id() -> String {
     format!("crawler_{}", *counter)
 }
 
-pub fn register_httpspider_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_httpspider_library(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let httpspider = lua.create_table()?;
 
@@ -151,10 +157,32 @@ pub fn register_httpspider_library(lua: &Lua) -> LuaResult<()> {
     )?;
 
     // fetch - Fetch a URL
+    let cap = capability_ctx.clone();
     httpspider.set(
         "fetch",
-        lua.create_function(|lua, (url, options): (String, Option<Table>)| {
+        lua.create_function(move |lua, (url, options): (String, Option<Table>)| {
             let result = lua.create_table()?;
+
+            // Extract host from URL for capability check
+            let host = if let Ok(parsed) = Url::parse(&url) {
+                parsed.host_str().unwrap_or("unknown").to_string()
+            } else {
+                "unknown".to_string()
+            };
+
+            let decision = wrappers::check_network_tcp(&cap, &host, "httpspider.fetch");
+            if !decision.is_allowed() {
+                result.set("status", 0i32)?;
+                result.set(
+                    "error",
+                    decision
+                        .deny_reason()
+                        .unwrap_or("network access denied")
+                        .to_string(),
+                )?;
+                result.set("reason", "denied")?;
+                return Ok(result);
+            }
 
             let timeout = options
                 .as_ref()

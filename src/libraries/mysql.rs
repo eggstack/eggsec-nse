@@ -9,6 +9,9 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 const MYSQL_HANDSHAKE_V10: u8 = 10;
 
 struct MySqlConnection {
@@ -194,33 +197,66 @@ fn mysql_query(conn: &mut MySqlConnection, query: &str) -> std::io::Result<Strin
     }
 }
 
-pub fn register_mysql_library(lua: &Lua) -> LuaResult<()> {
+/// Check network TCP and return a denied error table, or Ok(None) if allowed.
+fn maybe_denied_mysql(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+pub fn register_mysql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let mysql = lua.create_table()?;
 
-    let connect_fn =
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            match mysql_handshake(&host, port) {
-                Ok(conn) => {
-                    let result = lua.create_table()?;
-                    result.set("host", host)?;
-                    result.set("port", port)?;
-                    result.set("status", "connected")?;
-                    result.set("server_version", conn.server_version)?;
-                    result.set("thread_id", conn.thread_id)?;
-                    Ok(result)
-                }
-                Err(e) => {
-                    let result = lua.create_table()?;
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    Ok(result)
-                }
+    let cap = capability_ctx.clone();
+    let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_mysql(lua, &cap, &host, "mysql.connect")? {
+            return Ok(denied);
+        }
+        match mysql_handshake(&host, port) {
+            Ok(conn) => {
+                let result = lua.create_table()?;
+                result.set("host", host)?;
+                result.set("port", port)?;
+                result.set("status", "connected")?;
+                result.set("server_version", conn.server_version)?;
+                result.set("thread_id", conn.thread_id)?;
+                Ok(result)
             }
-        })?;
+            Err(e) => {
+                let result = lua.create_table()?;
+                result.set("status", "error")?;
+                result.set("error", e.to_string())?;
+                Ok(result)
+            }
+        }
+    })?;
     mysql.set("connect", connect_fn)?;
 
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_mysql(lua, &cap, &host, "mysql.connect_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let host_clone = host.clone();
 
         tokio::runtime::Handle::current().block_on(async move {
@@ -254,36 +290,46 @@ pub fn register_mysql_library(lua: &Lua) -> LuaResult<()> {
     })?;
     mysql.set("connect_async", async_connect_fn)?;
 
+    let cap = capability_ctx.clone();
     let login_fn = lua.create_function(
-        |lua, (host, port, user, pass): (String, u16, String, String)| match mysql_handshake(
-            &host, port,
-        ) {
-            Ok(mut conn) => match mysql_login(&mut conn, &user, &pass) {
-                Ok(success) => {
-                    let result = lua.create_table()?;
-                    result.set("success", success)?;
-                    result.set("user", user)?;
-                    Ok(result)
-                }
+        move |lua, (host, port, user, pass): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_mysql(lua, &cap, &host, "mysql.login")? {
+                return Ok(denied);
+            }
+            match mysql_handshake(&host, port) {
+                Ok(mut conn) => match mysql_login(&mut conn, &user, &pass) {
+                    Ok(success) => {
+                        let result = lua.create_table()?;
+                        result.set("success", success)?;
+                        result.set("user", user)?;
+                        Ok(result)
+                    }
+                    Err(e) => {
+                        let result = lua.create_table()?;
+                        result.set("success", false)?;
+                        result.set("error", e.to_string())?;
+                        Ok(result)
+                    }
+                },
                 Err(e) => {
                     let result = lua.create_table()?;
                     result.set("success", false)?;
                     result.set("error", e.to_string())?;
                     Ok(result)
                 }
-            },
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e.to_string())?;
-                Ok(result)
             }
         },
     )?;
     mysql.set("login", login_fn)?;
 
+    let cap = capability_ctx.clone();
     let async_login_fn = lua.create_function(
-        |lua, (host, port, user, pass): (String, u16, String, String)| {
+        move |lua, (host, port, user, pass): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_mysql(lua, &cap, &host, "mysql.login_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
             let host_clone = host.clone();
             let user_clone = user.clone();
 
@@ -319,37 +365,48 @@ pub fn register_mysql_library(lua: &Lua) -> LuaResult<()> {
     )?;
     mysql.set("login_async", async_login_fn)?;
 
-    let send_query_fn = lua.create_function(
-        |lua, (host, port, query): (String, u16, String)| match mysql_handshake(&host, port) {
-            Ok(mut conn) => {
-                let result = mysql_query(&mut conn, &query);
-                match result {
-                    Ok(response) => {
-                        let r = lua.create_table()?;
-                        r.set("rows", response)?;
-                        r.set("status", "ok")?;
-                        Ok(r)
-                    }
-                    Err(e) => {
-                        let r = lua.create_table()?;
-                        r.set("status", "error")?;
-                        r.set("error", e.to_string())?;
-                        Ok(r)
+    let cap = capability_ctx.clone();
+    let send_query_fn =
+        lua.create_function(move |lua, (host, port, query): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_mysql(lua, &cap, &host, "mysql.send_query")? {
+                return Ok(denied);
+            }
+            match mysql_handshake(&host, port) {
+                Ok(mut conn) => {
+                    let result = mysql_query(&mut conn, &query);
+                    match result {
+                        Ok(response) => {
+                            let r = lua.create_table()?;
+                            r.set("rows", response)?;
+                            r.set("status", "ok")?;
+                            Ok(r)
+                        }
+                        Err(e) => {
+                            let r = lua.create_table()?;
+                            r.set("status", "error")?;
+                            r.set("error", e.to_string())?;
+                            Ok(r)
+                        }
                     }
                 }
+                Err(e) => {
+                    let r = lua.create_table()?;
+                    r.set("status", "error")?;
+                    r.set("error", e.to_string())?;
+                    Ok(r)
+                }
             }
-            Err(e) => {
-                let r = lua.create_table()?;
-                r.set("status", "error")?;
-                r.set("error", e.to_string())?;
-                Ok(r)
-            }
-        },
-    )?;
+        })?;
     mysql.set("send_query", send_query_fn)?;
 
+    let cap = capability_ctx.clone();
     let async_send_query_fn =
-        lua.create_function(|lua, (host, port, query): (String, u16, String)| {
+        lua.create_function(move |lua, (host, port, query): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_mysql(lua, &cap, &host, "mysql.send_query_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
             let host_clone = host.clone();
 
             tokio::runtime::Handle::current().block_on(async move {

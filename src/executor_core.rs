@@ -907,23 +907,23 @@ impl ExecutorCore {
             &self.capability_context,
         )?;
         crate::libraries::ssh2::register_ssh2_library(&self.lua)?;
-        crate::libraries::ftp::register_ftp_library(&self.lua)?;
-        crate::libraries::smtp::register_smtp_library(&self.lua)?;
-        crate::libraries::mysql::register_mysql_library(&self.lua)?;
+        crate::libraries::ftp::register_ftp_library(&self.lua, &self.capability_context)?;
+        crate::libraries::smtp::register_smtp_library(&self.lua, &self.capability_context)?;
+        crate::libraries::mysql::register_mysql_library(&self.lua, &self.capability_context)?;
         crate::libraries::postgres::register_postgres_library(&self.lua)?;
         crate::libraries::mssql::register_mssql_library(&self.lua)?;
         crate::libraries::redis::register_redis_library(&self.lua)?;
         crate::libraries::mongodb::register_mongodb_library(&self.lua)?;
         crate::libraries::ldap::register_ldap_library(&self.lua)?;
         crate::libraries::snmp::register_snmp_library(&self.lua)?;
-        crate::libraries::smb::register_smb_library(&self.lua)?;
+        crate::libraries::smb::register_smb_library(&self.lua, &self.capability_context)?;
         crate::libraries::smb2::register_smb2_library(&self.lua)?;
         crate::libraries::smbauth::register_smbauth_library(&self.lua)?;
         crate::libraries::rdp::register_rdp_library(&self.lua)?;
         crate::libraries::vnc::register_vnc_library(&self.lua)?;
         crate::libraries::ntp::register_ntp_library(&self.lua)?;
         crate::libraries::memcached::register_memcached_library(&self.lua)?;
-        crate::libraries::imap::register_imap_library(&self.lua)?;
+        crate::libraries::imap::register_imap_library(&self.lua, &self.capability_context)?;
         crate::libraries::pop3::register_pop3_library(&self.lua)?;
         crate::libraries::netbios::register_netbios_library(&self.lua)?;
         crate::libraries::oracle::register_oracle_library(&self.lua)?;
@@ -933,7 +933,7 @@ impl ExecutorCore {
         crate::libraries::dhcp6::register_dhcp6_library(&self.lua)?;
         crate::libraries::sip::register_sip_library(&self.lua)?;
         crate::libraries::tftp::register_tftp_library(&self.lua)?;
-        crate::libraries::upnp::register_upnp_library(&self.lua)?;
+        crate::libraries::upnp::register_upnp_library(&self.lua, &self.capability_context)?;
         crate::libraries::tns::register_tns_library(&self.lua)?;
         crate::libraries::afp::register_afp_library(&self.lua)?;
         crate::libraries::amqp::register_amqp_library(&self.lua)?;
@@ -947,7 +947,10 @@ impl ExecutorCore {
         crate::libraries::sasl::register_sasl_library(&self.lua)?;
         crate::libraries::slaxml::register_slaxml_library(&self.lua)?;
         crate::libraries::re::register_re_library(&self.lua)?;
-        crate::libraries::httpspider::register_httpspider_library(&self.lua)?;
+        crate::libraries::httpspider::register_httpspider_library(
+            &self.lua,
+            &self.capability_context,
+        )?;
         crate::libraries::base64::register_base64_library(&self.lua)?;
         crate::libraries::base32::register_base32_library(&self.lua)?;
         crate::libraries::datetime::register_datetime_library(&self.lua, &self.capability_context)?;
@@ -981,7 +984,10 @@ impl ExecutorCore {
         crate::libraries::ssh::register_ssh_library(&self.lua)?;
         crate::libraries::dns::register_dns_library(&self.lua, &self.capability_context)?;
         crate::libraries::http2::register_http2_library(&self.lua)?;
-        crate::libraries::httppipeline::register_httppipeline_library(&self.lua)?;
+        crate::libraries::httppipeline::register_httppipeline_library(
+            &self.lua,
+            &self.capability_context,
+        )?;
         crate::libraries::geoip::register_geoip_library(&self.lua)?;
         crate::libraries::rpc::register_rpc_library(&self.lua)?;
         crate::libraries::ssh1::register_ssh1_library(&self.lua)?;

@@ -10,14 +10,45 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream as AsyncTcpStream;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 const SSDP_ADDR: &str = "239.255.255.250";
 const SSDP_PORT: u16 = 1900;
 
-pub fn register_upnp_library(lua: &Lua) -> LuaResult<()> {
+/// Check network TCP and return a denied error table, or Ok(None) if allowed.
+fn maybe_denied_upnp(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("success", false)?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+pub fn register_upnp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let upnp = lua.create_table()?;
 
-    let discover_fn = lua.create_function(|lua, search_target: Option<String>| {
+    let cap = capability_ctx.clone();
+    let discover_fn = lua.create_function(move |lua, search_target: Option<String>| {
+        if let Some(denied) = maybe_denied_upnp(lua, &cap, SSDP_ADDR, "upnp.discover")? {
+            return Ok(denied);
+        }
         let result = lua.create_table()?;
         let target = search_target.unwrap_or_else(|| "ssdp:all".to_string());
 
@@ -125,7 +156,24 @@ pub fn register_upnp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     upnp.set("discover", discover_fn)?;
 
-    let get_devices_fn = lua.create_function(|lua, location: String| {
+    let cap = capability_ctx.clone();
+    let get_devices_fn = lua.create_function(move |lua, location: String| {
+        // Extract host from location URL for capability check
+        let host = if location.starts_with("http") {
+            location
+                .split('/')
+                .nth(2)
+                .unwrap_or("unknown")
+                .split(':')
+                .next()
+                .unwrap_or("unknown")
+                .to_string()
+        } else {
+            location.split(':').next().unwrap_or(&location).to_string()
+        };
+        if let Some(denied) = maybe_denied_upnp(lua, &cap, &host, "upnp.get_devices")? {
+            return Ok(denied);
+        }
         let result = lua.create_table()?;
 
         let url = if location.starts_with("http") {
@@ -168,12 +216,20 @@ pub fn register_upnp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     upnp.set("get_devices", get_devices_fn)?;
 
-    let get_external_ip_fn = lua.create_function(|lua, location: Option<String>| {
+    let cap = capability_ctx.clone();
+    let get_external_ip_fn = lua.create_function(move |lua, location: Option<String>| {
         let result = lua.create_table()?;
 
-        let loc = location.unwrap_or_else(|| {
+        let loc = location.clone().unwrap_or_else(|| {
             "http://192.168.1.1:1900/ipc".to_string()
         });
+
+        let host = loc.split('/').nth(2).unwrap_or("192.168.1.1");
+        let check_host = host.split(':').next().unwrap_or(host);
+
+        if let Some(denied) = maybe_denied_upnp(lua, &cap, check_host, "upnp.get_external_ip")? {
+            return Ok(denied);
+        }
 
         let soap_request = "<?xml version=\"1.0\"?>\
             <s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\
@@ -248,7 +304,13 @@ pub fn register_upnp_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     upnp.set("version", version_fn)?;
 
-    let async_discover_fn = lua.create_function(|lua, search_target: Option<String>| {
+    let cap = capability_ctx.clone();
+    let async_discover_fn = lua.create_function(move |lua, search_target: Option<String>| {
+        if let Some(denied) = maybe_denied_upnp(lua, &cap, SSDP_ADDR, "upnp.discover_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let runtime = tokio::runtime::Handle::current();
         let target = search_target.unwrap_or_else(|| "ssdp:all".to_string());
 
@@ -322,7 +384,25 @@ pub fn register_upnp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     upnp.set("discover_async", async_discover_fn)?;
 
-    let async_get_external_ip_fn = lua.create_function(|lua, location: Option<String>| {
+    let cap = capability_ctx.clone();
+    let async_get_external_ip_fn = lua.create_function(move |lua, location: Option<String>| {
+        let loc_preview = location.clone().unwrap_or_else(|| {
+            "http://192.168.1.1:1900/ipc".to_string()
+        });
+        let check_host = loc_preview
+            .split('/')
+            .nth(2)
+            .unwrap_or("192.168.1.1")
+            .split(':')
+            .next()
+            .unwrap_or("192.168.1.1");
+        if let Some(denied) =
+            maybe_denied_upnp(lua, &cap, check_host, "upnp.get_external_ip_async")?
+        {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let runtime = tokio::runtime::Handle::current();
 
         runtime.block_on(async {

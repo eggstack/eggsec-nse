@@ -7,7 +7,13 @@ use mlua::{Lua, Result as LuaResult, Table};
 use reqwest::blocking::Client;
 use std::time::Duration;
 
-pub fn register_httppipeline_library(lua: &Lua) -> LuaResult<()> {
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
+pub fn register_httppipeline_library(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let httppipeline = lua.create_table()?;
 
@@ -66,9 +72,28 @@ pub fn register_httppipeline_library(lua: &Lua) -> LuaResult<()> {
     httppipeline.set("add", add_fn)?;
 
     // httppipeline.go(pipeline) -> responses
-    let go_fn = lua.create_function(|lua, pipeline: Table| {
+    let cap = capability_ctx.clone();
+    let go_fn = lua.create_function(move |lua, pipeline: Table| {
         let host: String = pipeline.get("host")?;
         let port: u16 = pipeline.get("port")?;
+
+        let decision = wrappers::check_network_tcp(&cap, &host, "httppipeline.go");
+        if !decision.is_allowed() {
+            let err_tbl = lua.create_table()?;
+            err_tbl.set("status", 0)?;
+            err_tbl.set(
+                "error",
+                decision
+                    .deny_reason()
+                    .unwrap_or("network access denied")
+                    .to_string(),
+            )?;
+            err_tbl.set("reason", "denied")?;
+            let responses = lua.create_table()?;
+            responses.set(1, err_tbl)?;
+            return Ok(responses);
+        }
+
         let timeout = pipeline.get::<u64>("timeout").unwrap_or(30);
         let requests: Table = pipeline.get("requests")?;
 
@@ -177,64 +202,83 @@ pub fn register_httppipeline_library(lua: &Lua) -> LuaResult<()> {
     httppipeline.set("get_pipeline", get_pipeline_fn)?;
 
     // httppipeline.queue(host, port, requests) -> responses
-    let queue_fn = lua.create_function(|lua, (host, port, requests): (String, u16, Table)| {
-        let timeout = 30u64;
-
-        let scheme = if port == 443 { "https" } else { "http" };
-        let base_url = format!("{}://{}:{}", scheme, host, port);
-
-        let client = match Client::builder()
-            .timeout(Duration::from_secs(timeout))
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                let responses = lua.create_table()?;
+    let cap = capability_ctx.clone();
+    let queue_fn =
+        lua.create_function(move |lua, (host, port, requests): (String, u16, Table)| {
+            let decision = wrappers::check_network_tcp(&cap, &host, "httppipeline.queue");
+            if !decision.is_allowed() {
                 let err_tbl = lua.create_table()?;
                 err_tbl.set("status", 0)?;
-                err_tbl.set("error", e.to_string())?;
+                err_tbl.set(
+                    "error",
+                    decision
+                        .deny_reason()
+                        .unwrap_or("network access denied")
+                        .to_string(),
+                )?;
+                err_tbl.set("reason", "denied")?;
+                let responses = lua.create_table()?;
                 responses.set(1, err_tbl)?;
                 return Ok(responses);
             }
-        };
 
-        let responses = lua.create_table()?;
-        let count = requests.len()? as usize;
+            let timeout = 30u64;
 
-        for i in 1..=count as i64 {
-            if let Ok(req) = requests.get::<Table>(i) {
-                let method: String = req.get("method").unwrap_or_else(|_| "GET".to_string());
-                let path: String = req.get("path").unwrap_or_else(|_| "/".to_string());
+            let scheme = if port == 443 { "https" } else { "http" };
+            let base_url = format!("{}://{}:{}", scheme, host, port);
 
-                let full_url = format!("{}{}", base_url, path);
+            let client = match Client::builder()
+                .timeout(Duration::from_secs(timeout))
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true)
+                .build()
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    let responses = lua.create_table()?;
+                    let err_tbl = lua.create_table()?;
+                    err_tbl.set("status", 0)?;
+                    err_tbl.set("error", e.to_string())?;
+                    responses.set(1, err_tbl)?;
+                    return Ok(responses);
+                }
+            };
 
-                let resp = client
-                    .request(method.parse().unwrap_or(reqwest::Method::GET), &full_url)
-                    .send();
+            let responses = lua.create_table()?;
+            let count = requests.len()? as usize;
 
-                let resp_tbl = lua.create_table()?;
+            for i in 1..=count as i64 {
+                if let Ok(req) = requests.get::<Table>(i) {
+                    let method: String = req.get("method").unwrap_or_else(|_| "GET".to_string());
+                    let path: String = req.get("path").unwrap_or_else(|_| "/".to_string());
 
-                match resp {
-                    Ok(r) => {
-                        resp_tbl.set("status", r.status().as_u16() as i32)?;
-                        if let Ok(body) = r.text() {
-                            resp_tbl.set("body", body)?;
+                    let full_url = format!("{}{}", base_url, path);
+
+                    let resp = client
+                        .request(method.parse().unwrap_or(reqwest::Method::GET), &full_url)
+                        .send();
+
+                    let resp_tbl = lua.create_table()?;
+
+                    match resp {
+                        Ok(r) => {
+                            resp_tbl.set("status", r.status().as_u16() as i32)?;
+                            if let Ok(body) = r.text() {
+                                resp_tbl.set("body", body)?;
+                            }
+                        }
+                        Err(e) => {
+                            resp_tbl.set("status", 0)?;
+                            resp_tbl.set("error", e.to_string())?;
                         }
                     }
-                    Err(e) => {
-                        resp_tbl.set("status", 0)?;
-                        resp_tbl.set("error", e.to_string())?;
-                    }
+
+                    responses.set(i, resp_tbl)?;
                 }
-
-                responses.set(i, resp_tbl)?;
             }
-        }
 
-        Ok(responses)
-    })?;
+            Ok(responses)
+        })?;
     httppipeline.set("queue", queue_fn)?;
 
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0"))?;

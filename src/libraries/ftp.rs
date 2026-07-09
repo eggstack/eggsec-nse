@@ -4,12 +4,15 @@
 //! Based on Nmap's ftp library: https://nmap.org/nsedoc/lib/ftp.html
 //! Includes both blocking and async implementations with real FTP protocol support.
 
-use mlua::{Lua, Result as LuaResult};
+use mlua::{Lua, Result as LuaResult, Table};
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream as AsyncTcpStream;
+
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
 
 fn ftp_send_command(stream: &mut TcpStream, cmd: &str) -> std::io::Result<String> {
     stream.write_all(cmd.as_bytes())?;
@@ -297,11 +300,39 @@ fn ftp_get_file_size(host: &str, port: u16, filename: &str) -> std::io::Result<u
     Ok(0)
 }
 
-pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
+/// Check network TCP and return a denied error table, or Ok(None) if allowed.
+fn maybe_denied_ftp(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+pub fn register_ftp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let ftp = lua.create_table()?;
 
-    let connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.connect")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         let mut stream = match TcpStream::connect_timeout(
             &addr
@@ -335,8 +366,12 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ftp.set("connect", connect_fn)?;
 
+    let cap = capability_ctx.clone();
     let login_fn = lua.create_function(
-        |lua, (host, port, user, pass): (String, u16, String, String)| {
+        move |lua, (host, port, user, pass): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.login")? {
+                return Ok(denied);
+            }
             let addr = format!("{}:{}", host, port);
             let mut stream = match TcpStream::connect_timeout(
                 &addr
@@ -385,7 +420,11 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
     )?;
     ftp.set("login", login_fn)?;
 
-    let cwd_fn = lua.create_function(|lua, (host, port, path): (String, u16, String)| {
+    let cap = capability_ctx.clone();
+    let cwd_fn = lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
+        if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.cwd")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         let mut stream = match TcpStream::connect_timeout(
             &addr
@@ -423,7 +462,13 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ftp.set("cwd", cwd_fn)?;
 
-    let pwd_fn = lua.create_function(|_lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let pwd_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.pwd")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let addr = format!("{}:{}", host, port);
         let mut stream = match TcpStream::connect_timeout(
             &addr
@@ -463,8 +508,12 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ftp.set("pwd", pwd_fn)?;
 
-    let list_fn =
-        lua.create_function(|lua, (host, port, path): (String, u16, Option<String>)| {
+    let cap = capability_ctx.clone();
+    let list_fn = lua.create_function(
+        move |lua, (host, port, path): (String, u16, Option<String>)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.list")? {
+                return Ok(denied);
+            }
             let path = path.unwrap_or_else(|| ".".to_string());
             match ftp_list_directory(&host, port, &path) {
                 Ok(files) => {
@@ -491,11 +540,16 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
                     Ok(result)
                 }
             }
-        })?;
+        },
+    )?;
     ftp.set("list", list_fn)?;
 
-    let nlst_fn =
-        lua.create_function(|lua, (host, port, path): (String, u16, Option<String>)| {
+    let cap = capability_ctx.clone();
+    let nlst_fn = lua.create_function(
+        move |lua, (host, port, path): (String, u16, Option<String>)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.nlst")? {
+                return Ok(denied);
+            }
             let path = path.unwrap_or_else(|| ".".to_string());
             match ftp_list_directory(&host, port, &path) {
                 Ok(files) => {
@@ -513,14 +567,17 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
                     Ok(result)
                 }
             }
-        })?;
+        },
+    )?;
     ftp.set("nlst", nlst_fn)?;
 
+    let cap = capability_ctx.clone();
     let retr_fn =
-        lua.create_function(
-            |lua, (host, port, filename): (String, u16, String)| match ftp_retr_file(
-                &host, port, &filename,
-            ) {
+        lua.create_function(move |lua, (host, port, filename): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.retr")? {
+                return Ok(denied);
+            }
+            match ftp_retr_file(&host, port, &filename) {
                 Ok(data) => {
                     let data_len = data.len();
                     let result = lua.create_table()?;
@@ -535,47 +592,56 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
                     result.set("error", e.to_string())?;
                     Ok(result)
                 }
-            },
-        )?;
+            }
+        })?;
     ftp.set("retr", retr_fn)?;
 
+    let cap = capability_ctx.clone();
     let stor_fn = lua.create_function(
-        |lua, (host, port, filename, data): (String, u16, String, String)| match ftp_stor_file(
-            &host, port, &filename, &data,
-        ) {
-            Ok(success) => {
-                let result = lua.create_table()?;
-                result.set("success", success)?;
-                result.set("filename", filename)?;
-                result.set("size", data.len())?;
-                Ok(result)
+        move |lua, (host, port, filename, data): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.stor")? {
+                return Ok(denied);
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e.to_string())?;
-                Ok(result)
+            match ftp_stor_file(&host, port, &filename, &data) {
+                Ok(success) => {
+                    let result = lua.create_table()?;
+                    result.set("success", success)?;
+                    result.set("filename", filename)?;
+                    result.set("size", data.len())?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
             }
         },
     )?;
     ftp.set("stor", stor_fn)?;
 
-    let dele_fn = lua.create_function(|lua, (host, port, filename): (String, u16, String)| {
-        match ftp_delete_file(&host, port, &filename) {
-            Ok(success) => {
-                let result = lua.create_table()?;
-                result.set("success", success)?;
-                result.set("deleted", filename)?;
-                Ok(result)
+    let cap = capability_ctx.clone();
+    let dele_fn =
+        lua.create_function(move |lua, (host, port, filename): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.dele")? {
+                return Ok(denied);
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e.to_string())?;
-                Ok(result)
+            match ftp_delete_file(&host, port, &filename) {
+                Ok(success) => {
+                    let result = lua.create_table()?;
+                    result.set("success", success)?;
+                    result.set("deleted", filename)?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
             }
-        }
-    })?;
+        })?;
     ftp.set("dele", dele_fn)?;
 
     let rnfr_fn = lua.create_function(|lua, (_host, _port, filename): (String, u16, String)| {
@@ -587,126 +653,155 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ftp.set("rnfr", rnfr_fn)?;
 
-    let rnto_fn = lua.create_function(|lua, (host, port, to_name): (String, u16, String)| {
-        match ftp_rename_file(&host, port, "", &to_name) {
-            Ok(success) => {
-                let result = lua.create_table()?;
-                result.set("success", success)?;
-                result.set("to", to_name)?;
-                Ok(result)
+    let cap = capability_ctx.clone();
+    let rnto_fn =
+        lua.create_function(move |lua, (host, port, to_name): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.rnto")? {
+                return Ok(denied);
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e.to_string())?;
-                Ok(result)
+            match ftp_rename_file(&host, port, "", &to_name) {
+                Ok(success) => {
+                    let result = lua.create_table()?;
+                    result.set("success", success)?;
+                    result.set("to", to_name)?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
             }
-        }
-    })?;
+        })?;
     ftp.set("rnto", rnto_fn)?;
 
-    let mkd_fn = lua.create_function(|lua, (host, port, dirname): (String, u16, String)| {
-        match ftp_make_directory(&host, port, &dirname) {
-            Ok(success) => {
-                let result = lua.create_table()?;
-                result.set("success", success)?;
-                result.set("created", dirname)?;
-                Ok(result)
+    let cap = capability_ctx.clone();
+    let mkd_fn =
+        lua.create_function(move |lua, (host, port, dirname): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.mkd")? {
+                return Ok(denied);
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e.to_string())?;
-                Ok(result)
+            match ftp_make_directory(&host, port, &dirname) {
+                Ok(success) => {
+                    let result = lua.create_table()?;
+                    result.set("success", success)?;
+                    result.set("created", dirname)?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
             }
-        }
-    })?;
+        })?;
     ftp.set("mkd", mkd_fn)?;
 
-    let rmd_fn = lua.create_function(|lua, (host, port, dirname): (String, u16, String)| {
-        match ftp_remove_directory(&host, port, &dirname) {
-            Ok(success) => {
-                let result = lua.create_table()?;
-                result.set("success", success)?;
-                result.set("removed", dirname)?;
-                Ok(result)
+    let cap = capability_ctx.clone();
+    let rmd_fn =
+        lua.create_function(move |lua, (host, port, dirname): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.rmd")? {
+                return Ok(denied);
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e.to_string())?;
-                Ok(result)
+            match ftp_remove_directory(&host, port, &dirname) {
+                Ok(success) => {
+                    let result = lua.create_table()?;
+                    result.set("success", success)?;
+                    result.set("removed", dirname)?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
             }
-        }
-    })?;
+        })?;
     ftp.set("rmd", rmd_fn)?;
 
-    let size_fn = lua.create_function(|lua, (host, port, filename): (String, u16, String)| {
-        match ftp_get_file_size(&host, port, &filename) {
-            Ok(size) => {
-                let result = lua.create_table()?;
-                result.set("size", size)?;
-                result.set("filename", filename)?;
-                Ok(result)
+    let cap = capability_ctx.clone();
+    let size_fn =
+        lua.create_function(move |lua, (host, port, filename): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.size")? {
+                return Ok(denied);
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e.to_string())?;
-                Ok(result)
+            match ftp_get_file_size(&host, port, &filename) {
+                Ok(size) => {
+                    let result = lua.create_table()?;
+                    result.set("size", size)?;
+                    result.set("filename", filename)?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
             }
-        }
-    })?;
+        })?;
     ftp.set("size", size_fn)?;
 
-    let mdtm_fn = lua.create_function(|lua, (host, port, filename): (String, u16, String)| {
-        let addr = format!("{}:{}", host, port);
-        let mut stream = match TcpStream::connect_timeout(
-            &addr
-                .parse::<std::net::SocketAddr>()
-                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
-            Duration::from_secs(10),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e.to_string())?;
-                return Ok(result);
+    let cap = capability_ctx.clone();
+    let mdtm_fn =
+        lua.create_function(move |lua, (host, port, filename): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.mdtm")? {
+                return Ok(denied);
             }
-        };
+            let addr = format!("{}:{}", host, port);
+            let mut stream = match TcpStream::connect_timeout(
+                &addr
+                    .parse::<std::net::SocketAddr>()
+                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
+                Duration::from_secs(10),
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("error", e.to_string())?;
+                    return Ok(result);
+                }
+            };
 
-        stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-        if stream.read(&mut vec![0u8; 4096]).is_err() {
-            tracing::warn!("Failed to read FTP greeting");
-        }
+            stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+            if stream.read(&mut vec![0u8; 4096]).is_err() {
+                tracing::warn!("Failed to read FTP greeting");
+            }
 
-        stream
-            .write_all(format!("MDTM {}\r\n", filename).as_bytes())
-            .ok();
-        let mut response = vec![0u8; 4096];
-        if stream.read(&mut response).is_err() {
-            tracing::warn!("Failed to read FTP MDTM response");
-        }
+            stream
+                .write_all(format!("MDTM {}\r\n", filename).as_bytes())
+                .ok();
+            let mut response = vec![0u8; 4096];
+            if stream.read(&mut response).is_err() {
+                tracing::warn!("Failed to read FTP MDTM response");
+            }
 
-        let result = lua.create_table()?;
-        let response_str = String::from_utf8_lossy(&response).to_string();
+            let result = lua.create_table()?;
+            let response_str = String::from_utf8_lossy(&response).to_string();
 
-        if response_str.starts_with("213") {
-            if let Some(timestamp) = response_str.strip_prefix("213 ") {
-                result.set("success", true)?;
-                result.set("timestamp", timestamp.trim())?;
+            if response_str.starts_with("213") {
+                if let Some(timestamp) = response_str.strip_prefix("213 ") {
+                    result.set("success", true)?;
+                    result.set("timestamp", timestamp.trim())?;
+                } else {
+                    result.set("success", false)?;
+                }
             } else {
                 result.set("success", false)?;
             }
-        } else {
-            result.set("success", false)?;
-        }
 
-        Ok(result)
-    })?;
+            Ok(result)
+        })?;
     ftp.set("mdtm", mdtm_fn)?;
 
     // ftp.mlst() - MLST (Machine-readable file listing)
-    let mlst_fn = lua.create_function(|lua, (host, port, path): (String, u16, String)| {
+    let cap = capability_ctx.clone();
+    let mlst_fn = lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
+        if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.mlst")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         let mut stream = match TcpStream::connect_timeout(
             &addr
@@ -774,7 +869,11 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
     ftp.set("mlst", mlst_fn)?;
 
     // ftp.feat() - FEAT (Features)
-    let feat_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let feat_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.feat")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         let mut stream = match TcpStream::connect_timeout(
             &addr
@@ -821,46 +920,55 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
     ftp.set("feat", feat_fn)?;
 
     // ftp.site() - SITE command
-    let site_fn = lua.create_function(|lua, (host, port, command): (String, u16, String)| {
-        let addr = format!("{}:{}", host, port);
-        let mut stream = match TcpStream::connect_timeout(
-            &addr
-                .parse::<std::net::SocketAddr>()
-                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
-            Duration::from_secs(10),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e.to_string())?;
-                return Ok(result);
+    let cap = capability_ctx.clone();
+    let site_fn =
+        lua.create_function(move |lua, (host, port, command): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.site")? {
+                return Ok(denied);
             }
-        };
+            let addr = format!("{}:{}", host, port);
+            let mut stream = match TcpStream::connect_timeout(
+                &addr
+                    .parse::<std::net::SocketAddr>()
+                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
+                Duration::from_secs(10),
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("error", e.to_string())?;
+                    return Ok(result);
+                }
+            };
 
-        stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-        if stream.read(&mut vec![0u8; 4096]).is_err() {
-            tracing::warn!("Failed to read FTP greeting");
-        }
+            stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+            if stream.read(&mut vec![0u8; 4096]).is_err() {
+                tracing::warn!("Failed to read FTP greeting");
+            }
 
-        stream
-            .write_all(format!("SITE {}\r\n", command).as_bytes())
-            .ok();
-        let mut response = vec![0u8; 4096];
-        if stream.read(&mut response).is_err() {
-            tracing::warn!("Failed to read FTP SITE response");
-        }
+            stream
+                .write_all(format!("SITE {}\r\n", command).as_bytes())
+                .ok();
+            let mut response = vec![0u8; 4096];
+            if stream.read(&mut response).is_err() {
+                tracing::warn!("Failed to read FTP SITE response");
+            }
 
-        let result = lua.create_table()?;
-        let response_str = String::from_utf8_lossy(&response).to_string();
-        result.set("response", response_str.trim())?;
+            let result = lua.create_table()?;
+            let response_str = String::from_utf8_lossy(&response).to_string();
+            result.set("response", response_str.trim())?;
 
-        Ok(result)
-    })?;
+            Ok(result)
+        })?;
     ftp.set("site", site_fn)?;
 
     // ftp.stat() - STAT command
-    let stat_fn =
-        lua.create_function(|lua, (host, port, path): (String, u16, Option<String>)| {
+    let cap = capability_ctx.clone();
+    let stat_fn = lua.create_function(
+        move |lua, (host, port, path): (String, u16, Option<String>)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.stat")? {
+                return Ok(denied);
+            }
             let addr = format!("{}:{}", host, port);
             let mut stream = match TcpStream::connect_timeout(
                 &addr
@@ -898,11 +1006,16 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
             )?;
 
             Ok(result)
-        })?;
+        },
+    )?;
     ftp.set("stat", stat_fn)?;
 
     // ftp.noop() - NOOP command
-    let noop_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let noop_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.noop")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         let mut stream = match TcpStream::connect_timeout(
             &addr
@@ -937,7 +1050,11 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
     ftp.set("noop", noop_fn)?;
 
     // ftp.syst() - SYST command
-    let syst_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let syst_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.syst")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         let mut stream = match TcpStream::connect_timeout(
             &addr
@@ -977,44 +1094,55 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ftp.set("syst", syst_fn)?;
 
-    let type_fn = lua.create_function(|lua, (host, port, type_char): (String, u16, String)| {
-        let addr = format!("{}:{}", host, port);
-        let mut stream = match TcpStream::connect_timeout(
-            &addr
-                .parse::<std::net::SocketAddr>()
-                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
-            Duration::from_secs(10),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e.to_string())?;
-                return Ok(result);
+    let cap = capability_ctx.clone();
+    let type_fn =
+        lua.create_function(move |lua, (host, port, type_char): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.type")? {
+                return Ok(denied);
             }
-        };
+            let addr = format!("{}:{}", host, port);
+            let mut stream = match TcpStream::connect_timeout(
+                &addr
+                    .parse::<std::net::SocketAddr>()
+                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
+                Duration::from_secs(10),
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    return Ok(result);
+                }
+            };
 
-        stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-        if stream.read(&mut vec![0u8; 4096]).is_err() {
-            tracing::warn!("Failed to read FTP greeting");
-        }
+            stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+            if stream.read(&mut vec![0u8; 4096]).is_err() {
+                tracing::warn!("Failed to read FTP greeting");
+            }
 
-        stream
-            .write_all(format!("TYPE {}\r\n", type_char).as_bytes())
-            .ok();
-        let mut response = vec![0u8; 4096];
-        if stream.read(&mut response).is_err() {
-            tracing::warn!("Failed to read FTP TYPE response");
-        }
+            stream
+                .write_all(format!("TYPE {}\r\n", type_char).as_bytes())
+                .ok();
+            let mut response = vec![0u8; 4096];
+            if stream.read(&mut response).is_err() {
+                tracing::warn!("Failed to read FTP TYPE response");
+            }
 
-        let result = lua.create_table()?;
-        result.set("success", response[..3].starts_with(b"200"))?;
-        result.set("type", type_char)?;
-        Ok(result)
-    })?;
+            let result = lua.create_table()?;
+            result.set("success", response[..3].starts_with(b"200"))?;
+            result.set("type", type_char)?;
+            Ok(result)
+        })?;
     ftp.set("type", type_fn)?;
 
-    let pasv_fn = lua.create_function(|_lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let pasv_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.pasv")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let addr = format!("{}:{}", host, port);
         let mut stream = match TcpStream::connect_timeout(
             &addr
@@ -1043,7 +1171,13 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ftp.set("pasv", pasv_fn)?;
 
-    let epsv_fn = lua.create_function(|_lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let epsv_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.epsv")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let addr = format!("{}:{}", host, port);
         let mut stream = match TcpStream::connect_timeout(
             &addr
@@ -1075,7 +1209,13 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
     let quit_fn = lua.create_function(|_lua, (_host, _port): (String, u16)| Ok(true))?;
     ftp.set("quit", quit_fn)?;
 
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.connect_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let addr = format!("{}:{}", host, port);
 
         tokio::runtime::Handle::current().block_on(async {
@@ -1097,8 +1237,14 @@ pub fn register_ftp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ftp.set("connect_async", async_connect_fn)?;
 
+    let cap = capability_ctx.clone();
     let async_login_fn = lua.create_function(
-        |lua, (host, port, user, pass): (String, u16, String, String)| {
+        move |lua, (host, port, user, pass): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.login_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
             let addr = format!("{}:{}", host, port);
 
             tokio::runtime::Handle::current().block_on(async {

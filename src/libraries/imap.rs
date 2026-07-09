@@ -8,6 +8,9 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 fn escape_imap_quoted(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 2);
     for ch in s.chars() {
@@ -52,7 +55,31 @@ fn imap_send(host: &str, port: u16, command: &str) -> std::io::Result<String> {
     }
 }
 
-pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
+/// Check network TCP and return a denied error table, or Ok(None) if allowed.
+fn maybe_denied_imap(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+pub fn register_imap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let imap = lua.create_table()?;
 
@@ -68,8 +95,12 @@ pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
     imap.set("connect", connect_fn)?;
 
     // imap.login() - Login to IMAP server
+    let cap = capability_ctx.clone();
     let login_fn = lua.create_function(
-        |lua, (host, port, user, password): (String, u16, String, String)| {
+        move |lua, (host, port, user, password): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.login")? {
+                return Ok(denied);
+            }
             let tag = format!("A{:04}", 1);
             let escaped_user = escape_imap_quoted(&user);
             let escaped_password = escape_imap_quoted(&password);
@@ -98,8 +129,12 @@ pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
     imap.set("login", login_fn)?;
 
     // imap.login_cram_md5() - CRAM-MD5 authentication
+    let cap = capability_ctx.clone();
     let login_cram_md5_fn = lua.create_function(
-        |lua, (host, port, user, _password): (String, u16, String, String)| {
+        move |lua, (host, port, user, _password): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.login_cram_md5")? {
+                return Ok(denied);
+            }
             let tag = format!("A{:04}", 1);
             let cmd = format!("{} AUTHENTICATE CRAM-MD5\r\n", tag);
             match imap_send(&host, port, &cmd) {
@@ -125,46 +160,110 @@ pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
     imap.set("login_cram_md5", login_cram_md5_fn)?;
 
     // imap.list_mailboxes() - List mailboxes
-    let list_mailboxes_fn = lua.create_function(
-        |lua, (host, port, reference, mailbox): (String, u16, Option<String>, Option<String>)| {
-            let ref_name = reference.unwrap_or_else(|| "".to_string());
-            let mailbox_name = mailbox.unwrap_or_else(|| "*".to_string());
+    let cap = capability_ctx.clone();
+    let list_mailboxes_fn =
+        lua.create_function(
+            move |lua,
+                  (host, port, reference, mailbox): (
+                String,
+                u16,
+                Option<String>,
+                Option<String>,
+            )| {
+                if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.list_mailboxes")? {
+                    return Ok(denied);
+                }
+                let ref_name = reference.unwrap_or_else(|| "".to_string());
+                let mailbox_name = mailbox.unwrap_or_else(|| "*".to_string());
+                let tag = format!("A{:04}", 1);
+                let escaped_ref = escape_imap_quoted(&ref_name);
+                let escaped_mailbox = escape_imap_quoted(&mailbox_name);
+                let cmd = format!(
+                    "{} LIST \"{}\" \"{}\"\r\n",
+                    tag, escaped_ref, escaped_mailbox
+                );
+
+                match imap_send(&host, port, &cmd) {
+                    Ok(response) => {
+                        let result = lua.create_table()?;
+                        let mailboxes = lua.create_table()?;
+                        let mut count: u32 = 0;
+
+                        for line in response.lines() {
+                            if line.starts_with("* LIST") {
+                                let mb = lua.create_table()?;
+                                // Parse LIST response
+                                if let Some(start) = line.find('(') {
+                                    if let Some(end) = line.find(')') {
+                                        let flags = &line[start + 1..end];
+                                        mb.set("flags", flags)?;
+                                    }
+                                }
+                                if let Some(name_start) = line.rfind('"') {
+                                    if let Some(name_end) = line[..name_start].rfind('"') {
+                                        let name = &line[name_end + 1..name_start];
+                                        mb.set("name", name)?;
+                                        count += 1;
+                                        mailboxes.set(count, mb)?;
+                                    }
+                                }
+                            }
+                        }
+
+                        result.set("mailboxes", mailboxes)?;
+                        Ok(result)
+                    }
+                    Err(e) => {
+                        let result = lua.create_table()?;
+                        result.set("error", e.to_string())?;
+                        Ok(result)
+                    }
+                }
+            },
+        )?;
+    imap.set("list_mailboxes", list_mailboxes_fn)?;
+
+    // imap.select() - Select a mailbox
+    let cap = capability_ctx.clone();
+    let select_fn =
+        lua.create_function(move |lua, (host, port, mailbox): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.select")? {
+                return Ok(denied);
+            }
             let tag = format!("A{:04}", 1);
-            let escaped_ref = escape_imap_quoted(&ref_name);
-            let escaped_mailbox = escape_imap_quoted(&mailbox_name);
-            let cmd = format!(
-                "{} LIST \"{}\" \"{}\"\r\n",
-                tag, escaped_ref, escaped_mailbox
-            );
+            let escaped_mailbox = escape_imap_quoted(&mailbox);
+            let cmd = format!("{} SELECT {}\r\n", tag, escaped_mailbox);
 
             match imap_send(&host, port, &cmd) {
                 Ok(response) => {
                     let result = lua.create_table()?;
-                    let mailboxes = lua.create_table()?;
-                    let mut count: u32 = 0;
 
-                    for line in response.lines() {
-                        if line.starts_with("* LIST") {
-                            let mb = lua.create_table()?;
-                            // Parse LIST response
-                            if let Some(start) = line.find('(') {
-                                if let Some(end) = line.find(')') {
-                                    let flags = &line[start + 1..end];
-                                    mb.set("flags", flags)?;
-                                }
+                    // Parse EXISTS
+                    if let Some(exists) = response.find("* ") {
+                        if let Some(end) = response[exists + 2..].find(" EXISTS") {
+                            if let Ok(count) =
+                                response[exists + 2..exists + 2 + end].trim().parse::<i32>()
+                            {
+                                result.set("exists", count)?;
                             }
-                            if let Some(name_start) = line.rfind('"') {
-                                if let Some(name_end) = line[..name_start].rfind('"') {
-                                    let name = &line[name_end + 1..name_start];
-                                    mb.set("name", name)?;
-                                    count += 1;
-                                    mailboxes.set(count, mb)?;
+                        }
+                    }
+
+                    // Parse RECENT
+                    if let Some(recent_offset) =
+                        response.lines().find(|line| line.contains(" RECENT"))
+                    {
+                        if let Some(star_pos) = recent_offset.find("* ") {
+                            let after_star = &recent_offset[star_pos + 2..];
+                            if let Some(end) = after_star.find(" RECENT") {
+                                if let Ok(count) = after_star[..end].trim().parse::<i32>() {
+                                    result.set("recent", count)?;
                                 }
                             }
                         }
                     }
 
-                    result.set("mailboxes", mailboxes)?;
+                    result.set("success", response.contains(&format!("{} OK", tag)))?;
                     Ok(result)
                 }
                 Err(e) => {
@@ -173,59 +272,16 @@ pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
                     Ok(result)
                 }
             }
-        },
-    )?;
-    imap.set("list_mailboxes", list_mailboxes_fn)?;
-
-    // imap.select() - Select a mailbox
-    let select_fn = lua.create_function(|lua, (host, port, mailbox): (String, u16, String)| {
-        let tag = format!("A{:04}", 1);
-        let escaped_mailbox = escape_imap_quoted(&mailbox);
-        let cmd = format!("{} SELECT {}\r\n", tag, escaped_mailbox);
-
-        match imap_send(&host, port, &cmd) {
-            Ok(response) => {
-                let result = lua.create_table()?;
-
-                // Parse EXISTS
-                if let Some(exists) = response.find("* ") {
-                    if let Some(end) = response[exists + 2..].find(" EXISTS") {
-                        if let Ok(count) =
-                            response[exists + 2..exists + 2 + end].trim().parse::<i32>()
-                        {
-                            result.set("exists", count)?;
-                        }
-                    }
-                }
-
-                // Parse RECENT
-                if let Some(recent_offset) = response.lines().find(|line| line.contains(" RECENT"))
-                {
-                    if let Some(star_pos) = recent_offset.find("* ") {
-                        let after_star = &recent_offset[star_pos + 2..];
-                        if let Some(end) = after_star.find(" RECENT") {
-                            if let Ok(count) = after_star[..end].trim().parse::<i32>() {
-                                result.set("recent", count)?;
-                            }
-                        }
-                    }
-                }
-
-                result.set("success", response.contains(&format!("{} OK", tag)))?;
-                Ok(result)
-            }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e.to_string())?;
-                Ok(result)
-            }
-        }
-    })?;
+        })?;
     imap.set("select", select_fn)?;
 
     // imap.fetch() - Fetch messages
+    let cap = capability_ctx.clone();
     let fetch_fn = lua.create_function(
-        |lua, (host, port, sequence, fields): (String, u16, String, String)| {
+        move |lua, (host, port, sequence, fields): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.fetch")? {
+                return Ok(denied);
+            }
             let tag = format!("A{:04}", 1);
             let escaped_seq = escape_imap_quoted(&sequence);
             let escaped_fields = escape_imap_quoted(&fields);
@@ -256,8 +312,12 @@ pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
     imap.set("fetch", fetch_fn)?;
 
     // imap.store() - Store flags
+    let cap = capability_ctx.clone();
     let store_fn = lua.create_function(
-        |lua, (host, port, sequence, flags): (String, u16, String, String)| {
+        move |lua, (host, port, sequence, flags): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.store")? {
+                return Ok(denied);
+            }
             let tag = format!("A{:04}", 1);
             let escaped_seq = escape_imap_quoted(&sequence);
             let escaped_flags = escape_imap_quoted(&flags);
@@ -283,8 +343,12 @@ pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
     imap.set("store", store_fn)?;
 
     // imap.copy() - Copy messages
+    let cap = capability_ctx.clone();
     let copy_fn = lua.create_function(
-        |lua, (host, port, sequence, mailbox): (String, u16, String, String)| {
+        move |lua, (host, port, sequence, mailbox): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.copy")? {
+                return Ok(denied);
+            }
             let tag = format!("A{:04}", 1);
             let escaped_seq = escape_imap_quoted(&sequence);
             let escaped_mailbox = escape_imap_quoted(&mailbox);
@@ -307,41 +371,50 @@ pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
     imap.set("copy", copy_fn)?;
 
     // imap.search() - Search messages
-    let search_fn = lua.create_function(|lua, (host, port, criteria): (String, u16, String)| {
-        let tag = format!("A{:04}", 1);
-        let escaped_criteria = escape_imap_quoted(&criteria);
-        let cmd = format!("{} SEARCH {}\r\n", tag, escaped_criteria);
+    let cap = capability_ctx.clone();
+    let search_fn =
+        lua.create_function(move |lua, (host, port, criteria): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.search")? {
+                return Ok(denied);
+            }
+            let tag = format!("A{:04}", 1);
+            let escaped_criteria = escape_imap_quoted(&criteria);
+            let cmd = format!("{} SEARCH {}\r\n", tag, escaped_criteria);
 
-        match imap_send(&host, port, &cmd) {
-            Ok(response) => {
-                let result = lua.create_table()?;
-                let ids = lua.create_table()?;
+            match imap_send(&host, port, &cmd) {
+                Ok(response) => {
+                    let result = lua.create_table()?;
+                    let ids = lua.create_table()?;
 
-                for line in response.lines() {
-                    if line.starts_with("* SEARCH") {
-                        for (i, id) in line.split_whitespace().enumerate() {
-                            if id != "*" && id != "SEARCH" {
-                                ids.set(i + 1, id)?;
+                    for line in response.lines() {
+                        if line.starts_with("* SEARCH") {
+                            for (i, id) in line.split_whitespace().enumerate() {
+                                if id != "*" && id != "SEARCH" {
+                                    ids.set(i + 1, id)?;
+                                }
                             }
                         }
                     }
+                    result.set("ids", ids)?;
+                    result.set("success", response.contains(&format!("{} OK", tag)))?;
+                    Ok(result)
                 }
-                result.set("ids", ids)?;
-                result.set("success", response.contains(&format!("{} OK", tag)))?;
-                Ok(result)
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e.to_string())?;
-                Ok(result)
-            }
-        }
-    })?;
+        })?;
     imap.set("search", search_fn)?;
 
     // imap.status() - Get mailbox status
+    let cap = capability_ctx.clone();
     let status_fn = lua.create_function(
-        |lua, (host, port, mailbox, items): (String, u16, String, String)| {
+        move |lua, (host, port, mailbox, items): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.status")? {
+                return Ok(denied);
+            }
             let tag = format!("A{:04}", 1);
             let escaped_mailbox = escape_imap_quoted(&mailbox);
             let escaped_items = escape_imap_quoted(&items);
@@ -365,7 +438,11 @@ pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
     imap.set("status", status_fn)?;
 
     // imap.expunge() - Expunge deleted messages
-    let expunge_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let expunge_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.expunge")? {
+            return Ok(denied);
+        }
         let tag = format!("A{:04}", 1);
         let cmd = format!("{} EXPUNGE\r\n", tag);
 
@@ -386,50 +463,64 @@ pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
     imap.set("expunge", expunge_fn)?;
 
     // imap.create() - Create mailbox
-    let create_fn = lua.create_function(|lua, (host, port, mailbox): (String, u16, String)| {
-        let tag = format!("A{:04}", 1);
-        let escaped_mailbox = escape_imap_quoted(&mailbox);
-        let cmd = format!("{} CREATE {}\r\n", tag, escaped_mailbox);
+    let cap = capability_ctx.clone();
+    let create_fn =
+        lua.create_function(move |lua, (host, port, mailbox): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.create")? {
+                return Ok(denied);
+            }
+            let tag = format!("A{:04}", 1);
+            let escaped_mailbox = escape_imap_quoted(&mailbox);
+            let cmd = format!("{} CREATE {}\r\n", tag, escaped_mailbox);
 
-        match imap_send(&host, port, &cmd) {
-            Ok(response) => {
-                let result = lua.create_table()?;
-                result.set("success", response.contains(&format!("{} OK", tag)))?;
-                Ok(result)
+            match imap_send(&host, port, &cmd) {
+                Ok(response) => {
+                    let result = lua.create_table()?;
+                    result.set("success", response.contains(&format!("{} OK", tag)))?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e.to_string())?;
-                Ok(result)
-            }
-        }
-    })?;
+        })?;
     imap.set("create", create_fn)?;
 
     // imap.delete() - Delete mailbox
-    let delete_fn = lua.create_function(|lua, (host, port, mailbox): (String, u16, String)| {
-        let tag = format!("A{:04}", 1);
-        let escaped_mailbox = escape_imap_quoted(&mailbox);
-        let cmd = format!("{} DELETE {}\r\n", tag, escaped_mailbox);
+    let cap = capability_ctx.clone();
+    let delete_fn =
+        lua.create_function(move |lua, (host, port, mailbox): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.delete")? {
+                return Ok(denied);
+            }
+            let tag = format!("A{:04}", 1);
+            let escaped_mailbox = escape_imap_quoted(&mailbox);
+            let cmd = format!("{} DELETE {}\r\n", tag, escaped_mailbox);
 
-        match imap_send(&host, port, &cmd) {
-            Ok(response) => {
-                let result = lua.create_table()?;
-                result.set("success", response.contains(&format!("{} OK", tag)))?;
-                Ok(result)
+            match imap_send(&host, port, &cmd) {
+                Ok(response) => {
+                    let result = lua.create_table()?;
+                    result.set("success", response.contains(&format!("{} OK", tag)))?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e.to_string())?;
-                Ok(result)
-            }
-        }
-    })?;
+        })?;
     imap.set("delete", delete_fn)?;
 
     // imap.rename() - Rename mailbox
+    let cap = capability_ctx.clone();
     let rename_fn = lua.create_function(
-        |lua, (host, port, old_name, new_name): (String, u16, String, String)| {
+        move |lua, (host, port, old_name, new_name): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.rename")? {
+                return Ok(denied);
+            }
             let tag = format!("A{:04}", 1);
             let escaped_old = escape_imap_quoted(&old_name);
             let escaped_new = escape_imap_quoted(&new_name);
@@ -452,8 +543,12 @@ pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
     imap.set("rename", rename_fn)?;
 
     // imap.subscribe() - Subscribe to mailbox
+    let cap = capability_ctx.clone();
     let subscribe_fn =
-        lua.create_function(|lua, (host, port, mailbox): (String, u16, String)| {
+        lua.create_function(move |lua, (host, port, mailbox): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.subscribe")? {
+                return Ok(denied);
+            }
             let tag = format!("A{:04}", 1);
             let escaped_mailbox = escape_imap_quoted(&mailbox);
             let cmd = format!("{} SUBSCRIBE {}\r\n", tag, escaped_mailbox);
@@ -474,7 +569,11 @@ pub fn register_imap_library(lua: &Lua) -> LuaResult<()> {
     imap.set("subscribe", subscribe_fn)?;
 
     // imap.logout() - Logout
-    let logout_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let logout_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_imap(lua, &cap, &host, "imap.logout")? {
+            return Ok(denied);
+        }
         let tag = format!("A{:04}", 1);
         let cmd = format!("{} LOGOUT\r\n", tag);
         match imap_send(&host, port, &cmd) {

@@ -1706,3 +1706,255 @@ fn local_protocol_profile_comparison_tcp() {
         report_denied.capability_events, report_denied.output.content,
     );
 }
+
+// ---------------------------------------------------------------------------
+// FTP migration tests
+// ---------------------------------------------------------------------------
+
+/// FTP connect under AgentSafe: network TCP denied, zero hits.
+#[test]
+fn local_ftp_connect_agent_safe_denied() {
+    let server = local_fixtures::TcpEchoServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/ftp_connect_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("ftp"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe FTP connect must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+}
+
+/// FTP connect under CiSafe: network TCP denied, zero hits.
+#[test]
+fn local_ftp_connect_ci_safe_denied() {
+    let server = local_fixtures::TcpEchoServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/ftp_connect_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("ftp"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe FTP connect must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// UPnP migration tests
+// ---------------------------------------------------------------------------
+
+/// UPnP get_external_ip under AgentSafe: network TCP denied, zero hits.
+#[test]
+fn local_upnp_get_external_ip_agent_safe_denied() {
+    let server = local_fixtures::TcpEchoServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/upnp_get_external_ip_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("upnp"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe UPnP get_external_ip must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+}
+
+/// UPnP get_external_ip under CiSafe: network TCP denied, zero hits.
+#[test]
+fn local_upnp_get_external_ip_ci_safe_denied() {
+    let server = local_fixtures::TcpEchoServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/upnp_get_external_ip_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("upnp"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe UPnP get_external_ip must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// httpspider migration tests
+// ---------------------------------------------------------------------------
+
+/// httpspider fetch under AgentSafe: network TCP denied, zero hits.
+#[test]
+fn local_httpspider_fetch_agent_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/httpspider_fetch_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe httpspider fetch must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "AgentSafe httpspider fetch must not reach the server"
+    );
+}
+
+/// httpspider fetch under CiSafe: network TCP denied, zero hits.
+#[test]
+fn local_httpspider_fetch_ci_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/httpspider_fetch_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe httpspider fetch must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "CiSafe httpspider fetch must not reach the server"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// httppipeline migration tests
+// ---------------------------------------------------------------------------
+
+/// httppipeline go under AgentSafe: network TCP denied, zero hits.
+#[test]
+fn local_httppipeline_go_agent_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/httppipeline_go_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe httppipeline go must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "AgentSafe httppipeline go must not reach the server"
+    );
+}
+
+/// httppipeline go under CiSafe: network TCP denied, zero hits.
+#[test]
+fn local_httppipeline_go_ci_safe_denied() {
+    let server = local_fixtures::HttpServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/httppipeline_go_local.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("http"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe httppipeline go must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "CiSafe httppipeline go must not reach the server"
+    );
+}
