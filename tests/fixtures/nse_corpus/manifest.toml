@@ -1763,3 +1763,95 @@ type = "http"
 number = 0  # dynamic
 protocol = "tcp"
 state = "open"
+
+[[fixture]]
+id = "xdmcp-connect-denied"
+name = "xdmcp_connect_denied.nse"
+category = "protocol"
+path = "scripts/protocol/xdmcp_connect_denied.nse"
+profile = "agent_safe_runtime"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["xdmcp", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "network_tcp", operation = "xdmcp.connect", allowed = false }]
+provenance = "clean-room"
+upstream_reference = "xdmcp.connect() pattern with denial expectation"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "XDMCP connect denied under AgentSafe/CiSafe. Verifies Bug 5 fix: zero TCP hits on local server."
+
+[fixture.local_service]
+type = "tcp_echo"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+service = "xdmcp"
+
+[[fixture]]
+id = "dhcp-discover-denied"
+name = "dhcp_discover_denied.nse"
+category = "protocol"
+path = "scripts/protocol/dhcp_discover_denied.nse"
+profile = "agent_safe_runtime"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["dhcp", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = [{ kind = "network_udp", operation = "dhcp.discover", allowed = false }]
+provenance = "clean-room"
+upstream_reference = "dhcp.discover() pattern with denial expectation"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "DHCP discover denied under AgentSafe/CiSafe. Verifies Bug 5 fix: zero UDP hits on local server."
+
+[fixture.local_service]
+type = "udp_echo"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "udp"
+state = "open"
+
+[[fixture]]
+id = "ftp-list-pasv-denied"
+name = "ftp_list_pasv_denied.nse"
+category = "protocol"
+path = "scripts/protocol/ftp_list_pasv_denied.nse"
+profile = "agent_safe_runtime"
+expected_status = "compatible_with_warnings"
+expected_fidelity = "full"
+expected_resolved = true
+expected_block = false
+expected_libraries = ["ftp", "stdnse"]
+expected_rules = ["portrule"]
+expected_capability_events = [
+  { kind = "network_tcp", operation = "ftp.list", allowed = true },
+  { kind = "network_tcp", operation = "ftp.list.data", allowed = false },
+]
+provenance = "clean-room"
+upstream_reference = "ftp.list() PASV data-conn check pattern"
+license_note = "No upstream source copied"
+local_fixture = true
+public_network_required = false
+gap_classification = "supported"
+notes = "FTP list denied at data-conn under AgentSafe/CiSafe. Verifies Bug 5 + Bug 3 fixes: control conn completes, PASV data-conn check rejects, no real data socket opened."
+
+[fixture.local_service]
+type = "ftp"
+
+[[fixture.ports]]
+number = 0  # dynamic
+protocol = "tcp"
+state = "open"
+service = "ftp"

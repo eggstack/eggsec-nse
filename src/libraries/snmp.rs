@@ -7,6 +7,9 @@ use mlua::{Lua, Result as LuaResult};
 use std::net::UdpSocket;
 use std::time::Duration;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 const SNMP_VERSION_1: i32 = 0;
 const SNMP_VERSION_2C: i32 = 1;
 const SNMP_PORT: u16 = 161;
@@ -54,7 +57,6 @@ fn encode_oid(oid: &str) -> Vec<u8> {
         return bytes;
     }
 
-    // First byte is encoded as 40 * first + second
     if parts.len() >= 2 {
         bytes.push((40 * parts[0] + parts[1]) as u8);
     }
@@ -178,19 +180,15 @@ fn build_snmp_request(
 ) -> Vec<u8> {
     let mut content = Vec::new();
 
-    // Request ID
     content.extend(encode_integer(request_id as u32));
 
-    // Error status (0)
     content.extend(encode_integer(0));
 
-    // Error index (0)
     content.extend(encode_integer(0));
 
-    // Varbind list
     let mut varbind = Vec::new();
     varbind.extend(encode_oid(oid));
-    varbind.extend(encode_octet_string("")); // NULL value
+    varbind.extend(encode_octet_string(""));
 
     let varbind_list = encode_sequence(varbind);
 
@@ -262,28 +260,23 @@ fn decode_oid(bytes: &[u8], start: usize) -> (String, usize) {
 fn decode_snmp_response(data: &[u8]) -> Result<Vec<(String, String, String)>, String> {
     let mut results = Vec::new();
 
-    // Skip sequence header
     let mut pos = 2;
     if data.len() < 2 {
         return Err("Response too short".to_string());
     }
 
-    // Get length of sequence
     if data[1] >= 0x81 {
         pos = 2 + (data[1] - 0x80) as usize;
     }
 
-    // Skip version
     pos += 2;
     let version_len = data[pos] as usize;
     pos += version_len + 1;
 
-    // Skip community
     pos += 2;
     let community_len = data[pos] as usize;
     pos += community_len + 1;
 
-    // Skip PDU header
     pos += 1;
     let _pdu_len = if data[pos] >= 0x81 {
         let num_bytes = (data[pos] - 0x80) as usize;
@@ -299,12 +292,10 @@ fn decode_snmp_response(data: &[u8]) -> Result<Vec<(String, String, String)>, St
         len
     };
 
-    // Skip request ID, error status, error index
     pos += 2 + data[pos + 1] as usize;
     pos += 2 + data[pos + 1] as usize;
     pos += 2 + data[pos + 1] as usize;
 
-    // Varbind list
     pos += 1;
     let varbind_list_len = if data[pos] >= 0x81 {
         let num_bytes = (data[pos] - 0x80) as usize;
@@ -320,10 +311,9 @@ fn decode_snmp_response(data: &[u8]) -> Result<Vec<(String, String, String)>, St
         len
     };
 
-    // Parse varbinds
     let end_pos = pos + varbind_list_len;
     while pos < end_pos && pos < data.len() {
-        pos += 1; // Skip SEQUENCE tag
+        pos += 1;
         let vb_len = if pos < data.len() && data[pos] >= 0x81 {
             let num_bytes = (data[pos] - 0x80) as usize;
             let mut len = 0usize;
@@ -342,7 +332,6 @@ fn decode_snmp_response(data: &[u8]) -> Result<Vec<(String, String, String)>, St
 
         let vb_end = pos + vb_len;
 
-        // Decode OID
         if pos < vb_end && data[pos] == 0x06 {
             pos += 1;
             let oid_len = data[pos] as usize;
@@ -350,7 +339,6 @@ fn decode_snmp_response(data: &[u8]) -> Result<Vec<(String, String, String)>, St
             let (oid, _new_pos) = decode_oid(&data[pos..], 0);
             pos += oid_len;
 
-            // Get value
             let mut value = String::new();
             let mut vtype = "NULL".to_string();
 
@@ -381,13 +369,39 @@ fn decode_snmp_response(data: &[u8]) -> Result<Vec<(String, String, String)>, St
     Ok(results)
 }
 
-pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
+fn maybe_denied_snmp(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+pub fn register_snmp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let snmp = lua.create_table()?;
 
-    // connect - creates an SNMP session
+    let cap = capability_ctx.clone();
     let connect_fn = lua.create_function(
-        |lua, (host, port, community): (String, Option<u16>, Option<String>)| {
+        move |lua, (host, port, community): (String, Option<u16>, Option<String>)| {
+            if let Some(denied) = maybe_denied_snmp(lua, &cap, &host, "snmp.connect")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(SNMP_PORT);
             let community = community.unwrap_or_else(|| "public".to_string());
 
@@ -399,14 +413,8 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
             result.set("timeout", 5000i64)?;
             result.set("retries", 3i64)?;
 
-            // Try to verify connectivity with a basic request
-            let request = build_snmp_request(
-                SNMP_VERSION_1,
-                &community,
-                1,
-                0xA0, // GetRequest
-                "1.3.6.1.2.1.1.1.0",
-            );
+            let request =
+                build_snmp_request(SNMP_VERSION_1, &community, 1, 0xA0, "1.3.6.1.2.1.1.1.0");
 
             match send_snmp_request(&host, port, &request) {
                 Ok(_) => {
@@ -423,19 +431,16 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
     )?;
     snmp.set("connect", connect_fn)?;
 
-    // get - SNMP GET request
+    let cap = capability_ctx.clone();
     let get_fn = lua.create_function(
-        |lua, (host, port, community, oid): (String, Option<u16>, Option<String>, String)| {
+        move |lua, (host, port, community, oid): (String, Option<u16>, Option<String>, String)| {
+            if let Some(denied) = maybe_denied_snmp(lua, &cap, &host, "snmp.get")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(SNMP_PORT);
             let community = community.unwrap_or_else(|| "public".to_string());
 
-            let request = build_snmp_request(
-                SNMP_VERSION_1,
-                &community,
-                1,
-                0xA0, // GetRequest
-                &oid,
-            );
+            let request = build_snmp_request(SNMP_VERSION_1, &community, 1, 0xA0, &oid);
 
             match send_snmp_request(&host, port, &request) {
                 Ok(response) => match decode_snmp_response(&response) {
@@ -468,19 +473,16 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
     )?;
     snmp.set("get", get_fn)?;
 
-    // getnext - SNMP GETNEXT request
+    let cap = capability_ctx.clone();
     let getnext_fn = lua.create_function(
-        |lua, (host, port, community, oid): (String, Option<u16>, Option<String>, String)| {
+        move |lua, (host, port, community, oid): (String, Option<u16>, Option<String>, String)| {
+            if let Some(denied) = maybe_denied_snmp(lua, &cap, &host, "snmp.getnext")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(SNMP_PORT);
             let community = community.unwrap_or_else(|| "public".to_string());
 
-            let request = build_snmp_request(
-                SNMP_VERSION_1,
-                &community,
-                1,
-                0xA1, // GetNextRequest
-                &oid,
-            );
+            let request = build_snmp_request(SNMP_VERSION_1, &community, 1, 0xA1, &oid);
 
             match send_snmp_request(&host, port, &request) {
                 Ok(response) => match decode_snmp_response(&response) {
@@ -513,33 +515,35 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
     )?;
     snmp.set("getnext", getnext_fn)?;
 
-    // walk - SNMP WALK (iterates through OID tree)
-    let walk_fn = lua.create_function(
-        |lua, (host, port, community, base_oid): (String, Option<u16>, Option<String>, String)| {
-            let port = port.unwrap_or(SNMP_PORT);
-            let community = community.unwrap_or_else(|| "public".to_string());
+    let cap = capability_ctx.clone();
+    let walk_fn =
+        lua.create_function(
+            move |lua,
+                  (host, port, community, base_oid): (
+                String,
+                Option<u16>,
+                Option<String>,
+                String,
+            )| {
+                if let Some(denied) = maybe_denied_snmp(lua, &cap, &host, "snmp.walk")? {
+                    return Ok(denied);
+                }
+                let port = port.unwrap_or(SNMP_PORT);
+                let community = community.unwrap_or_else(|| "public".to_string());
 
-            let results = lua.create_table()?;
-            let mut idx = 1;
-            let mut current_oid = base_oid.clone();
-            let mut last_error = String::new();
+                let results = lua.create_table()?;
+                let mut idx = 1;
+                let mut current_oid = base_oid.clone();
+                let mut last_error = String::new();
 
-            for _ in 0..100 {
-                // Max 100 iterations
-                let request = build_snmp_request(
-                    SNMP_VERSION_1,
-                    &community,
-                    idx,
-                    0xA1, // GetNextRequest
-                    &current_oid,
-                );
+                for _ in 0..100 {
+                    let request =
+                        build_snmp_request(SNMP_VERSION_1, &community, idx, 0xA1, &current_oid);
 
-                match send_snmp_request(&host, port, &request) {
-                    Ok(response) => {
-                        match decode_snmp_response(&response) {
+                    match send_snmp_request(&host, port, &request) {
+                        Ok(response) => match decode_snmp_response(&response) {
                             Ok(varbinds) => {
                                 if let Some((oid, value, vtype)) = varbinds.into_iter().next() {
-                                    // Check if OID starts with base_oid
                                     if !oid.starts_with(&base_oid) && base_oid != "1.3.6.1" {
                                         break;
                                     }
@@ -560,32 +564,31 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
                                 last_error = e;
                                 break;
                             }
+                        },
+                        Err(e) => {
+                            last_error = e;
+                            break;
                         }
                     }
-                    Err(e) => {
-                        last_error = e;
-                        break;
-                    }
                 }
-            }
 
-            let result = lua.create_table()?;
-            result.set("varbinds", results)?;
-            result.set("count", idx - 1)?;
+                let result = lua.create_table()?;
+                result.set("varbinds", results)?;
+                result.set("count", idx - 1)?;
 
-            if !last_error.is_empty() {
-                result.set("warning", last_error)?;
-            }
+                if !last_error.is_empty() {
+                    result.set("warning", last_error)?;
+                }
 
-            Ok(result)
-        },
-    )?;
+                Ok(result)
+            },
+        )?;
     snmp.set("walk", walk_fn)?;
 
-    // bulk - SNMP GETBULK request (v2c)
+    let cap = capability_ctx.clone();
     let bulk_fn = lua.create_function(
-        |lua,
-         (host, port, community, nonrepeaters, maxrepetitions, base_oid): (
+        move |lua,
+              (host, port, community, nonrepeaters, maxrepetitions, base_oid): (
             String,
             Option<u16>,
             Option<String>,
@@ -593,30 +596,28 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
             u32,
             String,
         )| {
+            if let Some(denied) = maybe_denied_snmp(lua, &cap, &host, "snmp.bulk")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(SNMP_PORT);
             let community = community.unwrap_or_else(|| "public".to_string());
 
-            // Build GETBULK request (similar to GET but with different PDU type and parameters)
             let mut content = Vec::new();
 
-            // Request ID
             content.extend(encode_integer(1));
 
-            // Non-repeaters
             content.extend(encode_integer(nonrepeaters));
 
-            // Max-repetitions
             content.extend(encode_integer(maxrepetitions));
 
-            // Varbind list with base OID
             let mut varbind = Vec::new();
             varbind.extend(encode_oid(&base_oid));
-            varbind.extend(encode_octet_string("")); // NULL value
+            varbind.extend(encode_octet_string(""));
             let varbind_list = encode_sequence(varbind);
 
             content.extend(encode_pdu(0x30, varbind_list));
 
-            let pdu = encode_pdu(0xA5, content); // GetBulkRequest
+            let pdu = encode_pdu(0xA5, content);
 
             let community_enc = encode_octet_string(&community);
             let mut message = encode_integer(SNMP_VERSION_2C as u32);
@@ -661,10 +662,10 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
     )?;
     snmp.set("bulk", bulk_fn)?;
 
-    // set - SNMP SET request
+    let cap = capability_ctx.clone();
     let set_fn = lua.create_function(
-        |lua,
-         (host, port, community, oid, value, vtype): (
+        move |lua,
+              (host, port, community, oid, value, vtype): (
             String,
             Option<u16>,
             Option<String>,
@@ -672,20 +673,20 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
             String,
             Option<String>,
         )| {
+            if let Some(denied) = maybe_denied_snmp(lua, &cap, &host, "snmp.set")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(SNMP_PORT);
             let community = community.unwrap_or_else(|| "public".to_string());
 
-            // Build SET request
             let mut content = Vec::new();
-            content.extend(encode_integer(1)); // Request ID
-            content.extend(encode_integer(0)); // Error status
-            content.extend(encode_integer(0)); // Error index
+            content.extend(encode_integer(1));
+            content.extend(encode_integer(0));
+            content.extend(encode_integer(0));
 
-            // Varbind with value
             let mut varbind = Vec::new();
             varbind.extend(encode_oid(&oid));
 
-            // Encode value based on type
             let value_bytes: Vec<u8> = match vtype.as_deref() {
                 Some("INTEGER") | Some("Counter") | Some("Gauge") | Some("TimeTicks") => {
                     encode_integer(value.parse::<u32>().unwrap_or(0))
@@ -697,7 +698,7 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
             let varbind_list = encode_sequence(varbind);
             content.extend(encode_pdu(0x30, varbind_list));
 
-            let pdu = encode_pdu(0xA3, content); // SetRequest
+            let pdu = encode_pdu(0xA3, content);
 
             let community_enc = encode_octet_string(&community);
             let mut message = encode_integer(SNMP_VERSION_1 as u32);
@@ -738,7 +739,6 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
     )?;
     snmp.set("set", set_fn)?;
 
-    // Async connect
     let async_connect_fn = lua.create_function(
         |lua, (host, port, community): (String, Option<u16>, Option<String>)| {
             let port = port.unwrap_or(SNMP_PORT);
@@ -755,20 +755,16 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
     )?;
     snmp.set("connect_async", async_connect_fn)?;
 
-    // Async get
+    let cap = capability_ctx.clone();
     let async_get_fn = lua.create_function(
-        |lua, (host, port, community, oid): (String, Option<u16>, Option<String>, String)| {
+        move |lua, (host, port, community, oid): (String, Option<u16>, Option<String>, String)| {
+            if let Some(denied) = maybe_denied_snmp(lua, &cap, &host, "snmp.get_async")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(SNMP_PORT);
             let community = community.unwrap_or_else(|| "public".to_string());
 
-            // Use blocking implementation for async compatibility
-            let request = build_snmp_request(
-                SNMP_VERSION_2C,
-                &community,
-                1,
-                0xA0, // GetRequest
-                &oid,
-            );
+            let request = build_snmp_request(SNMP_VERSION_2C, &community, 1, 0xA0, &oid);
 
             match send_snmp_request(&host, port, &request) {
                 Ok(response) => match decode_snmp_response(&response) {
@@ -797,60 +793,64 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
     )?;
     snmp.set("get_async", async_get_fn)?;
 
-    // Async walk
-    let async_walk_fn = lua.create_function(
-        |lua, (host, port, community, base_oid): (String, Option<u16>, Option<String>, String)| {
-            let port = port.unwrap_or(SNMP_PORT);
-            let community = community.unwrap_or_else(|| "public".to_string());
+    let cap = capability_ctx.clone();
+    let async_walk_fn =
+        lua.create_function(
+            move |lua,
+                  (host, port, community, base_oid): (
+                String,
+                Option<u16>,
+                Option<String>,
+                String,
+            )| {
+                if let Some(denied) = maybe_denied_snmp(lua, &cap, &host, "snmp.walk_async")? {
+                    return Ok(denied);
+                }
+                let port = port.unwrap_or(SNMP_PORT);
+                let community = community.unwrap_or_else(|| "public".to_string());
 
-            let results = lua.create_table()?;
-            let mut idx = 1;
-            let mut current_oid = base_oid.clone();
+                let results = lua.create_table()?;
+                let mut idx = 1;
+                let mut current_oid = base_oid.clone();
 
-            for _ in 0..50 {
-                let request = build_snmp_request(
-                    SNMP_VERSION_2C,
-                    &community,
-                    idx,
-                    0xA1, // GetNextRequest
-                    &current_oid,
-                );
+                for _ in 0..50 {
+                    let request =
+                        build_snmp_request(SNMP_VERSION_2C, &community, idx, 0xA1, &current_oid);
 
-                match send_snmp_request(&host, port, &request) {
-                    Ok(response) => {
-                        if let Ok(varbinds) = decode_snmp_response(&response) {
-                            if let Some((oid, value, vtype)) = varbinds.into_iter().next() {
-                                if !oid.starts_with(&base_oid) {
+                    match send_snmp_request(&host, port, &request) {
+                        Ok(response) => {
+                            if let Ok(varbinds) = decode_snmp_response(&response) {
+                                if let Some((oid, value, vtype)) = varbinds.into_iter().next() {
+                                    if !oid.starts_with(&base_oid) {
+                                        break;
+                                    }
+
+                                    let entry = lua.create_table()?;
+                                    entry.set("oid", oid.clone())?;
+                                    entry.set("value", value)?;
+                                    entry.set("type", vtype)?;
+                                    results.set(idx, entry)?;
+                                    idx += 1;
+                                    current_oid = oid;
+                                } else {
                                     break;
                                 }
-
-                                let entry = lua.create_table()?;
-                                entry.set("oid", oid.clone())?;
-                                entry.set("value", value)?;
-                                entry.set("type", vtype)?;
-                                results.set(idx, entry)?;
-                                idx += 1;
-                                current_oid = oid;
                             } else {
                                 break;
                             }
-                        } else {
-                            break;
                         }
+                        Err(_) => break,
                     }
-                    Err(_) => break,
                 }
-            }
 
-            let result = lua.create_table()?;
-            result.set("varbinds", results)?;
-            result.set("count", idx - 1)?;
-            Ok(result)
-        },
-    )?;
+                let result = lua.create_table()?;
+                result.set("varbinds", results)?;
+                result.set("count", idx - 1)?;
+                Ok(result)
+            },
+        )?;
     snmp.set("walk_async", async_walk_fn)?;
 
-    // get_bulk_async - Async version of bulk walk
     let get_bulk_async_fn = lua.create_function(
         |lua, (_host, port, _oid, max_repetitions): (String, Option<u16>, String, Option<usize>)| {
             let _port = port.unwrap_or(161);
@@ -864,7 +864,6 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
     )?;
     snmp.set("get_bulk_async", get_bulk_async_fn)?;
 
-    // inform - Send SNMP inform request
     let inform_fn = lua.create_function(
         |lua, (_host, port, _oid, _value): (String, Option<u16>, String, String)| {
             let _port = port.unwrap_or(162);
@@ -878,7 +877,6 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
     )?;
     snmp.set("inform", inform_fn)?;
 
-    // get_table - Get entire SNMP table
     let get_table_fn = lua.create_function(
         |lua, (_host, port, _table_oid): (String, Option<u16>, String)| {
             let _port = port.unwrap_or(161);
@@ -896,7 +894,6 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
     )?;
     snmp.set("get_table", get_table_fn)?;
 
-    // translate_oid - Translate numeric OID to symbolic name
     let translate_oid_fn = lua.create_function(|_lua, oid: String| {
         let mappings = [
             ("1.3.6.1.2.1.1.1.0", "sysDescr"),
@@ -932,7 +929,6 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     snmp.set("translate_oid", translate_oid_fn)?;
 
-    // get_if_descr - Get network interface descriptions
     let get_if_descr_fn = lua.create_function(|lua, (_host, port): (String, Option<u16>)| {
         let _port = port.unwrap_or(161);
 
@@ -956,7 +952,6 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     snmp.set("get_if_descr", get_if_descr_fn)?;
 
-    // get_sysinfo - Get system information via SNMP
     let get_sysinfo_fn = lua.create_function(|lua, (_host, port): (String, Option<u16>)| {
         let _port = port.unwrap_or(161);
 
@@ -974,7 +969,6 @@ pub fn register_snmp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     snmp.set("get_sysinfo", get_sysinfo_fn)?;
 
-    // Version info
     let version_fn = lua.create_function(|_lua, _: ()| Ok("2.0.0"))?;
     snmp.set("version", version_fn)?;
 

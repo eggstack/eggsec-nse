@@ -6,6 +6,32 @@
 use mlua::{Lua, Result as LuaResult};
 use std::net::UdpSocket;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
+fn maybe_denied_ntp(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_udp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
 fn ntp_request(host: &str, port: u16, mode: u8, data: &[u8]) -> Result<Vec<u8>, String> {
     let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
     socket
@@ -67,11 +93,15 @@ fn ntp_read_response(response: &[u8]) -> (u8, u8, u8, u8, String, f64, f64, f64)
     )
 }
 
-pub fn register_ntp_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_ntp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let ntp = lua.create_table()?;
 
-    let request_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let request_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ntp(lua, &cap, &host, "ntp.request")? {
+            return Ok(denied);
+        }
         match ntp_request(&host, port, 3, &[]) {
             Ok(_response) => {
                 let result = lua.create_table()?;
@@ -84,56 +114,72 @@ pub fn register_ntp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ntp.set("request", request_fn)?;
 
-    let read_response_fn =
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            match ntp_request(&host, port, 3, &[]) {
-                Ok(response) => {
-                    let (leap, version, mode, stratum, ref_id, root_delay, root_disp, _) =
-                        ntp_read_response(&response);
-                    let result = lua.create_table()?;
-                    result.set("leap_indicator", leap)?;
-                    result.set("version_number", version)?;
-                    result.set("mode", mode)?;
-                    result.set("stratum", stratum)?;
-                    result.set("poll", 6)?;
-                    result.set("precision", -6)?;
-                    result.set("root_delay", root_delay)?;
-                    result.set("root_dispersion", root_disp)?;
-                    result.set("reference_id", ref_id)?;
-                    Ok(result)
-                }
-                Err(e) => Err(mlua::Error::RuntimeError(e)),
+    let cap = capability_ctx.clone();
+    let read_response_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ntp(lua, &cap, &host, "ntp.read_response")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
+        match ntp_request(&host, port, 3, &[]) {
+            Ok(response) => {
+                let (leap, version, mode, stratum, ref_id, root_delay, root_disp, _) =
+                    ntp_read_response(&response);
+                let result = lua.create_table()?;
+                result.set("leap_indicator", leap)?;
+                result.set("version_number", version)?;
+                result.set("mode", mode)?;
+                result.set("stratum", stratum)?;
+                result.set("poll", 6)?;
+                result.set("precision", -6)?;
+                result.set("root_delay", root_delay)?;
+                result.set("root_dispersion", root_disp)?;
+                result.set("reference_id", ref_id)?;
+                Ok(result)
             }
-        })?;
+            Err(e) => Err(mlua::Error::RuntimeError(e)),
+        }
+    })?;
     ntp.set("read_response", read_response_fn)?;
 
-    let get_time_fn =
-        lua.create_function(|lua, (host, _port): (String, u16)| {
-            match ntp_request(&host, 123, 3, &[]) {
-                Ok(response) => {
-                    let t1 = ((response[32] as u64 & 0xff) << 56)
-                        | ((response[33] as u64 & 0xff) << 48)
-                        | ((response[34] as u64 & 0xff) << 40)
-                        | ((response[35] as u64 & 0xff) << 32)
-                        | ((response[36] as u64 & 0xff) << 24)
-                        | ((response[37] as u64 & 0xff) << 16)
-                        | ((response[38] as u64 & 0xff) << 8)
-                        | (response[39] as u64 & 0xff);
+    let cap = capability_ctx.clone();
+    let get_time_fn = lua.create_function(move |lua, (host, _port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ntp(lua, &cap, &host, "ntp.get_time")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
+        match ntp_request(&host, 123, 3, &[]) {
+            Ok(response) => {
+                let t1 = ((response[32] as u64 & 0xff) << 56)
+                    | ((response[33] as u64 & 0xff) << 48)
+                    | ((response[34] as u64 & 0xff) << 40)
+                    | ((response[35] as u64 & 0xff) << 32)
+                    | ((response[36] as u64 & 0xff) << 24)
+                    | ((response[37] as u64 & 0xff) << 16)
+                    | ((response[38] as u64 & 0xff) << 8)
+                    | (response[39] as u64 & 0xff);
 
-                    let ntp_time = f64::from_bits(t1);
-                    let unix_time = (ntp_time - 2208988800.0) as u64;
+                let ntp_time = f64::from_bits(t1);
+                let unix_time = (ntp_time - 2208988800.0) as u64;
 
-                    let result = lua.create_table()?;
-                    result.set("time", unix_time)?;
-                    result.set("host", host)?;
-                    Ok(result)
-                }
-                Err(e) => Err(mlua::Error::RuntimeError(e)),
+                let result = lua.create_table()?;
+                result.set("time", unix_time)?;
+                result.set("host", host)?;
+                Ok(result)
             }
-        })?;
+            Err(e) => Err(mlua::Error::RuntimeError(e)),
+        }
+    })?;
     ntp.set("get_time", get_time_fn)?;
 
-    let mon_getlist_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let mon_getlist_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ntp(lua, &cap, &host, "ntp.mon_getlist")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let packet_data = [0x01, 0x00, 0x00, 0x00];
         match ntp_request(&host, port, 6, &packet_data) {
             Ok(response) => {
@@ -162,7 +208,13 @@ pub fn register_ntp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ntp.set("mon_getlist", mon_getlist_fn)?;
 
-    let mon_getlist_1_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let mon_getlist_1_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ntp(lua, &cap, &host, "ntp.mon_getlist_1")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let packet_data = [0x01, 0x00, 0x00, 0x00];
         match ntp_request(&host, port, 6, &packet_data) {
             Ok(response) => {
@@ -192,8 +244,14 @@ pub fn register_ntp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ntp.set("mon_getlist_1", mon_getlist_1_fn)?;
 
-    let ntp_readvar_fn = lua.create_function(|lua, args: (String, u16, Option<String>)| {
+    let cap = capability_ctx.clone();
+    let ntp_readvar_fn = lua.create_function(move |lua, args: (String, u16, Option<String>)| {
         let (host, port, var) = args;
+        if let Some(denied) = maybe_denied_ntp(lua, &cap, &host, "ntp.ntp_readvar")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let var_name = var.unwrap_or_else(|| "sys.peer".to_string());
         let mut packet_data = vec![0x02, 0x00, 0x00, 0x00];
         packet_data.extend(var_name.as_bytes());
@@ -218,26 +276,39 @@ pub fn register_ntp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ntp.set("ntp_readvar", ntp_readvar_fn)?;
 
-    let ntp_writevar_fn = lua.create_function(|lua, args: (String, u16, String, String)| {
-        let (host, port, var, value) = args;
-        let assignment = format!("{}={}", var, value);
-        let mut packet_data = vec![0x03, 0x00, 0x00, 0x00];
-        packet_data.extend(assignment.as_bytes());
-        packet_data.push(0);
-
-        match ntp_request(&host, port, 6, &packet_data) {
-            Ok(_response) => {
-                let result = lua.create_table()?;
-                result.set("success", true)?;
-                Ok(result)
+    let cap = capability_ctx.clone();
+    let ntp_writevar_fn =
+        lua.create_function(move |lua, args: (String, u16, String, String)| {
+            let (host, port, var, value) = args;
+            if let Some(denied) = maybe_denied_ntp(lua, &cap, &host, "ntp.ntp_writevar")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
             }
-            Err(e) => Err(mlua::Error::RuntimeError(e)),
-        }
-    })?;
+            let assignment = format!("{}={}", var, value);
+            let mut packet_data = vec![0x03, 0x00, 0x00, 0x00];
+            packet_data.extend(assignment.as_bytes());
+            packet_data.push(0);
+
+            match ntp_request(&host, port, 6, &packet_data) {
+                Ok(_response) => {
+                    let result = lua.create_table()?;
+                    result.set("success", true)?;
+                    Ok(result)
+                }
+                Err(e) => Err(mlua::Error::RuntimeError(e)),
+            }
+        })?;
     ntp.set("ntp_writevar", ntp_writevar_fn)?;
 
-    let ntp_config_fn = lua.create_function(|lua, args: (String, u16, String)| {
+    let cap = capability_ctx.clone();
+    let ntp_config_fn = lua.create_function(move |lua, args: (String, u16, String)| {
         let (host, port, address) = args;
+        if let Some(denied) = maybe_denied_ntp(lua, &cap, &host, "ntp.ntp_config")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let mut packet_data = vec![0x08, 0x00, 0x00, 0x00];
         packet_data.extend(address.as_bytes());
         packet_data.push(0);
@@ -253,8 +324,14 @@ pub fn register_ntp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ntp.set("ntp_config", ntp_config_fn)?;
 
-    let ntp_trustkey_fn = lua.create_function(|lua, args: (String, u16, String)| {
+    let cap = capability_ctx.clone();
+    let ntp_trustkey_fn = lua.create_function(move |lua, args: (String, u16, String)| {
         let (host, port, keyid) = args;
+        if let Some(denied) = maybe_denied_ntp(lua, &cap, &host, "ntp.ntp_trustkey")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let mut packet_data = vec![0x09, 0x00, 0x00, 0x00];
         packet_data.extend(keyid.as_bytes());
         packet_data.push(0);
@@ -270,8 +347,14 @@ pub fn register_ntp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ntp.set("ntp_trustkey", ntp_trustkey_fn)?;
 
-    let ntp_authenticate_fn = lua.create_function(|lua, args: (String, u16, bool)| {
+    let cap = capability_ctx.clone();
+    let ntp_authenticate_fn = lua.create_function(move |lua, args: (String, u16, bool)| {
         let (host, port, on) = args;
+        if let Some(denied) = maybe_denied_ntp(lua, &cap, &host, "ntp.ntp_authenticate")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let packet_data = if on {
             vec![0x0a, 0x00, 0x00, 0x00, 0x01]
         } else {
@@ -292,19 +375,24 @@ pub fn register_ntp_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     ntp.set("version", version_fn)?;
 
-    let async_request_fn =
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            match ntp_request(&host, port, 3, &[]) {
-                Ok(_response) => {
-                    let result = lua.create_table()?;
-                    result.set("status", "sent")?;
-                    result.set("host", host)?;
-                    result.set("port", port)?;
-                    Ok(result)
-                }
-                Err(e) => Err(mlua::Error::RuntimeError(e)),
+    let cap = capability_ctx.clone();
+    let async_request_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_ntp(lua, &cap, &host, "ntp.request_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
+        match ntp_request(&host, port, 3, &[]) {
+            Ok(_response) => {
+                let result = lua.create_table()?;
+                result.set("status", "sent")?;
+                result.set("host", host)?;
+                result.set("port", port)?;
+                Ok(result)
             }
-        })?;
+            Err(e) => Err(mlua::Error::RuntimeError(e)),
+        }
+    })?;
     ntp.set("request_async", async_request_fn)?;
 
     globals.set("ntp", ntp)?;

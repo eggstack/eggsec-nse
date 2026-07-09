@@ -8,6 +8,32 @@ use std::net::UdpSocket;
 use std::time::Duration;
 use tokio::net::UdpSocket as AsyncUdpSocket;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
+fn maybe_denied_dhcp6(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_udp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
 const DHCPV6_PORT: u16 = 546;
 const DHCPV6_SERVER_PORT: u16 = 547;
 
@@ -24,7 +50,7 @@ fn build_dhcp6_message(msg_type: u8, transaction_id: &[u8; 3], options: &[u8]) -
     packet
 }
 
-pub fn register_dhcp6_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_dhcp6_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let dhcp6 = lua.create_table()?;
 
@@ -39,11 +65,15 @@ pub fn register_dhcp6_library(lua: &Lua) -> LuaResult<()> {
         })?;
     dhcp6.set("new", new_fn)?;
 
+    let cap = capability_ctx.clone();
     let solicit_fn =
-        lua.create_function(|lua, (host, duid): (Option<String>, Option<String>)| {
+        lua.create_function(move |lua, (host, duid): (Option<String>, Option<String>)| {
             let result = lua.create_table()?;
 
             let target = host.unwrap_or_else(|| "ff02::1:2".to_string());
+            if let Some(denied) = maybe_denied_dhcp6(lua, &cap, &target, "dhcp6.solicit")? {
+                return Ok(denied);
+            }
 
             let transaction_id: [u8; 3] = [rand::random(), rand::random(), rand::random()];
 
@@ -108,11 +138,15 @@ pub fn register_dhcp6_library(lua: &Lua) -> LuaResult<()> {
         })?;
     dhcp6.set("solicit", solicit_fn)?;
 
+    let cap = capability_ctx.clone();
     let request_fn = lua.create_function(
-        |lua, (host, server_id, duid): (Option<String>, Option<String>, Option<String>)| {
+        move |lua, (host, server_id, duid): (Option<String>, Option<String>, Option<String>)| {
             let result = lua.create_table()?;
 
             let target = host.unwrap_or_else(|| "ff02::1:2".to_string());
+            if let Some(denied) = maybe_denied_dhcp6(lua, &cap, &target, "dhcp6.request")? {
+                return Ok(denied);
+            }
 
             let transaction_id: [u8; 3] = [rand::random(), rand::random(), rand::random()];
 
@@ -189,10 +223,16 @@ pub fn register_dhcp6_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     dhcp6.set("version", version_fn)?;
 
+    let cap = capability_ctx.clone();
     let async_solicit_fn =
-        lua.create_function(|lua, (host, duid): (Option<String>, Option<String>)| {
+        lua.create_function(move |lua, (host, duid): (Option<String>, Option<String>)| {
             let runtime = tokio::runtime::Handle::current();
             let target = host.unwrap_or_else(|| "ff02::1:2".to_string());
+            if let Some(denied) = maybe_denied_dhcp6(lua, &cap, &target, "dhcp6.solicit_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
 
             runtime.block_on(async {
                 let result = lua.create_table()?;
@@ -271,10 +311,16 @@ pub fn register_dhcp6_library(lua: &Lua) -> LuaResult<()> {
         })?;
     dhcp6.set("solicit_async", async_solicit_fn)?;
 
+    let cap = capability_ctx.clone();
     let async_request_fn = lua.create_function(
-        |lua, (host, server_id, duid): (Option<String>, Option<String>, Option<String>)| {
+        move |lua, (host, server_id, duid): (Option<String>, Option<String>, Option<String>)| {
             let runtime = tokio::runtime::Handle::current();
             let target = host.unwrap_or_else(|| "ff02::1:2".to_string());
+            if let Some(denied) = maybe_denied_dhcp6(lua, &cap, &target, "dhcp6.request_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
 
             runtime.block_on(async {
                 let result = lua.create_table()?;

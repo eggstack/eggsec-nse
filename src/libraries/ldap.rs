@@ -8,6 +8,9 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 const LDAP_PORT: u16 = 389;
 const LDAP_VERSION_3: u8 = 3;
 
@@ -31,15 +34,12 @@ enum LdapOperation {
 fn encode_ldap_message(message_id: i32, _op: LdapOperation, content: &[u8]) -> Vec<u8> {
     let mut msg = Vec::new();
 
-    // Sequence
     msg.push(0x30);
 
-    // Build content first to get length
     let mut inner = Vec::new();
     inner.extend(encode_integer(message_id));
     inner.extend_from_slice(content);
 
-    // Length
     encode_length(inner.len(), &mut msg);
     msg.extend(inner);
 
@@ -48,7 +48,7 @@ fn encode_ldap_message(message_id: i32, _op: LdapOperation, content: &[u8]) -> V
 
 fn encode_integer(value: i32) -> Vec<u8> {
     let mut bytes = Vec::new();
-    bytes.push(0x02); // Integer tag
+    bytes.push(0x02);
 
     let abs_value = value.unsigned_abs();
 
@@ -63,7 +63,6 @@ fn encode_integer(value: i32) -> Vec<u8> {
             }
         }
         if value < 0 {
-            // Add 0xFF padding for negative
             for _ in 0..(4 - encoded.len()) {
                 encoded.insert(0, 0xFF);
             }
@@ -111,14 +110,13 @@ fn encode_length(len: usize, output: &mut Vec<u8>) {
 fn encode_filter(filter: &str) -> Vec<u8> {
     let mut f = Vec::new();
 
-    // Simple filter: attribute=value
     if let Some((attr, value)) = filter.split_once('=') {
-        f.push(0x87); // Equality match
+        f.push(0x87);
         encode_length(attr.len(), &mut f);
         f.extend(attr.as_bytes());
         f.extend(encode_octet_string(value.trim()));
     } else {
-        f.push(0x87); // Default to equality
+        f.push(0x87);
         encode_length(filter.len(), &mut f);
         f.extend(filter.as_bytes());
     }
@@ -129,16 +127,14 @@ fn encode_filter(filter: &str) -> Vec<u8> {
 fn build_bind_request(message_id: i32, dn: &str, password: &str) -> Vec<u8> {
     let mut content = Vec::new();
 
-    // Message ID
     content.extend(encode_integer(message_id));
 
-    // Bind request
-    content.push(0x60); // Application 0
+    content.push(0x60);
 
     let mut bind_content = Vec::new();
     bind_content.extend(encode_integer(LDAP_VERSION_3 as i32));
     bind_content.extend(encode_octet_string(dn));
-    bind_content.push(0x80); // Simple auth
+    bind_content.push(0x80);
     encode_length(password.len(), &mut bind_content);
     bind_content.extend(password.as_bytes());
 
@@ -162,18 +158,14 @@ fn build_search_request(
 ) -> Vec<u8> {
     let mut content = Vec::new();
 
-    // Message ID
     content.extend(encode_integer(message_id));
 
-    // Search request
-    content.push(0x63); // Application 3
+    content.push(0x63);
 
     let mut search_content = Vec::new();
 
-    // Base
     search_content.extend(encode_octet_string(base_dn));
 
-    // Scope: 0 = base, 1 = one, 2 = sub
     let scope_val: i32 = match scope {
         "base" => 0,
         "one" => 1,
@@ -182,20 +174,15 @@ fn build_search_request(
     };
     search_content.extend(encode_integer(scope_val));
 
-    // Deref aliases
     search_content.extend(encode_integer(0));
 
-    // Size limit
     search_content.extend(encode_integer(1000));
 
-    // Time limit
     search_content.extend(encode_integer(30));
 
-    // Attributes only
     search_content.extend(encode_boolean(false));
 
-    // Filter
-    search_content.push(0x87); // Equality filter
+    search_content.push(0x87);
     if let Some((attr, value)) = filter.split_once('=') {
         encode_length(attr.len() + value.len() + 1, &mut search_content);
         search_content.extend(attr.as_bytes());
@@ -204,7 +191,6 @@ fn build_search_request(
     }
     search_content.extend(encode_filter(filter));
 
-    // Attributes
     let mut attrs_content = Vec::new();
     for attr in attributes {
         attrs_content.extend(encode_octet_string(attr));
@@ -228,7 +214,7 @@ fn build_add_request(message_id: i32, dn: &str, attributes: &[(String, String)])
     let mut content = Vec::new();
     content.extend(encode_integer(message_id));
 
-    content.push(0x68); // Add request
+    content.push(0x68);
 
     let mut add_content = Vec::new();
     add_content.extend(encode_octet_string(dn));
@@ -241,7 +227,7 @@ fn build_add_request(message_id: i32, dn: &str, attributes: &[(String, String)])
         let mut vals = Vec::new();
         vals.extend(encode_octet_string(value));
 
-        attr.push(0x31); // Sequence of values
+        attr.push(0x31);
         encode_length(vals.len(), &mut attr);
         attr.extend(vals);
 
@@ -267,7 +253,7 @@ fn build_delete_request(message_id: i32, dn: &str) -> Vec<u8> {
     let mut content = Vec::new();
     content.extend(encode_integer(message_id));
 
-    content.push(0x4a); // Delete request
+    content.push(0x4a);
     encode_length(dn.len(), &mut content);
     content.extend(dn.as_bytes());
 
@@ -283,7 +269,7 @@ fn build_compare_request(message_id: i32, dn: &str, attr: &str, value: &str) -> 
     let mut content = Vec::new();
     content.extend(encode_integer(message_id));
 
-    content.push(0x6e); // Compare request
+    content.push(0x6e);
 
     let mut compare_content = Vec::new();
     compare_content.extend(encode_octet_string(dn));
@@ -315,7 +301,7 @@ fn build_modify_request(
     let mut content = Vec::new();
     content.extend(encode_integer(message_id));
 
-    content.push(0x66); // Modify request
+    content.push(0x66);
 
     let mut modify_content = Vec::new();
     modify_content.extend(encode_octet_string(dn));
@@ -369,7 +355,7 @@ fn build_moddn_request(message_id: i32, dn: &str, new_rdn: &str, delete_old: boo
     let mut content = Vec::new();
     content.extend(encode_integer(message_id));
 
-    content.push(0x6c); // Modify DN request
+    content.push(0x6c);
 
     let mut moddn_content = Vec::new();
     moddn_content.extend(encode_octet_string(dn));
@@ -418,12 +404,10 @@ fn decode_ldap_search_response(
 ) -> Result<Vec<(String, Vec<(String, Vec<String>)>)>, String> {
     let mut entries = Vec::new();
 
-    // Skip message header
     if data.len() < 2 {
         return Ok(entries);
     }
 
-    // Get message length
     let mut pos;
     if data[1] >= 0x81 {
         let len_bytes = (data[1] - 0x80) as usize;
@@ -432,16 +416,13 @@ fn decode_ldap_search_response(
         pos = 2;
     }
 
-    // Skip message ID
     if pos < data.len() && data[pos] == 0x02 {
         let len = data[pos + 1] as usize;
         pos += 2 + len;
     }
 
-    // Now at search result entries
     while pos < data.len() {
         if data[pos] == 0x30 {
-            // Sequence
             let entry_len = if pos + 1 < data.len() && data[pos + 1] >= 0x81 {
                 let num_bytes = (data[pos + 1] - 0x80) as usize;
                 if num_bytes > 4 || pos + 2 + num_bytes > data.len() {
@@ -463,7 +444,6 @@ fn decode_ldap_search_response(
 
             let entry_end = pos + entry_len;
 
-            // DN
             let mut dn = String::new();
             if pos < entry_end && data[pos] == 0x04 {
                 let dn_len = data[pos + 1] as usize;
@@ -476,7 +456,6 @@ fn decode_ldap_search_response(
 
             let mut attributes = Vec::new();
 
-            // Attributes
             if pos < entry_end && data[pos] == 0x30 {
                 let attrs_len = if pos + 1 < entry_end && data[pos + 1] >= 0x81 {
                     let num_bytes = (data[pos + 1] - 0x80) as usize;
@@ -522,7 +501,6 @@ fn decode_ldap_search_response(
 
                         let attr_end = pos + attr_len;
 
-                        // Attribute name
                         let mut attr_name = String::new();
                         if pos < attr_end && data[pos] == 0x04 {
                             let name_len = data[pos + 1] as usize;
@@ -534,7 +512,6 @@ fn decode_ldap_search_response(
                             }
                         }
 
-                        // Values
                         let mut values = Vec::new();
                         while pos < attr_end {
                             if data[pos] == 0x04 {
@@ -574,12 +551,38 @@ fn decode_ldap_search_response(
     Ok(entries)
 }
 
-pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
+fn maybe_denied_ldap(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let ldap = lua.create_table()?;
 
-    // connect - creates an LDAP session
-    let connect_fn = lua.create_function(|lua, (host, port): (String, Option<u16>)| {
+    let cap = capability_ctx.clone();
+    let connect_fn = lua.create_function(move |lua, (host, port): (String, Option<u16>)| {
+        if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.connect")? {
+            return Ok(denied);
+        }
         let port = port.unwrap_or(LDAP_PORT);
 
         let result = lua.create_table()?;
@@ -587,7 +590,6 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
         result.set("port", port)?;
         result.set("version", LDAP_VERSION_3)?;
 
-        // Try to connect with anonymous bind
         let request = build_bind_request(1, "", "");
 
         match send_ldap_request(&host, port, &request) {
@@ -604,9 +606,12 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ldap.set("connect", connect_fn)?;
 
-    // simple_bind - LDAP simple bind
+    let cap = capability_ctx.clone();
     let simple_bind_fn = lua.create_function(
-        |lua, (host, port, dn, password): (String, Option<u16>, String, String)| {
+        move |lua, (host, port, dn, password): (String, Option<u16>, String, String)| {
+            if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.simple_bind")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(LDAP_PORT);
 
             let request = build_bind_request(1, &dn, &password);
@@ -615,7 +620,6 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
                 Ok(response) => {
                     let result = lua.create_table()?;
 
-                    // Check for bind response
                     if response.len() > 10 && response[5] == 0x61 {
                         let result_code = if response.len() > 12 { response[11] } else { 0 };
 
@@ -644,10 +648,10 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
     )?;
     ldap.set("simple_bind", simple_bind_fn)?;
 
-    // search - LDAP search
+    let cap = capability_ctx.clone();
     let search_fn = lua.create_function(
-        |lua,
-         (host, port, base_dn, filter, attrs, scope): (
+        move |lua,
+              (host, port, base_dn, filter, attrs, scope): (
             String,
             Option<u16>,
             String,
@@ -655,6 +659,9 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
             Option<String>,
             Option<String>,
         )| {
+            if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.search")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(LDAP_PORT);
             let scope = scope.unwrap_or_else(|| "sub".to_string());
 
@@ -714,9 +721,12 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
     )?;
     ldap.set("search", search_fn)?;
 
-    // add - LDAP add entry
+    let cap = capability_ctx.clone();
     let add_fn = lua.create_function(
-        |lua, (host, port, dn, attrs): (String, Option<u16>, String, Option<String>)| {
+        move |lua, (host, port, dn, attrs): (String, Option<u16>, String, Option<String>)| {
+            if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.add")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(LDAP_PORT);
 
             let attributes: Vec<(String, String)> = attrs
@@ -754,9 +764,12 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
     )?;
     ldap.set("add", add_fn)?;
 
-    // delete - LDAP delete entry
-    let delete_fn =
-        lua.create_function(|lua, (host, port, dn): (String, Option<u16>, String)| {
+    let cap = capability_ctx.clone();
+    let delete_fn = lua.create_function(
+        move |lua, (host, port, dn): (String, Option<u16>, String)| {
+            if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.delete")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(LDAP_PORT);
 
             let request = build_delete_request(1, &dn);
@@ -775,12 +788,16 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
                     Ok(result)
                 }
             }
-        })?;
+        },
+    )?;
     ldap.set("delete", delete_fn)?;
 
-    // compare - LDAP compare
+    let cap = capability_ctx.clone();
     let compare_fn = lua.create_function(
-        |lua, (host, port, dn, attr, value): (String, Option<u16>, String, String, String)| {
+        move |lua, (host, port, dn, attr, value): (String, Option<u16>, String, String, String)| {
+            if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.compare")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(LDAP_PORT);
 
             let request = build_compare_request(1, &dn, &attr, &value);
@@ -789,7 +806,6 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
                 Ok(response) => {
                     let result = lua.create_table()?;
 
-                    // Check result code
                     let matched = if response.len() > 12 {
                         response[12] == 0
                     } else {
@@ -812,11 +828,13 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
     )?;
     ldap.set("compare", compare_fn)?;
 
-    // whoami - LDAP whoami
-    let whoami_fn = lua.create_function(|lua, (host, port): (String, Option<u16>)| {
+    let cap = capability_ctx.clone();
+    let whoami_fn = lua.create_function(move |lua, (host, port): (String, Option<u16>)| {
+        if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.whoami")? {
+            return Ok(denied);
+        }
         let port = port.unwrap_or(LDAP_PORT);
 
-        // Build extended request for whoami
         let request = build_bind_request(1, "", "");
 
         match send_ldap_request(&host, port, &request) {
@@ -834,7 +852,6 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ldap.set("whoami", whoami_fn)?;
 
-    // Async connect
     let async_connect_fn = lua.create_function(|lua, (host, port): (String, Option<u16>)| {
         let port = port.unwrap_or(LDAP_PORT);
 
@@ -848,9 +865,12 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ldap.set("connect_async", async_connect_fn)?;
 
-    // Async simple_bind
+    let cap = capability_ctx.clone();
     let async_simple_bind_fn = lua.create_function(
-        |lua, (host, port, dn, password): (String, Option<u16>, String, String)| {
+        move |lua, (host, port, dn, password): (String, Option<u16>, String, String)| {
+            if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.simple_bind_async")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(LDAP_PORT);
 
             let request = build_bind_request(1, &dn, &password);
@@ -873,16 +893,19 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
     )?;
     ldap.set("simple_bind_async", async_simple_bind_fn)?;
 
-    // Async search
+    let cap = capability_ctx.clone();
     let async_search_fn = lua.create_function(
-        |lua,
-         (host, port, base_dn, filter, attrs): (
+        move |lua,
+              (host, port, base_dn, filter, attrs): (
             String,
             Option<u16>,
             String,
             String,
             Option<String>,
         )| {
+            if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.search_async")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(LDAP_PORT);
 
             let attributes: Vec<String> = attrs
@@ -941,10 +964,12 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
     )?;
     ldap.set("search_async", async_search_fn)?;
 
-    // modify - LDAP modify entry (add, delete, or replace attributes)
-    // modifications: array of {operation="add"|"delete"|"replace", type="attributeName", values={"value1"}}
+    let cap = capability_ctx.clone();
     let modify_fn = lua.create_function(
-        |lua, (host, port, dn, modifications): (String, Option<u16>, String, Table)| {
+        move |lua, (host, port, dn, modifications): (String, Option<u16>, String, Table)| {
+            if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.modify")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(LDAP_PORT);
 
             let mut mod_list: Vec<(u8, String, Vec<String>)> = Vec::new();
@@ -958,7 +983,7 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
                         let op_byte = match operation.as_str() {
                             "delete" => 0,
                             "replace" => 2,
-                            _ => 1, // add
+                            _ => 1,
                         };
 
                         let attr_type = mod_tbl.get::<String>("type").unwrap_or_default();
@@ -1005,9 +1030,12 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
     )?;
     ldap.set("modify", modify_fn)?;
 
-    // modify_async - Async version of modify
+    let cap = capability_ctx.clone();
     let modify_async_fn = lua.create_function(
-        |lua, (host, port, dn, modifications): (String, Option<u16>, String, Table)| {
+        move |lua, (host, port, dn, modifications): (String, Option<u16>, String, Table)| {
+            if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.modify_async")? {
+                return Ok(denied);
+            }
             let port = port.unwrap_or(LDAP_PORT);
 
             let mut mod_list: Vec<(u8, String, Vec<String>)> = Vec::new();
@@ -1067,62 +1095,67 @@ pub fn register_ldap_library(lua: &Lua) -> LuaResult<()> {
     )?;
     ldap.set("modify_async", modify_async_fn)?;
 
-    // rename - LDAP modify DN (rename/move entry)
-    let rename_fn =
-        lua.create_function(
-            |lua,
-             (host, port, dn, new_rdn, delete_old_rdn): (
-                String,
-                Option<u16>,
-                String,
-                String,
-                bool,
-            )| {
-                let port = port.unwrap_or(LDAP_PORT);
+    let cap = capability_ctx.clone();
+    let rename_fn = lua.create_function(
+        move |lua,
+              (host, port, dn, new_rdn, delete_old_rdn): (
+            String,
+            Option<u16>,
+            String,
+            String,
+            bool,
+        )| {
+            if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.rename")? {
+                return Ok(denied);
+            }
+            let port = port.unwrap_or(LDAP_PORT);
 
-                let request = build_moddn_request(1, &dn, &new_rdn, delete_old_rdn);
+            let request = build_moddn_request(1, &dn, &new_rdn, delete_old_rdn);
 
-                match send_ldap_request(&host, port, &request) {
-                    Ok(_) => {
-                        let result = lua.create_table()?;
-                        result.set("success", true)?;
-                        result.set("dn", dn)?;
-                        result.set("new_rdn", new_rdn)?;
-                        Ok(result)
-                    }
-                    Err(e) => {
-                        let result = lua.create_table()?;
-                        result.set("success", false)?;
-                        result.set("error", e)?;
-                        Ok(result)
-                    }
+            match send_ldap_request(&host, port, &request) {
+                Ok(_) => {
+                    let result = lua.create_table()?;
+                    result.set("success", true)?;
+                    result.set("dn", dn)?;
+                    result.set("new_rdn", new_rdn)?;
+                    Ok(result)
                 }
-            },
-        )?;
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e)?;
+                    Ok(result)
+                }
+            }
+        },
+    )?;
     ldap.set("rename", rename_fn)?;
 
-    // get_root_dse - Get Root DSE (Directory Service Entry)
-    let get_root_dse_fn = lua.create_function(|lua, (host, port): (String, Option<u16>)| {
-        let port = port.unwrap_or(LDAP_PORT);
-
-        // Search with empty base DN and filter
-        let attrs = vec!["*".to_string()];
-        let request = build_search_request(1, "", "base", "objectClass=*", &attrs);
-
-        match send_ldap_request(&host, port, &request) {
-            Ok(_) => {
-                let result = lua.create_table()?;
-                result.set("success", true)?;
-                Ok(result)
+    let cap = capability_ctx.clone();
+    let get_root_dse_fn =
+        lua.create_function(move |lua, (host, port): (String, Option<u16>)| {
+            if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.get_root_dse")? {
+                return Ok(denied);
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e)?;
-                Ok(result)
+            let port = port.unwrap_or(LDAP_PORT);
+
+            let attrs = vec!["*".to_string()];
+            let request = build_search_request(1, "", "base", "objectClass=*", &attrs);
+
+            match send_ldap_request(&host, port, &request) {
+                Ok(_) => {
+                    let result = lua.create_table()?;
+                    result.set("success", true)?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e)?;
+                    Ok(result)
+                }
             }
-        }
-    })?;
+        })?;
     ldap.set("get_root_dse", get_root_dse_fn)?;
 
     let version_fn = lua.create_function(|_lua, _: ()| Ok("3.0.0"))?;

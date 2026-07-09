@@ -11,11 +11,41 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream as AsyncTcpStream;
 
-pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
+fn maybe_denied_mongodb(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+pub fn register_mongodb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let mongodb = lua.create_table()?;
 
-    let connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.connect")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         let mut stream = TcpStream::connect_timeout(
             &addr
@@ -51,8 +81,12 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
     })?;
     mongodb.set("connect", connect_fn)?;
 
+    let cap = capability_ctx.clone();
     let login_fn = lua.create_function(
-        |lua, (host, port, user, _pass): (String, u16, String, String)| {
+        move |lua, (host, port, user, _pass): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.login")? {
+                return Ok(denied);
+            }
             let addr = format!("{}:{}", host, port);
             let _stream =
                 TcpStream::connect_timeout(
@@ -72,19 +106,26 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
     )?;
     mongodb.set("login", login_fn)?;
 
-    let get_db_names_fn = lua.create_function(|_lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let get_db_names_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.get_db_names")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         let _stream = TcpStream::connect_timeout(
             &addr
                 .parse::<std::net::SocketAddr>()
-                .map_err(|e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()))?,
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
             Duration::from_secs(10),
         )
         .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
 
         let db_names = vec!["admin".to_string(), "local".to_string(), "test".to_string()];
-
-        Ok(db_names)
+        let result = lua.create_table()?;
+        for (i, name) in db_names.into_iter().enumerate() {
+            result.set(i + 1, name)?;
+        }
+        Ok(result)
     })?;
     mongodb.set("get_db_names", get_db_names_fn)?;
 
@@ -95,18 +136,22 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
         })?;
     mongodb.set("get_collection_names", get_collection_names_fn)?;
 
-    let find_fn =
-        lua.create_function(
-            |_lua,
-             (host, port, _db, collection, _query): (
-                String,
-                u16,
-                String,
-                String,
-                Option<String>,
-            )| {
-                let addr = format!("{}:{}", host, port);
-                let _stream = TcpStream::connect_timeout(
+    let cap = capability_ctx.clone();
+    let find_fn = lua.create_function(
+        move |lua,
+              (host, port, _db, collection, _query): (
+            String,
+            u16,
+            String,
+            String,
+            Option<String>,
+        )| {
+            if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.find")? {
+                return Ok(denied);
+            }
+            let addr = format!("{}:{}", host, port);
+            let _stream =
+                TcpStream::connect_timeout(
                     &addr.parse::<std::net::SocketAddr>().map_err(
                         |e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()),
                     )?,
@@ -114,11 +159,14 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
                 )
                 .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
 
-                let result = format!("Cursor for {}.{} placeholder", _db, collection);
-
-                Ok(result)
-            },
-        )?;
+            let result = lua.create_table()?;
+            result.set(
+                "cursor",
+                format!("Cursor for {}.{} placeholder", _db, collection),
+            )?;
+            Ok(result)
+        },
+    )?;
     mongodb.set("find", find_fn)?;
 
     let insert_fn = lua.create_function(
@@ -173,8 +221,13 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
     )?;
     mongodb.set("get_indexes", get_indexes_fn)?;
 
-    // Async connect
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.connect_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let addr = format!("{}:{}", host, port);
 
         tokio::runtime::Handle::current().block_on(async {
@@ -207,67 +260,21 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
     })?;
     mongodb.set("connect_async", async_connect_fn)?;
 
-    let async_insert_fn =
-        lua.create_function(
-            |lua,
-             (host, port, _database, collection, document): (
-                String,
-                u16,
-                String,
-                String,
-                String,
-            )| {
-                let runtime = tokio::runtime::Handle::current();
-                let host_clone = host.clone();
-
-                runtime.block_on(async {
-                    let result = lua.create_table()?;
-
-                    let addr = format!("{}:{}", host_clone, port);
-                    match AsyncTcpStream::connect(&addr).await {
-                        Ok(mut stream) => {
-                            let doc = format!(
-                                "{{\"insert\":\"{}\",\"documents\":[{}]}}",
-                                collection, document
-                            );
-                            let request =
-                                build_mongo_message(2004, b"\x00\x00\x00\x00", doc.as_bytes());
-
-                            match stream.write_all(&request).await {
-                                Ok(_) => {
-                                    let mut response = vec![0u8; 4096];
-                                    match stream.read(&mut response).await {
-                                        Ok(n) => {
-                                            result.set("success", true)?;
-                                            result.set(" inserted", 1)?;
-                                            result.set("response_size", n)?;
-                                        }
-                                        Err(e) => {
-                                            result.set("success", false)?;
-                                            result.set("error", format!("Read failed: {}", e))?;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    result.set("success", false)?;
-                                    result.set("error", format!("Write failed: {}", e))?;
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            result.set("success", false)?;
-                            result.set("error", format!("Connection failed: {}", e))?;
-                        }
-                    }
-
-                    Ok(result)
-                })
-            },
-        )?;
-    mongodb.set("insert_async", async_insert_fn)?;
-
-    let async_find_fn = lua.create_function(
-        |lua, (host, port, _database, collection, query): (String, u16, String, String, String)| {
+    let cap = capability_ctx.clone();
+    let async_insert_fn = lua.create_function(
+        move |lua,
+              (host, port, _database, collection, document): (
+            String,
+            u16,
+            String,
+            String,
+            String,
+        )| {
+            if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.insert_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
             let runtime = tokio::runtime::Handle::current();
             let host_clone = host.clone();
 
@@ -277,8 +284,12 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
                 let addr = format!("{}:{}", host_clone, port);
                 match AsyncTcpStream::connect(&addr).await {
                     Ok(mut stream) => {
-                        let q = format!("{{\"find\":\"{}\",\"filter\":{}}}", collection, query);
-                        let request = build_mongo_message(2004, b"\x00\x00\x00\x00", q.as_bytes());
+                        let doc = format!(
+                            "{{\"insert\":\"{}\",\"documents\":[{}]}}",
+                            collection, document
+                        );
+                        let request =
+                            build_mongo_message(2004, b"\x00\x00\x00\x00", doc.as_bytes());
 
                         match stream.write_all(&request).await {
                             Ok(_) => {
@@ -286,8 +297,7 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
                                 match stream.read(&mut response).await {
                                     Ok(n) => {
                                         result.set("success", true)?;
-                                        result.set("cursor", 0)?;
-                                        result.set("documents", lua.create_table()?)?;
+                                        result.set(" inserted", 1)?;
                                         result.set("response_size", n)?;
                                     }
                                     Err(e) => {
@@ -312,15 +322,79 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
             })
         },
     )?;
+    mongodb.set("insert_async", async_insert_fn)?;
+
+    let cap = capability_ctx.clone();
+    let async_find_fn =
+        lua.create_function(
+            move |lua,
+                  (host, port, _database, collection, query): (
+                String,
+                u16,
+                String,
+                String,
+                String,
+            )| {
+                if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.find_async")?
+                {
+                    return Err(mlua::Error::RuntimeError(
+                        denied.get::<String>("error").unwrap_or_default(),
+                    ));
+                }
+                let runtime = tokio::runtime::Handle::current();
+                let host_clone = host.clone();
+
+                runtime.block_on(async {
+                    let result = lua.create_table()?;
+
+                    let addr = format!("{}:{}", host_clone, port);
+                    match AsyncTcpStream::connect(&addr).await {
+                        Ok(mut stream) => {
+                            let q = format!("{{\"find\":\"{}\",\"filter\":{}}}", collection, query);
+                            let request =
+                                build_mongo_message(2004, b"\x00\x00\x00\x00", q.as_bytes());
+
+                            match stream.write_all(&request).await {
+                                Ok(_) => {
+                                    let mut response = vec![0u8; 4096];
+                                    match stream.read(&mut response).await {
+                                        Ok(n) => {
+                                            result.set("success", true)?;
+                                            result.set("cursor", 0)?;
+                                            result.set("documents", lua.create_table()?)?;
+                                            result.set("response_size", n)?;
+                                        }
+                                        Err(e) => {
+                                            result.set("success", false)?;
+                                            result.set("error", format!("Read failed: {}", e))?;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    result.set("success", false)?;
+                                    result.set("error", format!("Write failed: {}", e))?;
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            result.set("success", false)?;
+                            result.set("error", format!("Connection failed: {}", e))?;
+                        }
+                    }
+
+                    Ok(result)
+                })
+            },
+        )?;
     mongodb.set("find_async", async_find_fn)?;
 
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     mongodb.set("version", version_fn)?;
 
-    // mongodb.update() - Update documents (synchronous)
+    let cap = capability_ctx.clone();
     let update_fn = lua.create_function(
-        |lua,
-         (host, port, _db, collection, selector, update): (
+        move |lua,
+              (host, port, _db, collection, selector, update): (
             String,
             u16,
             String,
@@ -328,6 +402,9 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
             String,
             String,
         )| {
+            if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.update")? {
+                return Ok(denied);
+            }
             let addr = format!("{}:{}", host, port);
             let mut stream = match TcpStream::connect_timeout(
                 &addr
@@ -366,91 +443,113 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
     )?;
     mongodb.set("update", update_fn)?;
 
-    // mongodb.delete() - Delete documents (synchronous)
-    let delete_fn = lua.create_function(
-        |lua, (host, port, _db, collection, selector): (String, u16, String, String, String)| {
-            let addr = format!("{}:{}", host, port);
-            let mut stream = match TcpStream::connect_timeout(
-                &addr
-                    .parse::<std::net::SocketAddr>()
-                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
-                Duration::from_secs(10),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
+    let cap = capability_ctx.clone();
+    let delete_fn =
+        lua.create_function(
+            move |lua,
+                  (host, port, _db, collection, selector): (
+                String,
+                u16,
+                String,
+                String,
+                String,
+            )| {
+                if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.delete")? {
+                    return Ok(denied);
+                }
+                let addr = format!("{}:{}", host, port);
+                let mut stream = match TcpStream::connect_timeout(
+                    &addr
+                        .parse::<std::net::SocketAddr>()
+                        .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
+                    Duration::from_secs(10),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let result = lua.create_table()?;
+                        result.set("success", false)?;
+                        result.set("error", e.to_string())?;
+                        return Ok(result);
+                    }
+                };
+
+                let request = format!(
+                    "{{\"delete\":\"{}\",\"deletes\":[{{\"q\":{},\"limit\":0}}]}}",
+                    collection, selector
+                );
+                let msg = build_mongo_message(2004, b"\x00\x00\x00\x00", request.as_bytes());
+
+                if let Err(e) = stream.write_all(&msg) {
                     let result = lua.create_table()?;
                     result.set("success", false)?;
                     result.set("error", e.to_string())?;
                     return Ok(result);
                 }
-            };
 
-            let request = format!(
-                "{{\"delete\":\"{}\",\"deletes\":[{{\"q\":{},\"limit\":0}}]}}",
-                collection, selector
-            );
-            let msg = build_mongo_message(2004, b"\x00\x00\x00\x00", request.as_bytes());
-
-            if let Err(e) = stream.write_all(&msg) {
                 let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e.to_string())?;
-                return Ok(result);
-            }
-
-            let result = lua.create_table()?;
-            result.set("success", true)?;
-            result.set("deleted", 0)?;
-            Ok(result)
-        },
-    )?;
+                result.set("success", true)?;
+                result.set("deleted", 0)?;
+                Ok(result)
+            },
+        )?;
     mongodb.set("delete", delete_fn)?;
 
-    // mongodb.aggregate() - Run aggregation pipeline
-    let aggregate_fn = lua.create_function(
-        |lua, (host, port, _db, collection, pipeline): (String, u16, String, String, String)| {
-            let addr = format!("{}:{}", host, port);
-            let mut stream = match TcpStream::connect_timeout(
-                &addr
-                    .parse::<std::net::SocketAddr>()
-                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
-                Duration::from_secs(10),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
+    let cap = capability_ctx.clone();
+    let aggregate_fn =
+        lua.create_function(
+            move |lua,
+                  (host, port, _db, collection, pipeline): (
+                String,
+                u16,
+                String,
+                String,
+                String,
+            )| {
+                if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.aggregate")? {
+                    return Ok(denied);
+                }
+                let addr = format!("{}:{}", host, port);
+                let mut stream = match TcpStream::connect_timeout(
+                    &addr
+                        .parse::<std::net::SocketAddr>()
+                        .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
+                    Duration::from_secs(10),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let result = lua.create_table()?;
+                        result.set("success", false)?;
+                        result.set("error", e.to_string())?;
+                        return Ok(result);
+                    }
+                };
+
+                let request = format!(
+                    "{{\"aggregate\":\"{}\",\"pipeline\":{},\"cursor\":{{}}}}",
+                    collection, pipeline
+                );
+                let msg = build_mongo_message(2004, b"\x00\x00\x00\x00", request.as_bytes());
+
+                if let Err(e) = stream.write_all(&msg) {
                     let result = lua.create_table()?;
                     result.set("success", false)?;
                     result.set("error", e.to_string())?;
                     return Ok(result);
                 }
-            };
 
-            let request = format!(
-                "{{\"aggregate\":\"{}\",\"pipeline\":{},\"cursor\":{{}}}}",
-                collection, pipeline
-            );
-            let msg = build_mongo_message(2004, b"\x00\x00\x00\x00", request.as_bytes());
-
-            if let Err(e) = stream.write_all(&msg) {
                 let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e.to_string())?;
-                return Ok(result);
-            }
-
-            let result = lua.create_table()?;
-            result.set("success", true)?;
-            result.set("cursor", 0)?;
-            result.set("results", lua.create_table()?)?;
-            Ok(result)
-        },
-    )?;
+                result.set("success", true)?;
+                result.set("cursor", 0)?;
+                result.set("results", lua.create_table()?)?;
+                Ok(result)
+            },
+        )?;
     mongodb.set("aggregate", aggregate_fn)?;
 
-    // mongodb.distinct() - Get distinct values
+    let cap = capability_ctx.clone();
     let distinct_fn = lua.create_function(
-        |lua,
-         (host, port, _db, collection, field, query): (
+        move |lua,
+              (host, port, _db, collection, field, query): (
             String,
             u16,
             String,
@@ -458,6 +557,9 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
             String,
             Option<String>,
         )| {
+            if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.distinct")? {
+                return Ok(denied);
+            }
             let addr = format!("{}:{}", host, port);
             let mut stream = match TcpStream::connect_timeout(
                 &addr
@@ -496,55 +598,60 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
     )?;
     mongodb.set("distinct", distinct_fn)?;
 
-    // mongodb.count() - Count documents
-    let count_fn =
-        lua.create_function(
-            |lua,
-             (host, port, _db, collection, query): (
-                String,
-                u16,
-                String,
-                String,
-                Option<String>,
-            )| {
-                let addr = format!("{}:{}", host, port);
-                let mut stream = match TcpStream::connect_timeout(
-                    &addr
-                        .parse::<std::net::SocketAddr>()
-                        .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
-                    Duration::from_secs(10),
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let result = lua.create_table()?;
-                        result.set("success", false)?;
-                        result.set("error", e.to_string())?;
-                        return Ok(result);
-                    }
-                };
-
-                let query_str = query.unwrap_or_else(|| "{}".to_string());
-                let request = format!("{{\"count\":\"{}\",\"query\":{}}}", collection, query_str);
-                let msg = build_mongo_message(2004, b"\x00\x00\x00\x00", request.as_bytes());
-
-                if let Err(e) = stream.write_all(&msg) {
+    let cap = capability_ctx.clone();
+    let count_fn = lua.create_function(
+        move |lua,
+              (host, port, _db, collection, query): (
+            String,
+            u16,
+            String,
+            String,
+            Option<String>,
+        )| {
+            if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.count")? {
+                return Ok(denied);
+            }
+            let addr = format!("{}:{}", host, port);
+            let mut stream = match TcpStream::connect_timeout(
+                &addr
+                    .parse::<std::net::SocketAddr>()
+                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
+                Duration::from_secs(10),
+            ) {
+                Ok(s) => s,
+                Err(e) => {
                     let result = lua.create_table()?;
                     result.set("success", false)?;
                     result.set("error", e.to_string())?;
                     return Ok(result);
                 }
+            };
 
+            let query_str = query.unwrap_or_else(|| "{}".to_string());
+            let request = format!("{{\"count\":\"{}\",\"query\":{}}}", collection, query_str);
+            let msg = build_mongo_message(2004, b"\x00\x00\x00\x00", request.as_bytes());
+
+            if let Err(e) = stream.write_all(&msg) {
                 let result = lua.create_table()?;
-                result.set("success", true)?;
-                result.set("n", 0)?;
-                Ok(result)
-            },
-        )?;
+                result.set("success", false)?;
+                result.set("error", e.to_string())?;
+                return Ok(result);
+            }
+
+            let result = lua.create_table()?;
+            result.set("success", true)?;
+            result.set("n", 0)?;
+            Ok(result)
+        },
+    )?;
     mongodb.set("count", count_fn)?;
 
-    // mongodb.create_index() - Create an index
+    let cap = capability_ctx.clone();
     let create_index_fn = lua.create_function(
-        |lua, (host, port, _db, collection, keys): (String, u16, String, String, String)| {
+        move |lua, (host, port, _db, collection, keys): (String, u16, String, String, String)| {
+            if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.create_index")? {
+                return Ok(denied);
+            }
             let addr = format!("{}:{}", host, port);
             let mut stream = match TcpStream::connect_timeout(
                 &addr
@@ -582,9 +689,12 @@ pub fn register_mongodb_library(lua: &Lua) -> LuaResult<()> {
     )?;
     mongodb.set("create_index", create_index_fn)?;
 
-    // mongodb.drop() - Drop a collection
+    let cap = capability_ctx.clone();
     let drop_fn = lua.create_function(
-        |lua, (host, port, _db, collection): (String, u16, String, String)| {
+        move |lua, (host, port, _db, collection): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_mongodb(lua, &cap, &host, "mongodb.drop")? {
+                return Ok(denied);
+            }
             let addr = format!("{}:{}", host, port);
             let mut stream = match TcpStream::connect_timeout(
                 &addr

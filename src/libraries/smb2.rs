@@ -8,6 +8,9 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 const SMB2_NEGOTIATE: u16 = 0x0000;
 const SMB2_SESSION_SETUP: u16 = 0x0001;
 const SMB2_LOGOFF: u16 = 0x0002;
@@ -19,13 +22,40 @@ const SMB2_READ: u16 = 0x0008;
 const SMB2_WRITE: u16 = 0x0009;
 const SMB2_GET_INFO: u16 = 0x0010;
 
-pub fn register_smb2_library(lua: &Lua) -> LuaResult<()> {
+fn maybe_denied_smb2(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+pub fn register_smb2_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let smb2 = lua.create_table()?;
 
+    let cap = capability_ctx.clone();
     smb2.set(
         "negotiate",
-        lua.create_function(|lua, (host, port): (String, u16)| {
+        lua.create_function(move |lua, (host, port): (String, u16)| {
+            if let Some(denied) = maybe_denied_smb2(lua, &cap, &host, "smb2.negotiate")? {
+                return Ok(denied);
+            }
             let result = lua.create_table()?;
 
             let addr = format!("{}:{}", host, port);

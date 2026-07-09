@@ -28,6 +28,7 @@ pub struct TcpEchoServer {
     port: u16,
     shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    hits: Arc<AtomicUsize>,
 }
 
 impl TcpEchoServer {
@@ -37,6 +38,8 @@ impl TcpEchoServer {
         let port = listener.local_addr().unwrap().port();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = shutdown.clone();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = hits.clone();
 
         // Non-blocking accept loop
         listener.set_nonblocking(true).unwrap();
@@ -45,6 +48,7 @@ impl TcpEchoServer {
             while !shutdown_clone.load(Ordering::Relaxed) {
                 match listener.accept() {
                     Ok((stream, _)) => {
+                        hits_clone.fetch_add(1, Ordering::Relaxed);
                         stream
                             .set_read_timeout(Some(Duration::from_secs(3)))
                             .unwrap();
@@ -62,6 +66,7 @@ impl TcpEchoServer {
             port,
             shutdown,
             handle: Some(handle),
+            hits,
         }
     }
 
@@ -85,6 +90,11 @@ impl TcpEchoServer {
     /// The address as `host:port` string.
     pub fn addr(&self) -> String {
         format!("127.0.0.1:{}", self.port)
+    }
+
+    /// Number of connections accepted by this server.
+    pub fn hits(&self) -> usize {
+        self.hits.load(Ordering::Relaxed)
     }
 }
 
@@ -308,6 +318,7 @@ pub struct UdpEchoServer {
     port: u16,
     shutdown: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    hits: Arc<AtomicUsize>,
 }
 
 impl UdpEchoServer {
@@ -318,12 +329,15 @@ impl UdpEchoServer {
         socket.set_nonblocking(true).unwrap();
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_clone = shutdown.clone();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = hits.clone();
 
         let handle = thread::spawn(move || {
             let mut buf = [0u8; 65535];
             while !shutdown_clone.load(Ordering::Relaxed) {
                 match socket.recv_from(&mut buf) {
                     Ok((n, src)) => {
+                        hits_clone.fetch_add(1, Ordering::Relaxed);
                         let _ = socket.send_to(&buf[..n], src);
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -338,12 +352,18 @@ impl UdpEchoServer {
             port,
             shutdown,
             handle: Some(handle),
+            hits,
         }
     }
 
     /// The port this server is listening on.
     pub fn port(&self) -> u16 {
         self.port
+    }
+
+    /// Number of datagrams received by this server.
+    pub fn hits(&self) -> usize {
+        self.hits.load(Ordering::Relaxed)
     }
 }
 
@@ -535,6 +555,219 @@ impl Drop for TlsEchoServer {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FTP server (control connection only)
+// ---------------------------------------------------------------------------
+
+/// A minimal FTP control server bound to `127.0.0.1:<random>`.
+///
+/// Handles USER/PASS/PASV/CWD/LIST/RETR/QUIT. Each PASV opens a fresh data
+/// listener on a random port and reports `227 Entering Passive Mode
+/// (h1,h2,h3,h4,p1,p2)`. The data connection accept is non-blocking — if no
+/// client connects within ~200ms, the PASV returns 425 ("Can't open data
+/// connection"), which is the standard FTP behavior.
+///
+/// Use `control_hits()` to count control-connection accepts and
+/// `pasv_opens()` to count PASV data listeners that were opened (not
+/// necessarily accepted). For the PASV no-data-conn denial test, the
+/// control connection hits should be 1 (after auth + PASV) and the data
+/// listener opened but no client ever connects to it.
+pub struct FtpServer {
+    port: u16,
+    shutdown: Arc<AtomicBool>,
+    handle: Option<thread::JoinHandle<()>>,
+    control_hits: Arc<AtomicUsize>,
+    pasv_opens: Arc<AtomicUsize>,
+    last_user: Arc<Mutex<Option<String>>>,
+}
+
+impl FtpServer {
+    pub fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind FTP control server");
+        let port = listener.local_addr().unwrap().port();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_clone = shutdown.clone();
+        let control_hits = Arc::new(AtomicUsize::new(0));
+        let control_hits_clone = control_hits.clone();
+        let pasv_opens = Arc::new(AtomicUsize::new(0));
+        let pasv_opens_clone = pasv_opens.clone();
+        let last_user = Arc::new(Mutex::new(None));
+        let last_user_clone = last_user.clone();
+
+        listener.set_nonblocking(true).unwrap();
+
+        let handle = thread::spawn(move || {
+            while !shutdown_clone.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        control_hits_clone.fetch_add(1, Ordering::Relaxed);
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(3)))
+                            .unwrap();
+                        Self::handle_control(
+                            stream,
+                            pasv_opens_clone.clone(),
+                            last_user_clone.clone(),
+                        );
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            port,
+            shutdown,
+            handle: Some(handle),
+            control_hits,
+            pasv_opens,
+            last_user,
+        }
+    }
+
+    fn handle_control(
+        mut stream: TcpStream,
+        pasv_opens: Arc<AtomicUsize>,
+        last_user: Arc<Mutex<Option<String>>>,
+    ) {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(3)));
+
+        // Banner
+        let _ = stream.write_all(b"220 Eggsec FTP Test Server ready.\r\n");
+        let _ = stream.flush();
+
+        let reader = BufReader::new(stream.try_clone().unwrap());
+
+        for line in reader.lines().map_while(Result::ok) {
+            let cmd = line.trim();
+            if cmd.is_empty() {
+                continue;
+            }
+            let upper = cmd.to_uppercase();
+            let mut parts = upper.splitn(2, ' ');
+            let verb = parts.next().unwrap_or("");
+
+            match verb {
+                "USER" => {
+                    if let Ok(mut u) = last_user.lock() {
+                        *u = cmd[4..].trim().to_string().into();
+                    }
+                    let _ = stream.write_all(b"331 Password required.\r\n");
+                }
+                "PASS" => {
+                    let _ = stream.write_all(b"230 Login successful.\r\n");
+                }
+                "SYST" => {
+                    let _ = stream.write_all(b"215 UNIX Type: L8.\r\n");
+                }
+                "TYPE" => {
+                    let _ = stream.write_all(b"200 Type set.\r\n");
+                }
+                "PWD" | "XPWD" => {
+                    let _ = stream.write_all(b"257 \"/\" is current directory.\r\n");
+                }
+                "CWD" | "XCWD" => {
+                    let _ = stream.write_all(b"250 CWD successful.\r\n");
+                }
+                "PASV" => {
+                    // Open a fresh data listener and report it.
+                    let data_listener =
+                        TcpListener::bind("127.0.0.1:0").expect("bind PASV data listener");
+                    let data_port = data_listener.local_addr().unwrap().port();
+                    data_listener.set_nonblocking(true).unwrap();
+                    pasv_opens.fetch_add(1, Ordering::Relaxed);
+
+                    // Hold the listener open for ~250ms; if no client connects,
+                    // drop it. This mimics a real FTP server that closes the
+                    // data socket after a timeout.
+                    let stop_flag = Arc::new(AtomicBool::new(false));
+                    let stop_clone = stop_flag.clone();
+                    let _data_thread = thread::spawn(move || {
+                        let deadline = std::time::Instant::now() + Duration::from_millis(250);
+                        while !stop_clone.load(Ordering::Relaxed) {
+                            match data_listener.accept() {
+                                Ok(_) => break,
+                                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    if std::time::Instant::now() >= deadline {
+                                        break;
+                                    }
+                                    thread::sleep(Duration::from_millis(10));
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        stop_flag.store(true, Ordering::Relaxed);
+                    });
+
+                    let p1 = data_port / 256;
+                    let p2 = data_port % 256;
+                    let response =
+                        format!("227 Entering Passive Mode (127,0,0,1,{},{}).\r\n", p1, p2);
+                    let _ = stream.write_all(response.as_bytes());
+                }
+                "LIST" | "NLST" => {
+                    // Send 150, then 426 (connection closed without data) since
+                    // no client connects to the data listener.
+                    let _ = stream.write_all(b"150 Here comes the directory listing.\r\n");
+                    let _ = stream.write_all(b"426 Connection closed; transfer aborted.\r\n");
+                }
+                "RETR" => {
+                    let _ = stream.write_all(b"150 Opening data connection.\r\n");
+                    let _ = stream.write_all(b"426 Connection closed; transfer aborted.\r\n");
+                }
+                "STOR" => {
+                    let _ = stream.write_all(b"150 Opening data connection.\r\n");
+                    let _ = stream.write_all(b"426 Connection closed; transfer aborted.\r\n");
+                }
+                "DELE" | "SIZE" | "MDTM" | "MLST" | "FEAT" => {
+                    let _ = stream.write_all(b"550 Not implemented in test fixture.\r\n");
+                }
+                "QUIT" => {
+                    let _ = stream.write_all(b"221 Goodbye.\r\n");
+                    let _ = stream.flush();
+                    return;
+                }
+                _ => {
+                    let _ = stream.write_all(b"500 Unknown command.\r\n");
+                }
+            }
+            let _ = stream.flush();
+        }
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn addr(&self) -> String {
+        format!("127.0.0.1:{}", self.port)
+    }
+
+    pub fn control_hits(&self) -> usize {
+        self.control_hits.load(Ordering::Relaxed)
+    }
+
+    pub fn pasv_opens(&self) -> usize {
+        self.pasv_opens.load(Ordering::Relaxed)
+    }
+
+    pub fn last_user(&self) -> Option<String> {
+        self.last_user.lock().ok().and_then(|u| u.clone())
+    }
+}
+
+impl Drop for FtpServer {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,5 +835,60 @@ mod tests {
         let mut buf = String::new();
         reader.read_line(&mut buf).expect("read response");
         assert!(buf.contains("TLS_ECHO: hello from tls"), "got: {}", buf);
+    }
+
+    #[test]
+    fn ftp_server_roundtrip() {
+        let server = FtpServer::start();
+        let mut stream = TcpStream::connect(server.addr()).expect("connect to FTP server");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+
+        // Read banner
+        let mut banner = String::new();
+        reader.read_line(&mut banner).expect("read banner");
+        assert!(banner.contains("220"), "got banner: {}", banner);
+
+        // USER
+        writeln!(stream, "USER anonymous").unwrap();
+        let mut resp = String::new();
+        reader.read_line(&mut resp).expect("read USER response");
+        assert!(resp.contains("331"), "got: {}", resp);
+
+        // PASS
+        writeln!(stream, "PASS test").unwrap();
+        resp.clear();
+        reader.read_line(&mut resp).expect("read PASS response");
+        assert!(resp.contains("230"), "got: {}", resp);
+
+        // PASV
+        writeln!(stream, "PASV").unwrap();
+        resp.clear();
+        reader.read_line(&mut resp).expect("read PASV response");
+        assert!(resp.contains("227"), "got PASV response: {}", resp);
+
+        // LIST
+        writeln!(stream, "LIST").unwrap();
+        resp.clear();
+        reader.read_line(&mut resp).expect("read LIST 150");
+        assert!(resp.contains("150"), "got: {}", resp);
+        resp.clear();
+        reader.read_line(&mut resp).expect("read LIST 426");
+        assert!(resp.contains("426"), "got: {}", resp);
+
+        assert_eq!(
+            server.control_hits(),
+            1,
+            "control_hits after one connection"
+        );
+        assert!(
+            server.pasv_opens() >= 1,
+            "PASV should have opened at least once, got {}",
+            server.pasv_opens()
+        );
+        assert_eq!(server.last_user().as_deref(), Some("anonymous"));
     }
 }

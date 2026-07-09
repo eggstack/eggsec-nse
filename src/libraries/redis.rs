@@ -10,6 +10,32 @@ use std::net::TcpStream;
 use std::time::Duration;
 use tokio::net::TcpStream as AsyncTcpStream;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
+fn maybe_denied_redis(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
 fn redis_command(addr: &str, cmd: &str) -> std::io::Result<String> {
     let socket_addr = addr
         .parse::<std::net::SocketAddr>()
@@ -51,11 +77,15 @@ fn redis_auth(addr: &str, password: &str) -> std::io::Result<bool> {
     }
 }
 
-pub fn register_redis_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_redis_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let redis = lua.create_table()?;
 
-    let connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_redis(lua, &cap, &host, "redis.connect")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         match TcpStream::connect_timeout(
             &addr
@@ -80,7 +110,13 @@ pub fn register_redis_library(lua: &Lua) -> LuaResult<()> {
     })?;
     redis.set("connect", connect_fn)?;
 
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_redis(lua, &cap, &host, "redis.connect_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let addr = format!("{}:{}", host, port);
 
         tokio::runtime::Handle::current().block_on(async {
@@ -103,27 +139,38 @@ pub fn register_redis_library(lua: &Lua) -> LuaResult<()> {
     })?;
     redis.set("connect_async", async_connect_fn)?;
 
-    let auth_fn = lua.create_function(|lua, (host, port, password): (String, u16, String)| {
-        let addr = format!("{}:{}", host, port);
-        match redis_auth(&addr, &password) {
-            Ok(success) => {
-                let result = lua.create_table()?;
-                result.set("success", success)?;
-                result.set("status", "authenticated")?;
-                Ok(result)
+    let cap = capability_ctx.clone();
+    let auth_fn =
+        lua.create_function(move |lua, (host, port, password): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_redis(lua, &cap, &host, "redis.auth")? {
+                return Ok(denied);
             }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", e.to_string())?;
-                Ok(result)
+            let addr = format!("{}:{}", host, port);
+            match redis_auth(&addr, &password) {
+                Ok(success) => {
+                    let result = lua.create_table()?;
+                    result.set("success", success)?;
+                    result.set("status", "authenticated")?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
             }
-        }
-    })?;
+        })?;
     redis.set("auth", auth_fn)?;
 
+    let cap = capability_ctx.clone();
     let async_auth_fn =
-        lua.create_function(|lua, (host, port, password): (String, u16, String)| {
+        lua.create_function(move |lua, (host, port, password): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_redis(lua, &cap, &host, "redis.auth_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
             let addr = format!("{}:{}", host, port);
 
             tokio::runtime::Handle::current().block_on(async {
@@ -164,7 +211,11 @@ pub fn register_redis_library(lua: &Lua) -> LuaResult<()> {
         })?;
     redis.set("auth_async", async_auth_fn)?;
 
-    let ping_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let ping_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_redis(lua, &cap, &host, "redis.ping")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         match redis_command(&addr, "*1\r\n$4\r\nPING\r\n") {
             Ok(response) => {
@@ -188,7 +239,13 @@ pub fn register_redis_library(lua: &Lua) -> LuaResult<()> {
     })?;
     redis.set("ping", ping_fn)?;
 
-    let async_ping_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let async_ping_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_redis(lua, &cap, &host, "redis.ping_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let addr = format!("{}:{}", host, port);
 
         tokio::runtime::Handle::current().block_on(async {
@@ -225,7 +282,11 @@ pub fn register_redis_library(lua: &Lua) -> LuaResult<()> {
     })?;
     redis.set("ping_async", async_ping_fn)?;
 
-    let get_fn = lua.create_function(|lua, (host, port, key): (String, u16, String)| {
+    let cap = capability_ctx.clone();
+    let get_fn = lua.create_function(move |lua, (host, port, key): (String, u16, String)| {
+        if let Some(denied) = maybe_denied_redis(lua, &cap, &host, "redis.get")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         let cmd = format!("*2\r\n$3\r\nGET\r\n${}\r\n{}\r\n", key.len(), key);
 
@@ -257,50 +318,61 @@ pub fn register_redis_library(lua: &Lua) -> LuaResult<()> {
     })?;
     redis.set("get", get_fn)?;
 
-    let async_get_fn = lua.create_function(|lua, (host, port, key): (String, u16, String)| {
-        let addr = format!("{}:{}", host, port);
-
-        tokio::runtime::Handle::current().block_on(async {
-            let cmd = format!("*2\r\n$3\r\nGET\r\n${}\r\n{}\r\n", key.len(), key);
-
-            let result = tokio::task::spawn_blocking(move || redis_command(&addr, &cmd)).await;
-
-            match result {
-                Ok(Ok(response)) => {
-                    let r = lua.create_table()?;
-                    if response.starts_with("+") {
-                        r.set("value", response.trim_start_matches('+'))?;
-                    } else if response.starts_with("$") {
-                        let lines: Vec<&str> = response.lines().collect();
-                        if lines.len() > 2 {
-                            r.set("value", lines[2])?;
-                        } else {
-                            r.set("value", "")?;
-                        }
-                    } else if response.starts_with("-") {
-                        r.set("error", response.trim_start_matches('-'))?;
-                    } else {
-                        r.set("value", response.trim())?;
-                    }
-                    Ok(r)
-                }
-                Ok(Err(e)) => {
-                    let r = lua.create_table()?;
-                    r.set("error", e.to_string())?;
-                    Ok(r)
-                }
-                Err(e) => {
-                    let r = lua.create_table()?;
-                    r.set("error", e.to_string())?;
-                    Ok(r)
-                }
+    let cap = capability_ctx.clone();
+    let async_get_fn =
+        lua.create_function(move |lua, (host, port, key): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_redis(lua, &cap, &host, "redis.get_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
             }
-        })
-    })?;
+            let addr = format!("{}:{}", host, port);
+
+            tokio::runtime::Handle::current().block_on(async {
+                let cmd = format!("*2\r\n$3\r\nGET\r\n${}\r\n{}\r\n", key.len(), key);
+
+                let result = tokio::task::spawn_blocking(move || redis_command(&addr, &cmd)).await;
+
+                match result {
+                    Ok(Ok(response)) => {
+                        let r = lua.create_table()?;
+                        if response.starts_with("+") {
+                            r.set("value", response.trim_start_matches('+'))?;
+                        } else if response.starts_with("$") {
+                            let lines: Vec<&str> = response.lines().collect();
+                            if lines.len() > 2 {
+                                r.set("value", lines[2])?;
+                            } else {
+                                r.set("value", "")?;
+                            }
+                        } else if response.starts_with("-") {
+                            r.set("error", response.trim_start_matches('-'))?;
+                        } else {
+                            r.set("value", response.trim())?;
+                        }
+                        Ok(r)
+                    }
+                    Ok(Err(e)) => {
+                        let r = lua.create_table()?;
+                        r.set("error", e.to_string())?;
+                        Ok(r)
+                    }
+                    Err(e) => {
+                        let r = lua.create_table()?;
+                        r.set("error", e.to_string())?;
+                        Ok(r)
+                    }
+                }
+            })
+        })?;
     redis.set("get_async", async_get_fn)?;
 
+    let cap = capability_ctx.clone();
     let set_fn = lua.create_function(
-        |lua, (host, port, key, value): (String, u16, String, String)| {
+        move |lua, (host, port, key, value): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_redis(lua, &cap, &host, "redis.set")? {
+                return Ok(denied);
+            }
             let addr = format!("{}:{}", host, port);
             let cmd = format!(
                 "*3\r\n$3\r\nSET\r\n${}\r\n{}\r\n${}\r\n{}\r\n",
@@ -332,8 +404,14 @@ pub fn register_redis_library(lua: &Lua) -> LuaResult<()> {
     )?;
     redis.set("set", set_fn)?;
 
+    let cap = capability_ctx.clone();
     let async_set_fn = lua.create_function(
-        |lua, (host, port, key, value): (String, u16, String, String)| {
+        move |lua, (host, port, key, value): (String, u16, String, String)| {
+            if let Some(denied) = maybe_denied_redis(lua, &cap, &host, "redis.set_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
             let addr = format!("{}:{}", host, port);
 
             tokio::runtime::Handle::current().block_on(async {
@@ -376,7 +454,11 @@ pub fn register_redis_library(lua: &Lua) -> LuaResult<()> {
     )?;
     redis.set("set_async", async_set_fn)?;
 
-    let info_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let info_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_redis(lua, &cap, &host, "redis.info")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
 
         match redis_command(&addr, "*1\r\n$4\r\nINFO\r\n") {
@@ -403,7 +485,13 @@ pub fn register_redis_library(lua: &Lua) -> LuaResult<()> {
     })?;
     redis.set("info", info_fn)?;
 
-    let async_info_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let async_info_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_redis(lua, &cap, &host, "redis.info_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let addr = format!("{}:{}", host, port);
 
         tokio::runtime::Handle::current().block_on(async {

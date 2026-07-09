@@ -6,6 +6,32 @@ use mlua::{Lua, Result as LuaResult};
 use std::net::{Ipv4Addr, UdpSocket};
 use std::time::Duration;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
+fn maybe_denied_dhcp(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_udp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
 const DHCP_SERVER_PORT: u16 = 67;
 const DHCP_CLIENT_PORT: u16 = 68;
 
@@ -166,11 +192,15 @@ fn parse_dhcp_response(packet: &[u8]) -> Result<(String, String, String, String,
     Ok((your_ip, subnet_mask, router, dns, lease_time))
 }
 
-pub fn register_dhcp_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_dhcp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let dhcp = lua.create_table()?;
 
-    let discover_fn = lua.create_function(|lua, (host, mac): (String, String)| {
+    let cap = capability_ctx.clone();
+    let discover_fn = lua.create_function(move |lua, (host, mac): (String, String)| {
+        if let Some(denied) = maybe_denied_dhcp(lua, &cap, &host, "dhcp.discover")? {
+            return Ok(denied);
+        }
         let mac_bytes = mac_to_bytes(&mac).map_err(mlua::Error::RuntimeError)?;
         let xid = rand::random::<u32>();
 
@@ -235,81 +265,96 @@ pub fn register_dhcp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     dhcp.set("discover", discover_fn)?;
 
-    let request_fn = lua.create_function(
-        |lua, (host, mac, requested_ip, server_ip): (String, String, String, Option<String>)| {
-            let mac_bytes = mac_to_bytes(&mac).map_err(mlua::Error::RuntimeError)?;
-            let xid = rand::random::<u32>();
+    let cap = capability_ctx.clone();
+    let request_fn =
+        lua.create_function(
+            move |lua,
+                  (host, mac, requested_ip, server_ip): (
+                String,
+                String,
+                String,
+                Option<String>,
+            )| {
+                if let Some(denied) = maybe_denied_dhcp(lua, &cap, &host, "dhcp.request")? {
+                    return Ok(denied);
+                }
+                let mac_bytes = mac_to_bytes(&mac).map_err(mlua::Error::RuntimeError)?;
+                let xid = rand::random::<u32>();
 
-            let packet = build_dhcp_packet(
-                DHCP_REQUEST,
-                xid,
-                &mac_bytes,
-                Some(&requested_ip),
-                server_ip.as_deref(),
-                &[],
-            );
+                let packet = build_dhcp_packet(
+                    DHCP_REQUEST,
+                    xid,
+                    &mac_bytes,
+                    Some(&requested_ip),
+                    server_ip.as_deref(),
+                    &[],
+                );
 
-            match UdpSocket::bind("0.0.0.0:68") {
-                Ok(socket) => {
-                    socket.set_broadcast(true).ok();
-                    socket.set_read_timeout(Some(Duration::from_secs(5))).ok();
+                match UdpSocket::bind("0.0.0.0:68") {
+                    Ok(socket) => {
+                        socket.set_broadcast(true).ok();
+                        socket.set_read_timeout(Some(Duration::from_secs(5))).ok();
 
-                    let target = if host.is_empty() {
-                        "255.255.255.255"
-                    } else {
-                        &host
-                    };
+                        let target = if host.is_empty() {
+                            "255.255.255.255"
+                        } else {
+                            &host
+                        };
 
-                    match socket.send_to(&packet, format!("{}:{}", target, DHCP_SERVER_PORT)) {
-                        Ok(_) => {
-                            let mut buf = [0u8; 1024];
-                            match socket.recv_from(&mut buf) {
-                                Ok((n, _)) => {
-                                    if n > 0 {
-                                        let result = lua.create_table()?;
-                                        result.set("transaction_id", xid)?;
-                                        result.set("mac", mac)?;
-                                        result.set("requested_ip", requested_ip)?;
+                        match socket.send_to(&packet, format!("{}:{}", target, DHCP_SERVER_PORT)) {
+                            Ok(_) => {
+                                let mut buf = [0u8; 1024];
+                                match socket.recv_from(&mut buf) {
+                                    Ok((n, _)) => {
+                                        if n > 0 {
+                                            let result = lua.create_table()?;
+                                            result.set("transaction_id", xid)?;
+                                            result.set("mac", mac)?;
+                                            result.set("requested_ip", requested_ip)?;
 
-                                        if let Ok((your_ip, subnet, router, dns, lease)) =
-                                            parse_dhcp_response(&buf[..n])
-                                        {
-                                            result.set("your_ip", your_ip)?;
-                                            result.set("subnet", subnet)?;
-                                            result.set("router", router)?;
-                                            result.set("dns", dns)?;
-                                            result.set("lease_time", lease)?;
+                                            if let Ok((your_ip, subnet, router, dns, lease)) =
+                                                parse_dhcp_response(&buf[..n])
+                                            {
+                                                result.set("your_ip", your_ip)?;
+                                                result.set("subnet", subnet)?;
+                                                result.set("router", router)?;
+                                                result.set("dns", dns)?;
+                                                result.set("lease_time", lease)?;
+                                            }
+
+                                            Ok(result)
+                                        } else {
+                                            let result = lua.create_table()?;
+                                            result.set("transaction_id", xid)?;
+                                            result.set("mac", mac)?;
+                                            result.set("requested_ip", requested_ip)?;
+                                            Ok(result)
                                         }
-
-                                        Ok(result)
-                                    } else {
+                                    }
+                                    Err(e) => {
                                         let result = lua.create_table()?;
                                         result.set("transaction_id", xid)?;
                                         result.set("mac", mac)?;
                                         result.set("requested_ip", requested_ip)?;
+                                        result.set("error", format!("No response: {}", e))?;
                                         Ok(result)
                                     }
                                 }
-                                Err(e) => {
-                                    let result = lua.create_table()?;
-                                    result.set("transaction_id", xid)?;
-                                    result.set("mac", mac)?;
-                                    result.set("requested_ip", requested_ip)?;
-                                    result.set("error", format!("No response: {}", e))?;
-                                    Ok(result)
-                                }
                             }
+                            Err(e) => Err(mlua::Error::RuntimeError(format!("Send failed: {}", e))),
                         }
-                        Err(e) => Err(mlua::Error::RuntimeError(format!("Send failed: {}", e))),
                     }
+                    Err(e) => Err(mlua::Error::RuntimeError(format!("Socket failed: {}", e))),
                 }
-                Err(e) => Err(mlua::Error::RuntimeError(format!("Socket failed: {}", e))),
-            }
-        },
-    )?;
+            },
+        )?;
     dhcp.set("request", request_fn)?;
 
-    let release_fn = lua.create_function(|lua, (host, ip): (String, String)| {
+    let cap = capability_ctx.clone();
+    let release_fn = lua.create_function(move |lua, (host, ip): (String, String)| {
+        if let Some(denied) = maybe_denied_dhcp(lua, &cap, &host, "dhcp.release")? {
+            return Ok(denied);
+        }
         let _mac_bytes = [0u8; 6];
         let xid = rand::random::<u32>();
 
@@ -352,7 +397,11 @@ pub fn register_dhcp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     dhcp.set("release", release_fn)?;
 
-    let inform_fn = lua.create_function(|lua, (host, mac): (String, String)| {
+    let cap = capability_ctx.clone();
+    let inform_fn = lua.create_function(move |lua, (host, mac): (String, String)| {
+        if let Some(denied) = maybe_denied_dhcp(lua, &cap, &host, "dhcp.inform")? {
+            return Ok(denied);
+        }
         let mac_bytes = mac_to_bytes(&mac).map_err(mlua::Error::RuntimeError)?;
         let xid = rand::random::<u32>();
 
@@ -451,7 +500,13 @@ pub fn register_dhcp_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     dhcp.set("version", version_fn)?;
 
-    let async_discover_fn = lua.create_function(|lua, (host, mac): (String, String)| {
+    let cap = capability_ctx.clone();
+    let async_discover_fn = lua.create_function(move |lua, (host, mac): (String, String)| {
+        if let Some(denied) = maybe_denied_dhcp(lua, &cap, &host, "dhcp.discover_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let mac_bytes = match mac_to_bytes(&mac) {
             Ok(b) => b,
             Err(e) => return Err(mlua::Error::RuntimeError(e)),
@@ -533,8 +588,14 @@ pub fn register_dhcp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     dhcp.set("discover_async", async_discover_fn)?;
 
-    let async_request_fn =
-        lua.create_function(|lua, (host, mac, requested_ip): (String, String, String)| {
+    let cap = capability_ctx.clone();
+    let async_request_fn = lua.create_function(
+        move |lua, (host, mac, requested_ip): (String, String, String)| {
+            if let Some(denied) = maybe_denied_dhcp(lua, &cap, &host, "dhcp.request_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
             let mac_bytes = match mac_to_bytes(&mac) {
                 Ok(b) => b,
                 Err(e) => return Err(mlua::Error::RuntimeError(e)),
@@ -620,10 +681,17 @@ pub fn register_dhcp_library(lua: &Lua) -> LuaResult<()> {
                     Err(e) => Err(mlua::Error::RuntimeError(format!("Socket failed: {}", e))),
                 }
             })
-        })?;
+        },
+    )?;
     dhcp.set("request_async", async_request_fn)?;
 
-    let async_inform_fn = lua.create_function(|lua, (host, mac): (String, String)| {
+    let cap = capability_ctx.clone();
+    let async_inform_fn = lua.create_function(move |lua, (host, mac): (String, String)| {
+        if let Some(denied) = maybe_denied_dhcp(lua, &cap, &host, "dhcp.inform_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let mac_bytes = match mac_to_bytes(&mac) {
             Ok(b) => b,
             Err(e) => return Err(mlua::Error::RuntimeError(e)),

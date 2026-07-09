@@ -8,6 +8,55 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
+fn maybe_denied_xdmcp_tcp(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+fn maybe_denied_xdmcp_udp(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_udp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
 const XDMCP_PORT: u16 = 177;
 
 // XDMCP message types
@@ -21,7 +70,7 @@ const DECLINE: u8 = 34;
 const MANAGE: u8 = 35;
 const SAVE_YOURSELF: u8 = 38;
 
-pub fn register_xdmcp_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_xdmcp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let xdmcp = lua.create_table()?;
 
@@ -48,10 +97,15 @@ pub fn register_xdmcp_library(lua: &Lua) -> LuaResult<()> {
     // ==================== Main Functions ====================
 
     // connect - Connect to XDM server and perform handshake
+    let cap = capability_ctx.clone();
     xdmcp.set(
         "connect",
-        lua.create_function(|lua, (host, port): (String, Option<u16>)| {
+        lua.create_function(move |lua, (host, port): (String, Option<u16>)| {
             let result = lua.create_table()?;
+
+            if let Some(denied) = maybe_denied_xdmcp_tcp(lua, &cap, &host, "xdmcp.connect")? {
+                return Ok(denied);
+            }
 
             let addr = format!("{}:{}", host, port.unwrap_or(XDMCP_PORT));
             let socket_addr = match addr.parse::<std::net::SocketAddr>() {
@@ -110,11 +164,16 @@ pub fn register_xdmcp_library(lua: &Lua) -> LuaResult<()> {
     )?;
 
     // request_login - Request XDM session
+    let cap = capability_ctx.clone();
     xdmcp.set(
         "request_login",
         lua.create_function(
-            |lua, (host, port, user, password): (String, Option<u16>, String, Option<String>)| {
+            move |lua, (host, port, user, password): (String, Option<u16>, String, Option<String>)| {
                 let result = lua.create_table()?;
+
+                if let Some(denied) = maybe_denied_xdmcp_tcp(lua, &cap, &host, "xdmcp.request_login")? {
+                    return Ok(denied);
+                }
 
                 let addr = format!("{}:{}", host, port.unwrap_or(XDMCP_PORT));
                 let socket_addr = match addr.parse::<std::net::SocketAddr>() {
@@ -175,12 +234,18 @@ pub fn register_xdmcp_library(lua: &Lua) -> LuaResult<()> {
     )?;
 
     // broadcast_query - Send broadcast query to find XDM servers
+    let cap = capability_ctx.clone();
     xdmcp.set(
         "broadcast_query",
-        lua.create_function(|lua, (host, port): (Option<String>, Option<u16>)| {
+        lua.create_function(move |lua, (host, port): (Option<String>, Option<u16>)| {
             let result = lua.create_table()?;
 
             let target = host.unwrap_or_else(|| "255.255.255.255".to_string());
+            if let Some(denied) =
+                maybe_denied_xdmcp_udp(lua, &cap, &target, "xdmcp.broadcast_query")?
+            {
+                return Ok(denied);
+            }
             let target_port = port.unwrap_or(XDMCP_PORT);
 
             // Use UDP for broadcast

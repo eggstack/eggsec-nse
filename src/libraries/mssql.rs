@@ -9,11 +9,41 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream as AsyncTcpStream;
 
-pub fn register_mssql_library(lua: &Lua) -> LuaResult<()> {
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
+fn maybe_denied_mssql(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+pub fn register_mssql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let mssql = lua.create_table()?;
 
-    let connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_mssql(lua, &cap, &host, "mssql.connect")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         let stream = TcpStream::connect_timeout(
             &addr
@@ -34,8 +64,12 @@ pub fn register_mssql_library(lua: &Lua) -> LuaResult<()> {
     })?;
     mssql.set("connect", connect_fn)?;
 
+    let cap = capability_ctx.clone();
     let login_fn = lua.create_function(
-        |lua, (host, port, user, _pass, _db): (String, u16, String, String, String)| {
+        move |lua, (host, port, user, _pass, _db): (String, u16, String, String, String)| {
+            if let Some(denied) = maybe_denied_mssql(lua, &cap, &host, "mssql.login")? {
+                return Ok(denied);
+            }
             let addr = format!("{}:{}", host, port);
             let _stream =
                 TcpStream::connect_timeout(
@@ -55,40 +89,51 @@ pub fn register_mssql_library(lua: &Lua) -> LuaResult<()> {
     )?;
     mssql.set("login", login_fn)?;
 
-    let query_fn = lua.create_function(|_lua, (host, port, query): (String, u16, String)| {
-        let addr = format!("{}:{}", host, port);
-        let mut stream = TcpStream::connect_timeout(
-            &addr
-                .parse::<std::net::SocketAddr>()
-                .map_err(|e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()))?,
-            Duration::from_secs(10),
-        )
-        .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+    let cap = capability_ctx.clone();
+    let query_fn =
+        lua.create_function(move |_lua, (host, port, query): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_mssql(_lua, &cap, &host, "mssql.query")? {
+                let _ = denied;
+                return Ok(String::new());
+            }
+            let addr = format!("{}:{}", host, port);
+            let mut stream =
+                TcpStream::connect_timeout(
+                    &addr.parse::<std::net::SocketAddr>().map_err(
+                        |e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()),
+                    )?,
+                    Duration::from_secs(10),
+                )
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
 
-        let mut packet = vec![b'S', 0x01, 0x00, 0x00];
-        let len = (query.len() + 8) as u16;
-        packet.extend_from_slice(&len.to_le_bytes());
-        packet.extend_from_slice(&[0x01, 0x00, 0x00, 0x00, 0x00]);
-        packet.extend_from_slice(query.as_bytes());
-        packet.push(0);
+            let mut packet = vec![b'S', 0x01, 0x00, 0x00];
+            let len = (query.len() + 8) as u16;
+            packet.extend_from_slice(&len.to_le_bytes());
+            packet.extend_from_slice(&[0x01, 0x00, 0x00, 0x00, 0x00]);
+            packet.extend_from_slice(query.as_bytes());
+            packet.push(0);
 
-        stream.write_all(&packet).ok();
+            stream.write_all(&packet).ok();
 
-        let mut response = vec![0u8; 65536];
-        let n = stream.read(&mut response).unwrap_or(0);
+            let mut response = vec![0u8; 65536];
+            let n = stream.read(&mut response).unwrap_or(0);
 
-        if n == 0 {
-            return Ok(String::new());
-        }
+            if n == 0 {
+                return Ok(String::new());
+            }
 
-        Ok(String::from_utf8_lossy(&response[..n]).to_string())
-    })?;
+            Ok(String::from_utf8_lossy(&response[..n]).to_string())
+        })?;
     mssql.set("query", query_fn)?;
 
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     mssql.set("version", version_fn)?;
 
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_mssql(lua, &cap, &host, "mssql.connect_async")? {
+            return Ok(denied);
+        }
         let runtime = tokio::runtime::Handle::current();
         let host_clone = host.clone();
 
@@ -112,8 +157,12 @@ pub fn register_mssql_library(lua: &Lua) -> LuaResult<()> {
     })?;
     mssql.set("connect_async", async_connect_fn)?;
 
+    let cap = capability_ctx.clone();
     let async_login_fn = lua.create_function(
-        |lua, (host, port, user, _pass, _db): (String, u16, String, String, String)| {
+        move |lua, (host, port, user, _pass, _db): (String, u16, String, String, String)| {
+            if let Some(denied) = maybe_denied_mssql(lua, &cap, &host, "mssql.login_async")? {
+                return Ok(denied);
+            }
             let runtime = tokio::runtime::Handle::current();
             let host_clone = host.clone();
 
@@ -137,8 +186,12 @@ pub fn register_mssql_library(lua: &Lua) -> LuaResult<()> {
     )?;
     mssql.set("login_async", async_login_fn)?;
 
+    let cap = capability_ctx.clone();
     let async_query_fn =
-        lua.create_function(|lua, (host, port, query): (String, u16, String)| {
+        lua.create_function(move |lua, (host, port, query): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_mssql(lua, &cap, &host, "mssql.query_async")? {
+                return Ok(denied);
+            }
             let runtime = tokio::runtime::Handle::current();
             let host_clone = host.clone();
 

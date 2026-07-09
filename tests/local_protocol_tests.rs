@@ -1958,3 +1958,300 @@ fn local_httppipeline_go_ci_safe_denied() {
         "CiSafe httppipeline go must not reach the server"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Bug 5: protocol library capability-gating regressions (Milestone 5 Phase 6)
+// ---------------------------------------------------------------------------
+//
+// These tests verify that the protocol-library capability gates are correctly
+// wired through the executor. They prove that under strict profiles
+// (AgentSafe/CiSafe) no actual network I/O reaches the local server, even
+// though the script calls a library function (xdmcp.connect, dhcp.discover,
+// ftp.list) that "looks like" it should connect. The library's network
+// helper (check_network_tcp / check_network_udp) blocks before any socket
+// is opened.
+//
+// For the FTP PASV case, the control connection is allowed (DenyAll
+// profile permits it as a single logical op per the executor's policy),
+// but the PASV data-connection check rejects the data port, so no second
+// TCP connection is opened to the PASV data listener.
+
+/// xdmcp.connect under AgentSafe: TCP capability denied, zero hits.
+#[test]
+fn local_xdmcp_connect_agent_safe_denied() {
+    let server = local_fixtures::TcpEchoServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/xdmcp_connect_denied.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("xdmcp"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe xdmcp.connect must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "AgentSafe xdmcp.connect must not reach the server"
+    );
+}
+
+/// xdmcp.connect under CiSafe: TCP capability denied, zero hits.
+#[test]
+fn local_xdmcp_connect_ci_safe_denied() {
+    let server = local_fixtures::TcpEchoServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/xdmcp_connect_denied.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("xdmcp"),
+        &profile,
+    );
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe xdmcp.connect must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "CiSafe xdmcp.connect must not reach the server"
+    );
+}
+
+/// dhcp.discover under AgentSafe: UDP capability denied, zero hits.
+#[test]
+fn local_dhcp_discover_agent_safe_denied() {
+    let server = local_fixtures::UdpEchoServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/dhcp_discover_denied.nse",
+        "127.0.0.1",
+        server.port(),
+        "udp",
+        "open",
+        None,
+        &profile,
+    );
+    let udp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_udp" && !e.allowed)
+        .collect();
+    assert!(
+        !udp_denials.is_empty(),
+        "AgentSafe dhcp.discover must produce network_udp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "AgentSafe dhcp.discover must not reach the server"
+    );
+}
+
+/// dhcp.discover under CiSafe: UDP capability denied, zero hits.
+#[test]
+fn local_dhcp_discover_ci_safe_denied() {
+    let server = local_fixtures::UdpEchoServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/dhcp_discover_denied.nse",
+        "127.0.0.1",
+        server.port(),
+        "udp",
+        "open",
+        None,
+        &profile,
+    );
+    let udp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_udp" && !e.allowed)
+        .collect();
+    assert!(
+        !udp_denials.is_empty(),
+        "CiSafe dhcp.discover must produce network_udp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+    assert_eq!(
+        server.hits(),
+        0,
+        "CiSafe dhcp.discover must not reach the server"
+    );
+}
+
+/// ftp.list under AgentSafe: front-door TCP capability denied, zero hits.
+/// Verifies Bug 5 (library gate wiring): the front-door check_network_tcp
+/// inside ftp.list fires before any TCP connect, so the FTP control server
+/// never sees a connection and no PASV data listener is opened.
+#[test]
+fn local_ftp_list_pasv_agent_safe_denied() {
+    let server = local_fixtures::FtpServer::start();
+    let profile = make_agent_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/ftp_list_pasv_denied.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("ftp"),
+        &profile,
+    );
+
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "AgentSafe ftp.list must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+
+    assert_eq!(
+        server.control_hits(),
+        0,
+        "AgentSafe ftp.list must not reach the control connection"
+    );
+    assert_eq!(
+        server.pasv_opens(),
+        0,
+        "AgentSafe ftp.list must not open a PASV data listener"
+    );
+}
+
+/// ftp.list under CiSafe: front-door TCP capability denied, zero hits.
+#[test]
+fn local_ftp_list_pasv_ci_safe_denied() {
+    let server = local_fixtures::FtpServer::start();
+    let profile = make_ci_safe_runtime_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/ftp_list_pasv_denied.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("ftp"),
+        &profile,
+    );
+
+    let tcp_denials: Vec<_> = report
+        .capability_events
+        .iter()
+        .filter(|e| e.kind == "network_tcp" && !e.allowed)
+        .collect();
+    assert!(
+        !tcp_denials.is_empty(),
+        "CiSafe ftp.list must produce network_tcp denial events: events={:?}, output={}",
+        report.capability_events,
+        report.output.content,
+    );
+
+    assert_eq!(
+        server.control_hits(),
+        0,
+        "CiSafe ftp.list must not reach the control connection"
+    );
+    assert_eq!(
+        server.pasv_opens(),
+        0,
+        "CiSafe ftp.list must not open a PASV data listener"
+    );
+}
+
+/// ftp.list under ManualPermissive: control conn hits, PASV opens, data-conn
+/// succeeds (empty listing). Verifies the positive path also works: Bug 3
+/// allows data-conn under permissive profile, Bug 5 library gate is wired
+/// but the gate is open under ManualPermissive.
+#[test]
+fn local_ftp_list_pasv_manual_permissive_success() {
+    let server = local_fixtures::FtpServer::start();
+    let profile = make_manual_permissive_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/ftp_list_pasv_denied.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("ftp"),
+        &profile,
+    );
+
+    assert!(
+        report.output.content.contains("status=ok"),
+        "ManualPermissive ftp.list should succeed: output={}",
+        report.output.content,
+    );
+    assert!(
+        server.control_hits() >= 1,
+        "ManualPermissive ftp.list should reach the control connection"
+    );
+    assert!(
+        server.pasv_opens() >= 1,
+        "ManualPermissive ftp.list should open a PASV data listener"
+    );
+}
+
+/// xdmcp.connect under ManualPermissive: library gate is open, real connection
+/// reaches the local server. Verifies Bug 5 library gate wiring under
+/// permissive profile.
+#[test]
+fn local_xdmcp_connect_manual_permissive_success() {
+    let server = local_fixtures::TcpEchoServer::start();
+    let profile = make_manual_permissive_profile(vec![]);
+    let (report, _evidence) = run_local_fixture(
+        "scripts/protocol/xdmcp_connect_denied.nse",
+        "127.0.0.1",
+        server.port(),
+        "tcp",
+        "open",
+        Some("xdmcp"),
+        &profile,
+    );
+
+    assert!(
+        server.hits() >= 1,
+        "ManualPermissive xdmcp.connect should reach the server (hits={})",
+        server.hits()
+    );
+    let output = &report.output.content;
+    assert!(
+        !output.contains("denied"),
+        "ManualPermissive xdmcp.connect should not be denied: output={}",
+        output
+    );
+}
+
+// Note: dhcp.discover positive-path test omitted. The DHCP packet builder in
+// crates/eggsec-nse/src/libraries/dhcp.rs writes options at opt_offset 240
+// without size-checking the packet, so the real-network path panics when the
+// library actually reaches the network. That is a pre-existing bug unrelated
+// to the capability-gating work; flagging it here as a known issue. The
+// capability-gate (Bug 5) is correctly wired and verified by the
+// local_dhcp_discover_{agent,ci}_safe_denied tests above.

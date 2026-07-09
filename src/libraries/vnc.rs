@@ -9,6 +9,32 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
+fn maybe_denied_vnc(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
 const RFB_VERSION_3_3: &[u8] = b"RFB 003.003\n";
 const RFB_VERSION_3_7: &[u8] = b"RFB 003.007\n";
 const RFB_VERSION_3_8: &[u8] = b"RFB 003.008\n";
@@ -145,35 +171,42 @@ fn vnc_login(host: &str, port: u16, password: &str) -> std::io::Result<VncConnec
     })
 }
 
-pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_vnc_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let vnc = lua.create_table()?;
 
-    let connect_fn =
-        lua.create_function(
-            |lua, (host, port): (String, u16)| match vnc_connect(&host, port) {
-                Ok(conn) => {
-                    let result = lua.create_table()?;
-                    result.set("host", host)?;
-                    result.set("port", port)?;
-                    result.set("status", "connected")?;
-                    result.set("protocol_version", "RFB 003.008")?;
-                    result.set("width", conn.width)?;
-                    result.set("height", conn.height)?;
-                    result.set("desktop_name", conn.desktop_name)?;
-                    Ok(result)
-                }
-                Err(e) => {
-                    let result = lua.create_table()?;
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    Ok(result)
-                }
-            },
-        )?;
+    let cap = capability_ctx.clone();
+    let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.connect")? {
+            return Ok(denied);
+        }
+        match vnc_connect(&host, port) {
+            Ok(conn) => {
+                let result = lua.create_table()?;
+                result.set("host", host)?;
+                result.set("port", port)?;
+                result.set("status", "connected")?;
+                result.set("protocol_version", "RFB 003.008")?;
+                result.set("width", conn.width)?;
+                result.set("height", conn.height)?;
+                result.set("desktop_name", conn.desktop_name)?;
+                Ok(result)
+            }
+            Err(e) => {
+                let result = lua.create_table()?;
+                result.set("status", "error")?;
+                result.set("error", e.to_string())?;
+                Ok(result)
+            }
+        }
+    })?;
     vnc.set("connect", connect_fn)?;
 
-    let handshake_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let handshake_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.handshake")? {
+            return Ok(denied);
+        }
         let addr = format!("{}:{}", host, port);
         match TcpStream::connect_timeout(
             &addr
@@ -209,11 +242,13 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
     })?;
     vnc.set("handshake", handshake_fn)?;
 
+    let cap = capability_ctx.clone();
     let login_fn =
-        lua.create_function(
-            |lua, (host, port, password): (String, u16, String)| match vnc_login(
-                &host, port, &password,
-            ) {
+        lua.create_function(move |lua, (host, port, password): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.login")? {
+                return Ok(denied);
+            }
+            match vnc_login(&host, port, &password) {
                 Ok(conn) => {
                     let result = lua.create_table()?;
                     result.set("success", true)?;
@@ -228,28 +263,31 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
                     result.set("error", e.to_string())?;
                     Ok(result)
                 }
-            },
-        )?;
+            }
+        })?;
     vnc.set("login", login_fn)?;
 
-    let get_desktop_info_fn =
-        lua.create_function(
-            |lua, (host, port): (String, u16)| match vnc_connect(&host, port) {
-                Ok(conn) => {
-                    let result = lua.create_table()?;
-                    result.set("width", conn.width)?;
-                    result.set("height", conn.height)?;
-                    result.set("name", conn.desktop_name)?;
-                    result.set("shared_flag", true)?;
-                    Ok(result)
-                }
-                Err(e) => {
-                    let result = lua.create_table()?;
-                    result.set("error", e.to_string())?;
-                    Ok(result)
-                }
-            },
-        )?;
+    let cap = capability_ctx.clone();
+    let get_desktop_info_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.get_desktop_info")? {
+            return Ok(denied);
+        }
+        match vnc_connect(&host, port) {
+            Ok(conn) => {
+                let result = lua.create_table()?;
+                result.set("width", conn.width)?;
+                result.set("height", conn.height)?;
+                result.set("name", conn.desktop_name)?;
+                result.set("shared_flag", true)?;
+                Ok(result)
+            }
+            Err(e) => {
+                let result = lua.create_table()?;
+                result.set("error", e.to_string())?;
+                Ok(result)
+            }
+        }
+    })?;
     vnc.set("get_desktop_info", get_desktop_info_fn)?;
 
     let read_screen_fn = lua.create_function(|lua, (_host, _port): (String, u16)| {
@@ -265,8 +303,12 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
     })?;
     vnc.set("read_screen", read_screen_fn)?;
 
+    let cap = capability_ctx.clone();
     let read_screen_raw_fn =
-        lua.create_function(|lua, (host, port, password): (String, u16, String)| {
+        lua.create_function(move |lua, (host, port, password): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.read_screen_raw")? {
+                return Ok(denied);
+            }
             let addr = format!("{}:{}", host, port);
 
             match TcpStream::connect_timeout(
@@ -445,8 +487,12 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
         })?;
     vnc.set("read_screen_raw", read_screen_raw_fn)?;
 
+    let cap = capability_ctx.clone();
     let send_key_fn = lua.create_function(
-        |lua, (host, port, key, down_flag): (String, u16, i32, bool)| {
+        move |lua, (host, port, key, down_flag): (String, u16, i32, bool)| {
+            if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.send_key")? {
+                return Ok(denied);
+            }
             let addr = format!("{}:{}", host, port);
             match TcpStream::connect_timeout(
                 &addr
@@ -475,8 +521,12 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
     )?;
     vnc.set("send_key", send_key_fn)?;
 
+    let cap = capability_ctx.clone();
     let send_mouse_fn = lua.create_function(
-        |lua, (host, port, x, y, button_mask): (String, u16, u16, u16, u8)| {
+        move |lua, (host, port, x, y, button_mask): (String, u16, u16, u16, u8)| {
+            if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.send_mouse")? {
+                return Ok(denied);
+            }
             let addr = format!("{}:{}", host, port);
             match TcpStream::connect_timeout(
                 &addr
@@ -506,8 +556,12 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
     )?;
     vnc.set("send_mouse", send_mouse_fn)?;
 
+    let cap = capability_ctx.clone();
     let send_cut_text_fn =
-        lua.create_function(|lua, (host, port, text): (String, u16, String)| {
+        lua.create_function(move |lua, (host, port, text): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.send_cut_text")? {
+                return Ok(denied);
+            }
             let addr = format!("{}:{}", host, port);
             match TcpStream::connect_timeout(
                 &addr
@@ -550,7 +604,13 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     vnc.set("version", version_fn)?;
 
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.connect_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let host_clone = host.clone();
 
         tokio::runtime::Handle::current().block_on(async move {
@@ -584,8 +644,14 @@ pub fn register_vnc_library(lua: &Lua) -> LuaResult<()> {
     })?;
     vnc.set("connect_async", async_connect_fn)?;
 
+    let cap = capability_ctx.clone();
     let async_login_fn =
-        lua.create_function(|lua, (host, port, password): (String, u16, String)| {
+        lua.create_function(move |lua, (host, port, password): (String, u16, String)| {
+            if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.login_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
             let host_clone = host.clone();
 
             tokio::runtime::Handle::current().block_on(async move {

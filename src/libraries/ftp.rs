@@ -43,7 +43,12 @@ fn ftp_get_pasv_port(response: &str) -> Option<(String, u16)> {
     None
 }
 
-fn ftp_retr_file(host: &str, port: u16, filename: &str) -> std::io::Result<String> {
+fn ftp_retr_file(
+    host: &str,
+    port: u16,
+    filename: &str,
+    data_ip_check: &dyn Fn(&str) -> bool,
+) -> std::io::Result<String> {
     let addr = format!("{}:{}", host, port);
     let mut stream = TcpStream::connect_timeout(
         &addr
@@ -61,6 +66,13 @@ fn ftp_retr_file(host: &str, port: u16, filename: &str) -> std::io::Result<Strin
 
     let (data_ip, data_port) = ftp_get_pasv_port(&pasv_response)
         .ok_or_else(|| std::io::Error::other("Failed to get PASV port"))?;
+
+    if !data_ip_check(&data_ip) {
+        return Err(std::io::Error::other(format!(
+            "PASV data connection to {} denied by policy",
+            data_ip
+        )));
+    }
 
     let retr_cmd = format!("RETR {}\r\n", filename);
     let _retr_response = ftp_send_command(&mut stream, &retr_cmd)?;
@@ -88,7 +100,13 @@ fn ftp_retr_file(host: &str, port: u16, filename: &str) -> std::io::Result<Strin
     }
 }
 
-fn ftp_stor_file(host: &str, port: u16, filename: &str, data: &str) -> std::io::Result<bool> {
+fn ftp_stor_file(
+    host: &str,
+    port: u16,
+    filename: &str,
+    data: &str,
+    data_ip_check: &dyn Fn(&str) -> bool,
+) -> std::io::Result<bool> {
     let addr = format!("{}:{}", host, port);
     let mut stream = TcpStream::connect_timeout(
         &addr
@@ -106,6 +124,13 @@ fn ftp_stor_file(host: &str, port: u16, filename: &str, data: &str) -> std::io::
 
     let (data_ip, data_port) = ftp_get_pasv_port(&pasv_response)
         .ok_or_else(|| std::io::Error::other("Failed to get PASV port"))?;
+
+    if !data_ip_check(&data_ip) {
+        return Err(std::io::Error::other(format!(
+            "PASV data connection to {} denied by policy",
+            data_ip
+        )));
+    }
 
     let stor_cmd = format!("STOR {}\r\n", filename);
     let _stor_response = ftp_send_command(&mut stream, &stor_cmd)?;
@@ -132,6 +157,7 @@ fn ftp_list_directory(
     host: &str,
     port: u16,
     path: &str,
+    data_ip_check: &dyn Fn(&str) -> bool,
 ) -> std::io::Result<Vec<(String, String, String)>> {
     let addr = format!("{}:{}", host, port);
     let mut stream = TcpStream::connect_timeout(
@@ -150,6 +176,13 @@ fn ftp_list_directory(
 
     let (data_ip, data_port) = ftp_get_pasv_port(&pasv_response)
         .ok_or_else(|| std::io::Error::other("Failed to get PASV port"))?;
+
+    if !data_ip_check(&data_ip) {
+        return Err(std::io::Error::other(format!(
+            "PASV data connection to {} denied by policy",
+            data_ip
+        )));
+    }
 
     let list_cmd = if path.is_empty() {
         "LIST\r\n".to_string()
@@ -515,7 +548,10 @@ pub fn register_ftp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 return Ok(denied);
             }
             let path = path.unwrap_or_else(|| ".".to_string());
-            match ftp_list_directory(&host, port, &path) {
+            let cap_for_data = cap.clone();
+            match ftp_list_directory(&host, port, &path, &|data_ip: &str| {
+                wrappers::check_network_tcp(&cap_for_data, data_ip, "ftp.list.data").is_allowed()
+            }) {
                 Ok(files) => {
                     let result = lua.create_table()?;
                     let files_table = lua.create_table()?;
@@ -551,7 +587,10 @@ pub fn register_ftp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 return Ok(denied);
             }
             let path = path.unwrap_or_else(|| ".".to_string());
-            match ftp_list_directory(&host, port, &path) {
+            let cap_for_data = cap.clone();
+            match ftp_list_directory(&host, port, &path, &|data_ip: &str| {
+                wrappers::check_network_tcp(&cap_for_data, data_ip, "ftp.nlst.data").is_allowed()
+            }) {
                 Ok(files) => {
                     let result = lua.create_table()?;
                     for (i, (name, _size, _ftype)) in files.iter().enumerate() {
@@ -577,7 +616,10 @@ pub fn register_ftp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.retr")? {
                 return Ok(denied);
             }
-            match ftp_retr_file(&host, port, &filename) {
+            let cap_for_data = cap.clone();
+            match ftp_retr_file(&host, port, &filename, &|data_ip: &str| {
+                wrappers::check_network_tcp(&cap_for_data, data_ip, "ftp.retr.data").is_allowed()
+            }) {
                 Ok(data) => {
                     let data_len = data.len();
                     let result = lua.create_table()?;
@@ -602,7 +644,10 @@ pub fn register_ftp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             if let Some(denied) = maybe_denied_ftp(lua, &cap, &host, "ftp.stor")? {
                 return Ok(denied);
             }
-            match ftp_stor_file(&host, port, &filename, &data) {
+            let cap_for_data = cap.clone();
+            match ftp_stor_file(&host, port, &filename, &data, &|data_ip: &str| {
+                wrappers::check_network_tcp(&cap_for_data, data_ip, "ftp.stor.data").is_allowed()
+            }) {
                 Ok(success) => {
                     let result = lua.create_table()?;
                     result.set("success", success)?;

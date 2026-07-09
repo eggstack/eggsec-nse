@@ -9,6 +9,9 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::Duration;
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
+
 const RDP_HEADER_SIZE: usize = 4;
 const RDP_TPDU_DATA: u8 = 0xF0;
 const RDP_TPDU_ERROT: u8 = 0xF1;
@@ -17,6 +20,29 @@ const RDP_CONNECT_INITIAL: u8 = 0xE0;
 const RDP_CONNECT_RESPONSE: u8 = 0xD0;
 const RDP_MCS_CONNECT_INITIAL: u8 = 0x65;
 const RDP_MCS_CONNECT_RESPONSE: u8 = 0x66;
+
+fn maybe_denied_rdp(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
 
 fn rdp_connect(host: &str, port: u16) -> std::io::Result<TcpStream> {
     let addr = format!("{}:{}", host, port);
@@ -62,128 +88,160 @@ fn rdp_negotiate_security(stream: &mut TcpStream) -> std::io::Result<(String, bo
     }
 }
 
-pub fn register_rdp_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_rdp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let rdp = lua.create_table()?;
 
-    let connect_fn =
-        lua.create_function(
-            |lua, (host, port): (String, u16)| match rdp_connect(&host, port) {
+    let cap = capability_ctx.clone();
+    let connect_fn = lua.create_function(
+        move |lua, (host, port): (String, u16)| -> LuaResult<mlua::Table> {
+            if let Some(denied) = maybe_denied_rdp(lua, &cap, &host, "rdp.connect")? {
+                return Ok(denied);
+            }
+            let result = match rdp_connect(&host, port) {
                 Ok(mut stream) => {
                     let (security, rdp_sec, tls, nla) = rdp_negotiate_security(&mut stream)
                         .unwrap_or(("unknown".to_string(), true, false, true));
 
-                    let result = lua.create_table()?;
-                    result.set("host", host)?;
-                    result.set("port", port)?;
-                    result.set("status", "connected")?;
-                    result.set("security", security)?;
-                    result.set("rdp_security", rdp_sec)?;
-                    result.set("tls_security", tls)?;
-                    result.set("nla", nla)?;
-                    Ok(result)
+                    let r = lua.create_table()?;
+                    r.set("host", host)?;
+                    r.set("port", port)?;
+                    r.set("status", "connected")?;
+                    r.set("security", security)?;
+                    r.set("rdp_security", rdp_sec)?;
+                    r.set("tls_security", tls)?;
+                    r.set("nla", nla)?;
+                    r
                 }
                 Err(e) => {
-                    let result = lua.create_table()?;
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    Ok(result)
+                    let r = lua.create_table()?;
+                    r.set("status", "error")?;
+                    r.set("error", e.to_string())?;
+                    r
                 }
-            },
-        )?;
+            };
+            Ok(result)
+        },
+    )?;
     rdp.set("connect", connect_fn)?;
 
+    let cap = capability_ctx.clone();
     let login_fn = lua.create_function(
-        |lua, (host, port, domain, user, _password): (String, u16, String, String, String)| {
-            match rdp_connect(&host, port) {
+        move |lua,
+              (host, port, domain, user, _password): (String, u16, String, String, String)|
+              -> LuaResult<mlua::Table> {
+            if let Some(denied) = maybe_denied_rdp(lua, &cap, &host, "rdp.login")? {
+                return Ok(denied);
+            }
+            let result = match rdp_connect(&host, port) {
                 Ok(_stream) => {
-                    let result = lua.create_table()?;
-                    result.set("success", true)?;
-                    result.set("user", user)?;
-                    result.set("domain", domain)?;
-                    result.set("status", "authenticated")?;
-                    Ok(result)
+                    let r = lua.create_table()?;
+                    r.set("success", true)?;
+                    r.set("user", user)?;
+                    r.set("domain", domain)?;
+                    r.set("status", "authenticated")?;
+                    r
                 }
                 Err(e) => {
-                    let result = lua.create_table()?;
-                    result.set("success", false)?;
-                    result.set("error", e.to_string())?;
-                    Ok(result)
+                    let r = lua.create_table()?;
+                    r.set("success", false)?;
+                    r.set("error", e.to_string())?;
+                    r
                 }
-            }
+            };
+            Ok(result)
         },
     )?;
     rdp.set("login", login_fn)?;
 
-    let get_info_fn =
-        lua.create_function(
-            |lua, (host, port): (String, u16)| match rdp_connect(&host, port) {
+    let cap = capability_ctx.clone();
+    let get_info_fn = lua.create_function(
+        move |lua, (host, port): (String, u16)| -> LuaResult<mlua::Table> {
+            if let Some(denied) = maybe_denied_rdp(lua, &cap, &host, "rdp.get_info")? {
+                return Ok(denied);
+            }
+            let result = match rdp_connect(&host, port) {
                 Ok(mut stream) => {
                     let (security, rdp_sec, tls, nla) = rdp_negotiate_security(&mut stream)
                         .unwrap_or(("unknown".to_string(), true, false, true));
 
-                    let result = lua.create_table()?;
-                    result.set("security", security)?;
-                    result.set("rdp_security", rdp_sec)?;
-                    result.set("tls_security", tls)?;
-                    result.set("nla", nla)?;
-                    result.set("status", "available")?;
-                    Ok(result)
+                    let r = lua.create_table()?;
+                    r.set("security", security)?;
+                    r.set("rdp_security", rdp_sec)?;
+                    r.set("tls_security", tls)?;
+                    r.set("nla", nla)?;
+                    r.set("status", "available")?;
+                    r
                 }
                 Err(e) => {
-                    let result = lua.create_table()?;
-                    result.set("error", e.to_string())?;
-                    Ok(result)
+                    let r = lua.create_table()?;
+                    r.set("error", e.to_string())?;
+                    r
                 }
-            },
-        )?;
+            };
+            Ok(result)
+        },
+    )?;
     rdp.set("get_info", get_info_fn)?;
 
-    let check_security_fn =
-        lua.create_function(
-            |lua, (host, port): (String, u16)| match rdp_connect(&host, port) {
+    let cap = capability_ctx.clone();
+    let check_security_fn = lua.create_function(
+        move |lua, (host, port): (String, u16)| -> LuaResult<mlua::Table> {
+            if let Some(denied) = maybe_denied_rdp(lua, &cap, &host, "rdp.check_security")? {
+                return Ok(denied);
+            }
+            let result = match rdp_connect(&host, port) {
                 Ok(mut stream) => {
                     let (security, rdp_sec, tls, nla) = rdp_negotiate_security(&mut stream)
                         .unwrap_or(("unknown".to_string(), true, false, true));
 
-                    let result = lua.create_table()?;
-                    result.set("security_layer", security)?;
-                    result.set("encryption_level", "HIGH")?;
-                    result.set("rdp_security", rdp_sec)?;
-                    result.set("tls_security", tls)?;
-                    result.set("nla", nla)?;
-                    Ok(result)
+                    let r = lua.create_table()?;
+                    r.set("security_layer", security)?;
+                    r.set("encryption_level", "HIGH")?;
+                    r.set("rdp_security", rdp_sec)?;
+                    r.set("tls_security", tls)?;
+                    r.set("nla", nla)?;
+                    r
                 }
                 Err(e) => {
-                    let result = lua.create_table()?;
-                    result.set("error", e.to_string())?;
-                    Ok(result)
+                    let r = lua.create_table()?;
+                    r.set("error", e.to_string())?;
+                    r
                 }
-            },
-        )?;
+            };
+            Ok(result)
+        },
+    )?;
     rdp.set("check_security", check_security_fn)?;
 
+    let cap = capability_ctx.clone();
     let check_creds_fn = lua.create_function(
-        |lua, (host, port, domain, user, _password): (String, u16, String, String, String)| {
-            match rdp_connect(&host, port) {
+        move |lua,
+              (host, port, domain, user, _password): (String, u16, String, String, String)|
+              -> LuaResult<mlua::Table> {
+            if let Some(denied) = maybe_denied_rdp(lua, &cap, &host, "rdp.check_creds")? {
+                return Ok(denied);
+            }
+            let result = match rdp_connect(&host, port) {
                 Ok(_stream) => {
-                    let result = lua.create_table()?;
-                    result.set("valid", true)?;
-                    result.set("user", user)?;
-                    result.set("domain", domain)?;
-                    result.set(
+                    let r = lua.create_table()?;
+                    r.set("valid", true)?;
+                    r.set("user", user)?;
+                    r.set("domain", domain)?;
+                    r.set(
                         "message",
                         "Credentials appear valid - NLA required for full validation",
                     )?;
-                    Ok(result)
+                    r
                 }
                 Err(e) => {
-                    let result = lua.create_table()?;
-                    result.set("valid", false)?;
-                    result.set("error", e.to_string())?;
-                    Ok(result)
+                    let r = lua.create_table()?;
+                    r.set("valid", false)?;
+                    r.set("error", e.to_string())?;
+                    r
                 }
-            }
+            };
+            Ok(result)
         },
     )?;
     rdp.set("check_creds", check_creds_fn)?;
@@ -212,7 +270,13 @@ pub fn register_rdp_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     rdp.set("version", version_fn)?;
 
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
+    let cap = capability_ctx.clone();
+    let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_rdp(lua, &cap, &host, "rdp.connect_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
         let host_clone = host.clone();
 
         tokio::runtime::Handle::current().block_on(async move {
