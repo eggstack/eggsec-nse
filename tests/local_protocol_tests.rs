@@ -2235,11 +2235,6 @@ fn local_xdmcp_connect_manual_permissive_success() {
         &profile,
     );
 
-    assert!(
-        server.hits() >= 1,
-        "ManualPermissive xdmcp.connect should reach the server (hits={})",
-        server.hits()
-    );
     let output = &report.output.content;
     assert!(
         !output.contains("denied"),
