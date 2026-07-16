@@ -585,7 +585,7 @@ local comm = require "comm"
 local socket = require "socket"
 
 local host = nmap.target
-local port = 80
+local port = tonumber(stdnse.get_script_args("port")) or 80
 
 if not host or host == "" then
     return stdnse.output_table()
@@ -613,16 +613,17 @@ local stdnse = require "stdnse"
 local http = require "http"
 
 local host = nmap.target
+local port = tonumber(stdnse.get_script_args("port")) or 80
 
 if not host or host == "" then
     return stdnse.output_table()
 end
 
-local response = http.get(host, 80, "/")
+local response = http.get(host, port, "/")
 
 local output = stdnse.output_table()
 output.host = host
-output.port = 80
+output.port = port
 output.title = response.title or ""
 output.status = response.status or 0
 
@@ -656,6 +657,7 @@ local sslcert = require "sslcert"
 local tls = require "tls"
 
 local host = nmap.target
+local port = tonumber(stdnse.get_script_args("port")) or 443
 
 if not host or host == "" then
     return stdnse.output_table()
@@ -663,7 +665,7 @@ end
 
 local output = stdnse.output_table()
 output.host = host
-output.port = 443
+output.port = port
 output.tls = "available"
 
 return output
