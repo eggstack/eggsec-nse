@@ -512,11 +512,8 @@ pub fn register_socket_library(
             sock.connect(&host, port)
                 .map_err(mlua::Error::RuntimeError)?;
 
-            let result = lua.create_table()?;
-            result.set("host", host)?;
-            result.set("port", port)?;
-            result.set("status", "connected")?;
-            Ok(result)
+            // Return the SocketHandle as UserData so methods (send, receive, close, etc.) work
+            lua.create_userdata(sock)
         }
     })?;
     socket.set("tcp_connect", tcp_connect_fn)?;
@@ -572,11 +569,8 @@ pub fn register_socket_library(
             sock.connect(&host, port)
                 .map_err(mlua::Error::RuntimeError)?;
 
-            let result = lua.create_table()?;
-            result.set("host", host)?;
-            result.set("port", port)?;
-            result.set("status", "connected")?;
-            Ok(result)
+            // Return the SocketHandle as UserData so methods (send, receive, close, etc.) work
+            lua.create_userdata(sock)
         }
     })?;
     socket.set("connect", connect_fn)?;
