@@ -4,6 +4,14 @@
 
 The NSE (Nmap Scripting Engine) module (`crates/eggsec-nse/`) provides Lua VM integration, NSE libraries, sandbox enforcement, and CVE integration.
 
+### Phase H dependency changes
+
+`native-tls` is now optional, gated behind the `nse` feature. All `native_tls` usage is in `#[cfg(feature = "nse")]` modules (libraries/tls.rs, libraries/sslcert.rs, libraries/openssl.rs, libraries/omp2.rs, libraries/helpers.rs, public_api/api.rs). Building without the `nse` feature no longer pulls in `native-tls` or its system TLS backend.
+
+`openssl` (with vendored) remains optional behind the `nse` feature, used for X.509 certificate parsing in sslcert.rs and tls.rs.
+
+`ssh2` remains optional behind the `nse-ssh2` feature.
+
 > **Milestone 1 (loader/profile) is closed.** Canonical implementation, tests, policy contract, and deferred work are listed in the [Milestone 1 Closure Index](../../architecture/nse_integration.md#milestone-1-closure-index). Future work should treat that index as the authoritative pointer; do not duplicate its content.
 
 > **Milestone 2 (registry/report/corpus) is closed.** Library registry metadata (`NseLibraryDescriptor` / `LIBRARY_REGISTRY`) is the source of truth for library compatibility. `NseRunReport.libraries` records per-run observed or attempted `require()` activity, not a capability snapshot. Each entry has a `loaded` field: `true` means the runtime observed a successful module load; `false` means a `require()` was attempted but the module failed, was blocked, was missing, had an invalid name, or was statically detected without runtime confirmation. Static `require()` detection is approximate and labeled with a warning. The later truthfulness follow-up refined that reporting without reopening Milestone 2. Rule behavior is defined by `NseRuleEvaluationReport`. Run output truthfulness is defined by `NseRunReport`. The compatibility corpus is representative and local-only. See the [Milestone 2 Closure Note](../../architecture/nse_integration.md#milestone-2-closure-note).

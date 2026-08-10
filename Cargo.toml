@@ -36,7 +36,7 @@ dashmap.workspace = true
 rustc-hash.workspace = true
 hickory-resolver.workspace = true
 reqwest = { version = "0.13", features = ["json", "blocking", "rustls"], default-features = false }
-native-tls = "0.2.18"
+native-tls = { version = "0.2.18", optional = true }
 scraper.workspace = true
 mlua = { version = "0.11.6", features = ["async"], optional = true }
 mlua-luau-scheduler = { version = "0.2", optional = true }
@@ -52,7 +52,7 @@ toml = "0.8"
 
 [features]
 default = []
-nse = ["mlua", "mlua-luau-scheduler", "openssl", "des"]
+nse = ["mlua", "mlua-luau-scheduler", "openssl", "des", "dep:native-tls"]
 nse-ssh2 = ["nse", "dep:ssh2"]
 sandbox = []
 stress-testing = []
