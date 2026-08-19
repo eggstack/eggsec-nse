@@ -73,7 +73,7 @@ The NSE (Nmap Scripting Engine) module (`crates/eggsec-nse/`) provides Lua VM in
 | `src/libraries/smb.rs:56` | `addr.parse::<SocketAddr>().unwrap()` | Changed to `.map_err()` returning io::Error |
 | `src/libraries/io.rs:68,77` | `let _ = std::fs::create_dir_all(parent)` silent failure | Added `tracing::warn!` logging on directory creation failure |
 | `src/libraries/stdnse.rs:822` | `SystemTime::now()...unwrap()` | Changed to `.unwrap_or_default()` |
-| `tests/sandbox_tests.rs` | No sandbox integration tests | Added 17 integration tests for SandboxConfig (paths, commands, networks, host resolution) |
+| `crates/eggsec-nse/tests/sandbox_tests.rs` | No sandbox integration tests | Added 17 integration tests for SandboxConfig (paths, commands, networks, host resolution) |
 | `src/libraries/lfs.rs` | TOCTOU documentation gap | Added module-level doc explaining TOCTOU limitation and mitigation approach |
 | `src/libraries/peg_parser.rs:224` | `current_char().unwrap()` could panic on empty input | Changed to `.ok_or(PegError::UnexpectedEnd)?` with new test case |
 | `src/libraries/vnc.rs:101,107,311,317` | `try_into().unwrap()` on challenge slices | Changed to `.map_err()` returning io::Error with descriptive message |
@@ -143,7 +143,7 @@ New side-effecting code in `eggsec-nse` must go through `ScriptResolver` for fil
 
 ## Known Issues (Pending Fix)
 
-1. ~~**Missing Sandbox Integration Tests**~~ FIXED - 17 integration tests added in `tests/sandbox_tests.rs` covering path restrictions, command allowlists, network filtering, and host resolution.
+1. ~~**Missing Sandbox Integration Tests**~~ FIXED - 17 integration tests added in `crates/eggsec-nse/tests/sandbox_tests.rs` covering path restrictions, command allowlists, network filtering, and host resolution.
 
 2. **TOCTOU Vulnerability in lfs Path Traversal**: DOCUMENTED - Module-level doc in `lfs.rs` explains the race window and mitigation (canonicalization). Remaining gap requires local filesystem write access to exploit.
 
@@ -153,7 +153,7 @@ New side-effecting code in `eggsec-nse` must go through `ScriptResolver` for fil
 
 5. **Dead Code Files**: `peg_parser.rs` and `pest_bridge.rs` exist in `src/libraries/` but are not declared in `mod.rs` and never compiled. They may be leftover from development or intended for future use.
 6. ~~**Direct filesystem reads in NSE execution paths**~~ FIXED - Phase 03: All script/module loading now flows through `ScriptResolver` which enforces policy, path containment, size limits, and module name grammar. Direct `std::fs::read_to_string` in execution paths has been eliminated.
-7. ~~**NSE Milestone 1 loader policy**~~ CLOSED - Final corrective pass: `ManualPermissive` script-file loading with empty roots is now an intentional, documented semantic. Read-path authorization (`validate_existing_path_under_roots`) cannot authorize non-existent files. 14 new integration tests in `tests/script_file_policy_tests.rs` cover manual, strict, and automated profile flows. Empty-roots semantic table documented in `architecture/nse_integration.md` and `profile.rs`. Remaining NSE work is Rust-side blocking helper cancellation (Milestone 3).
+7. ~~**NSE Milestone 1 loader policy**~~ CLOSED - Final corrective pass: `ManualPermissive` script-file loading with empty roots is now an intentional, documented semantic. Read-path authorization (`validate_existing_path_under_roots`) cannot authorize non-existent files. 14 new integration tests in `crates/eggsec-nse/tests/script_file_policy_tests.rs` cover manual, strict, and automated profile flows. Empty-roots semantic table documented in `architecture/nse_integration.md` and `profile.rs`. Remaining NSE work is Rust-side blocking helper cancellation (Milestone 3).
 8. ~~**NSE Milestone 3 profile propagation**~~ CLOSED - Corrective pass fix: `run_cli_with_profile()` uses `NseExecutor::with_profile()` (not `with_policy()`). 7 propagation tests + 5 end-to-end profile/report tests verify profile→context→event→report pipeline. Architecture guards Check 35/36 enforce the fix. 369 tests pass. See `architecture/nse_integration.md#milestone-3-final-verification`.
 
 9. **NSE Milestone 6 is closed** (2026-07-06). HTTP method coverage complete — all HTTP methods (GET/POST/PUT/DELETE/HEAD/OPTIONS/request) have local fixture scripts with zero-hit denial tests for AgentSafe and CiSafe. HTTP library (`reqwest`) fully migrated to Wrapped status. Architecture guards 48-50 enforce strict assertions. 511 tests pass, 52 architecture guards pass. Remaining deferred: protocol library wrappers, `stdnse.sleep()` cancellation. See `architecture/nse_integration.md#milestone-6-final-verification`.

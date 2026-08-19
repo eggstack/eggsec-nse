@@ -18,6 +18,15 @@ use std::sync::LazyLock;
 #[link(name = "z")]
 unsafe extern "C" {}
 
+/// Install the ring crypto provider used by rustls-backed reqwest clients.
+pub fn install_tls_provider() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Configuration for running NSE scripts.
 pub struct NseConfig {
     pub target: String,

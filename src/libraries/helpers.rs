@@ -96,6 +96,7 @@ pub fn create_http_client(
     accept_invalid_certs: bool,
     accept_invalid_hostnames: bool,
 ) -> reqwest::blocking::Client {
+    crate::install_tls_provider();
     let mut builder = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(timeout_secs.max(1)))
         .connect_timeout(Duration::from_secs(10))
@@ -119,6 +120,7 @@ pub fn create_async_http_client(
     accept_invalid_certs: bool,
     accept_invalid_hostnames: bool,
 ) -> reqwest::Client {
+    crate::install_tls_provider();
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs.max(1)))
         .connect_timeout(Duration::from_secs(10))

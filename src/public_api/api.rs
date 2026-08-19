@@ -384,6 +384,7 @@ pub struct NseHttpResponse {
 
 /// Simple HTTP GET request
 pub fn nse_http_get(host: &str, port: u16, path: &str) -> NseResult<NseHttpResponse> {
+    crate::install_tls_provider();
     let url = if port == 443 {
         format!("https://{}{}", host, path)
     } else {
@@ -432,6 +433,7 @@ pub fn nse_http_get(host: &str, port: u16, path: &str) -> NseResult<NseHttpRespo
 
 /// Simple HTTP POST request
 pub fn nse_http_post(host: &str, port: u16, path: &str, data: &str) -> NseResult<NseHttpResponse> {
+    crate::install_tls_provider();
     let url = if port == 443 {
         format!("https://{}{}", host, path)
     } else {
@@ -487,6 +489,7 @@ pub struct NseHttpRequest {
 }
 
 pub fn nse_http_request(request: NseHttpRequest) -> NseResult<NseHttpResponse> {
+    crate::install_tls_provider();
     let client = reqwest::blocking::Client::builder()
         .danger_accept_invalid_certs(true)
         .danger_accept_invalid_hostnames(true)

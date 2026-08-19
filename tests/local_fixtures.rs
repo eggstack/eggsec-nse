@@ -804,6 +804,7 @@ mod tests {
 
     #[test]
     fn http_server_roundtrip() {
+        eggsec_nse::install_tls_provider();
         let server = HttpServer::start();
         let url = format!("{}/", server.base_url());
         let response = reqwest::blocking::get(&url).expect("GET /");

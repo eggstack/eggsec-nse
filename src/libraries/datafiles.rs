@@ -6,6 +6,8 @@ use mlua::{Lua, Result as LuaResult};
 use rustc_hash::FxHashMap;
 use std::sync::OnceLock;
 
+use crate::capabilities::NseCapabilityContext;
+
 static PROTOCOLS: OnceLock<FxHashMap<&'static str, u16>> = OnceLock::new();
 static SERVICES: OnceLock<FxHashMap<&'static str, (u16, &'static str)>> = OnceLock::new();
 
@@ -109,7 +111,47 @@ fn get_services() -> &'static FxHashMap<&'static str, (u16, &'static str)> {
     })
 }
 
-pub fn register_datafiles_library(lua: &Lua) -> LuaResult<()> {
+fn read_authorized_file(
+    capability_context: &NseCapabilityContext,
+    path: &str,
+    operation: &'static str,
+) -> LuaResult<Option<String>> {
+    let decision = crate::wrappers::check_fs_read(capability_context, path, operation);
+    if decision.is_denied() {
+        return Err(mlua::Error::runtime(
+            decision
+                .deny_reason()
+                .unwrap_or("filesystem read denied")
+                .to_string(),
+        ));
+    }
+
+    match std::fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) => {
+            tracing::debug!(path, %error, "NSE datafile is unavailable");
+            Ok(None)
+        }
+    }
+}
+
+fn read_first_authorized_file(
+    capability_context: &NseCapabilityContext,
+    paths: &[&str],
+    operation: &'static str,
+) -> LuaResult<Option<String>> {
+    for path in paths {
+        if let Some(content) = read_authorized_file(capability_context, path, operation)? {
+            return Ok(Some(content));
+        }
+    }
+    Ok(None)
+}
+
+pub fn register_datafiles_library(
+    lua: &Lua,
+    capability_context: &NseCapabilityContext,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let datafiles = lua.create_table()?;
 
@@ -270,9 +312,9 @@ pub fn register_datafiles_library(lua: &Lua) -> LuaResult<()> {
         })?,
     )?;
 
-    datafiles.set(
-        "parse_nmap_services",
-        lua.create_function(|lua, filename: Option<String>| {
+    datafiles.set("parse_nmap_services", {
+        let capability_context = capability_context.clone();
+        lua.create_function(move |lua, filename: Option<String>| {
             let services = lua.create_table()?;
 
             let default_paths = [
@@ -282,14 +324,13 @@ pub fn register_datafiles_library(lua: &Lua) -> LuaResult<()> {
             ];
 
             let content = if let Some(ref f) = filename {
-                std::fs::read_to_string(f).ok()
+                read_authorized_file(&capability_context, f, "datafiles.parse_nmap_services")?
             } else {
-                for path in &default_paths {
-                    if let Ok(_c) = std::fs::read_to_string(path) {
-                        break;
-                    }
-                }
-                None
+                read_first_authorized_file(
+                    &capability_context,
+                    &default_paths,
+                    "datafiles.parse_nmap_services",
+                )?
             };
 
             if let Some(c) = content {
@@ -303,34 +344,38 @@ pub fn register_datafiles_library(lua: &Lua) -> LuaResult<()> {
                         let port_proto = parts[1];
                         if let Some((port, proto)) = port_proto.split_once('/') {
                             let entry = lua.create_table()?;
-                            entry.set("name", name).ok();
-                            entry.set("port", port).ok();
-                            entry.set("protocol", proto).ok();
-                            services.set(name, entry).ok();
+                            entry.set("name", name)?;
+                            entry.set("port", port)?;
+                            entry.set("protocol", proto)?;
+                            services.set(name, entry)?;
                         }
                     }
                 }
             }
 
             Ok(services)
-        })?,
-    )?;
+        })?
+    })?;
 
-    datafiles.set(
-        "parse_nmap_protocols",
-        lua.create_function(|lua, filename: Option<String>| {
+    datafiles.set("parse_nmap_protocols", {
+        let capability_context = capability_context.clone();
+        lua.create_function(move |lua, filename: Option<String>| {
             let protocols = lua.create_table()?;
 
-            let _default_paths = [
+            let default_paths = [
                 "/usr/local/share/nmap/nmap-protocols",
                 "/usr/share/nmap/nmap-protocols",
                 "/opt/nmap/share/nmap/nmap-protocols",
             ];
 
             let content = if let Some(ref f) = filename {
-                std::fs::read_to_string(f).ok()
+                read_authorized_file(&capability_context, f, "datafiles.parse_nmap_protocols")?
             } else {
-                None
+                read_first_authorized_file(
+                    &capability_context,
+                    &default_paths,
+                    "datafiles.parse_nmap_protocols",
+                )?
             };
 
             if let Some(c) = content {
@@ -341,20 +386,22 @@ pub fn register_datafiles_library(lua: &Lua) -> LuaResult<()> {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 2 {
                         let name = parts[0];
-                        let number: u16 = parts[1].parse().unwrap_or(0);
+                        let Ok(number) = parts[1].parse::<u16>() else {
+                            continue;
+                        };
                         if number > 0 {
                             let entry = lua.create_table()?;
-                            entry.set("name", name).ok();
-                            entry.set("number", number).ok();
-                            protocols.set(number as i32, entry).ok();
+                            entry.set("name", name)?;
+                            entry.set("number", number)?;
+                            protocols.set(number as i32, entry)?;
                         }
                     }
                 }
             }
 
             Ok(protocols)
-        })?,
-    )?;
+        })?
+    })?;
 
     globals.set("datafiles", datafiles)?;
     Ok(())

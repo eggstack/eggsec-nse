@@ -58,6 +58,7 @@ pub struct ExecutorCore {
 
 impl ExecutorCore {
     pub fn new() -> LuaResult<Self> {
+        crate::install_tls_provider();
         Self::with_sandbox(crate::SandboxConfig::default())
     }
 
@@ -174,6 +175,7 @@ impl ExecutorCore {
     /// It threads the profile's `kind` and `network_policy` into the capability
     /// context so capability decisions match the resolved profile.
     pub fn with_profile(profile: &crate::profile::ResolvedNseExecutionProfile) -> LuaResult<Self> {
+        crate::install_tls_provider();
         Self::with_full_policy(
             profile.sandbox.clone(),
             profile.limits.clone(),
@@ -979,7 +981,10 @@ impl ExecutorCore {
         crate::libraries::vulns::register_vulns_library(&self.lua)?;
         crate::libraries::unpwdb::register_unpwdb_library(&self.lua, &self.capability_context)?;
         crate::libraries::brute::register_brute_library(&self.lua, &self.capability_context)?;
-        crate::libraries::datafiles::register_datafiles_library(&self.lua)?;
+        crate::libraries::datafiles::register_datafiles_library(
+            &self.lua,
+            &self.capability_context,
+        )?;
         crate::libraries::json::register_json_library(&self.lua)?;
         crate::libraries::ssh::register_ssh_library(&self.lua)?;
         crate::libraries::dns::register_dns_library(&self.lua, &self.capability_context)?;

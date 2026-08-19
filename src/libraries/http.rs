@@ -26,6 +26,7 @@ pub fn set_accept_invalid_hostnames(accept: bool) {
 }
 
 fn build_client(accept_invalid_certs: bool, accept_invalid_hostnames: bool) -> Client {
+    crate::install_tls_provider();
     let mut builder = Client::builder()
         .timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(10))
@@ -122,6 +123,7 @@ fn make_client_with_tls(
     accept_invalid_certs: Option<bool>,
     accept_invalid_hostnames: Option<bool>,
 ) -> Client {
+    crate::install_tls_provider();
     let global_accept_certs = ACCEPT_INVALID_CERTS.load(Ordering::SeqCst);
     let global_accept_hostnames = ACCEPT_INVALID_HOSTNAMES.load(Ordering::SeqCst);
 
@@ -302,6 +304,7 @@ fn maybe_denied_response(
 }
 
 pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+    crate::install_tls_provider();
     let globals = lua.globals();
     let http = lua.create_table()?;
 

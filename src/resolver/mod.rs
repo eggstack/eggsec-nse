@@ -507,7 +507,7 @@ impl ScriptResolver {
     ) -> Result<ResolvedNseScript, NseLoadError> {
         match &source {
             NseScriptSource::Builtin { name } => self.resolve_builtin(name.clone()),
-            NseScriptSource::TrustedRegistry { name } => {
+            NseScriptSource::TrustedRegistry { name: _ } => {
                 // Future: look up in registry
                 Err(NseLoadError::NotFound {
                     source: source.clone(),
