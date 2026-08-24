@@ -5,16 +5,18 @@
 
 use mlua::{Lua, Result as LuaResult, UserData, UserDataMethods};
 use native_tls::TlsConnector;
+use native_tls::TlsStream;
 use openssl::pkey::PKey;
 use openssl::rsa::Rsa;
-use std::net::TcpStream;
+use std::io::{Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use crate::capabilities::NseCapabilityContext;
 use crate::wrappers;
 
 struct TlsConnection {
-    stream: Option<TcpStream>,
+    stream: Option<TlsStream<TcpStream>>,
     host: String,
     port: u16,
     connected: bool,
@@ -34,27 +36,10 @@ impl TlsConnection {
         }
     }
 
-    fn connect(&mut self, host: &str, port: u16) -> Result<(), String> {
-        let connector = TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-            .map_err(|e| e.to_string())?;
-
-        let tcp_stream = TcpStream::connect_timeout(
-            &format!("{}:{}", host, port)
-                .parse::<std::net::SocketAddr>()
-                .map_err(|e: std::net::AddrParseError| e.to_string())?,
-            Duration::from_secs(10),
-        )
-        .map_err(|e| e.to_string())?;
-
-        let _ = connector; // TLS handshake would go here in full implementation
-
-        self.version = "TLS 1.2".to_string();
-        self.cipher = "AES256-GCM-SHA384".to_string();
-
-        self.stream = Some(tcp_stream);
+    fn connect(&mut self, ctx: &NseCapabilityContext, host: &str, port: u16) -> Result<(), String> {
+        self.stream = Some(connect_tls_stream(ctx, host, port, "tls.connect")?);
+        self.version = "TLS".to_string();
+        self.cipher = "negotiated".to_string();
         self.host = host.to_string();
         self.port = port;
         self.connected = true;
@@ -63,19 +48,26 @@ impl TlsConnection {
     }
 
     fn write(&mut self, data: &str) -> Result<usize, String> {
-        let _ = data;
-        Ok(0)
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| "TLS connection is not open".to_string())?;
+        stream.write(data.as_bytes()).map_err(|e| e.to_string())
     }
 
     fn read(&mut self, size: usize) -> Result<String, String> {
-        let _ = size;
-        Ok(String::new())
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| "TLS connection is not open".to_string())?;
+        let mut buffer = vec![0u8; size];
+        let read = stream.read(&mut buffer).map_err(|e| e.to_string())?;
+        buffer.truncate(read);
+        String::from_utf8(buffer).map_err(|e| e.to_string())
     }
 
     fn close(&mut self) {
-        if let Some(stream) = self.stream.take() {
-            let _ = stream.shutdown(std::net::Shutdown::Both);
-        }
+        self.stream.take();
         self.connected = false;
     }
 
@@ -88,19 +80,48 @@ impl TlsConnection {
     }
 }
 
+fn connect_tcp(
+    ctx: &NseCapabilityContext,
+    host: &str,
+    port: u16,
+    operation: &'static str,
+) -> Result<TcpStream, String> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if decision.is_denied() {
+        return Err(format!(
+            "Network denied: {}",
+            decision.deny_reason().unwrap_or("policy violation")
+        ));
+    }
+    let address = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| e.to_string())?
+        .next()
+        .ok_or_else(|| format!("could not resolve {}:{}", host, port))?;
+    TcpStream::connect_timeout(&address, Duration::from_secs(10)).map_err(|e| e.to_string())
+}
+
+fn connect_tls_stream(
+    ctx: &NseCapabilityContext,
+    host: &str,
+    port: u16,
+    operation: &'static str,
+) -> Result<TlsStream<TcpStream>, String> {
+    let stream = connect_tcp(ctx, host, port, operation)?;
+    let connector = TlsConnector::builder().build().map_err(|e| e.to_string())?;
+    connector.connect(host, stream).map_err(|e| e.to_string())
+}
+
 impl UserData for TlsConnection {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_method_mut("connect", |lua, this, (host, port): (String, u16)| {
-            this.connect(&host, port)
-                .map_err(mlua::Error::RuntimeError)?;
-            let result = lua.create_table()?;
-            result.set("host", host)?;
-            result.set("port", port)?;
-            result.set("status", "connected")?;
-            result.set("version", this.get_version())?;
-            result.set("cipher", this.get_cipher())?;
-            Ok(result)
-        });
+        methods.add_method_mut(
+            "connect",
+            |_lua, _this, _args: (String, u16)| -> LuaResult<()> {
+                Err(mlua::Error::RuntimeError(
+                    "use tls.connect to establish a capability-checked connection".to_string(),
+                ))
+            },
+        );
 
         methods.add_method_mut("write", |_lua, this, data: String| {
             this.write(&data).map_err(mlua::Error::RuntimeError)
@@ -137,7 +158,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
         }
 
         let mut conn = TlsConnection::new();
-        conn.connect(&host, port)
+        conn.connect(&cap_ctx, &host, port)
             .map_err(mlua::Error::RuntimeError)?;
         lua.create_userdata(conn)
     })?;
@@ -224,11 +245,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
         let result = lua.create_table()?;
 
-        let connector = match native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-        {
+        let connector = match native_tls::TlsConnector::builder().build() {
             Ok(c) => c,
             Err(e) => {
                 result.set("error", format!("TLS connector error: {}", e))?;
@@ -236,15 +253,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let addr = format!("{}:{}", host, port);
-        let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-            Ok(a) => a,
-            Err(e) => {
-                result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                return Ok(result);
-            }
-        };
-        let stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
+        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -254,9 +263,9 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
         match connector.connect(&host, stream) {
             Ok(tls_stream) => {
-                result.set("version", "TLS 1.2")?;
-                result.set("cipher", "AES256-GCM-SHA384")?;
-                result.set("curve", "secp256r1")?;
+                result.set("version", "negotiated")?;
+                result.set("cipher", "negotiated")?;
+                result.set("curve", "negotiated")?;
                 let _ = tls_stream;
             }
             Err(e) => {
@@ -285,11 +294,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
         let result = lua.create_table()?;
 
-        let connector = match native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-        {
+        let connector = match native_tls::TlsConnector::builder().build() {
             Ok(c) => c,
             Err(e) => {
                 result.set("error", format!("TLS connector error: {}", e))?;
@@ -297,15 +302,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let addr = format!("{}:{}", host, port);
-        let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-            Ok(a) => a,
-            Err(e) => {
-                result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                return Ok(result);
-            }
-        };
-        let stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
+        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -380,21 +377,12 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 return Ok(false);
             }
 
-            let connector = match native_tls::TlsConnector::builder()
-                .danger_accept_invalid_certs(true)
-                .danger_accept_invalid_hostnames(true)
-                .build()
-            {
+            let connector = match native_tls::TlsConnector::builder().build() {
                 Ok(c) => c,
                 Err(_) => return Ok(false),
             };
 
-            let addr = format!("{}:{}", host, 443);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(_) => return Ok(false),
-            };
-            let stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
+            let stream = match connect_tcp(&cap_ctx, &host, 443, "tls.check_hostname") {
                 Ok(s) => s,
                 Err(_) => return Ok(false),
             };
@@ -423,11 +411,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
         let result = lua.create_table()?;
 
-        let connector = match native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-        {
+        let connector = match native_tls::TlsConnector::builder().build() {
             Ok(c) => c,
             Err(e) => {
                 result.set("error", format!("TLS connector error: {}", e))?;
@@ -435,15 +419,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let addr = format!("{}:{}", host, port);
-        let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-            Ok(a) => a,
-            Err(e) => {
-                result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                return Ok(result);
-            }
-        };
-        let stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
+        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -453,8 +429,8 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
         match connector.connect(&host, stream) {
             Ok(tls_stream) => {
-                result.set("version", "TLS 1.2")?;
-                result.set("cipher", "AES256-GCM-SHA384")?;
+                result.set("version", "negotiated")?;
+                result.set("cipher", "negotiated")?;
                 result.set("peer_certificate", true)?;
                 let _ = tls_stream;
             }
@@ -510,11 +486,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
         let result = lua.create_table()?;
 
-        let connector = match native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-        {
+        let connector = match native_tls::TlsConnector::builder().build() {
             Ok(c) => c,
             Err(e) => {
                 result.set("error", format!("TLS connector error: {}", e))?;
@@ -522,15 +494,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let addr = format!("{}:{}", host, port);
-        let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-            Ok(a) => a,
-            Err(e) => {
-                result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                return Ok(result);
-            }
-        };
-        let stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
+        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -626,11 +590,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
         let result = lua.create_table()?;
 
-        let connector = match native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(false)
-            .danger_accept_invalid_hostnames(false)
-            .build()
-        {
+        let connector = match native_tls::TlsConnector::builder().build() {
             Ok(c) => c,
             Err(e) => {
                 result.set("valid", false)?;
@@ -639,15 +599,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let addr = format!("{}:{}", host, port);
-        let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-            Ok(a) => a,
-            Err(e) => {
-                result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                return Ok(result);
-            }
-        };
-        let stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
+        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.verify") {
             Ok(s) => s,
             Err(e) => {
                 result.set("valid", false)?;
@@ -690,11 +642,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             let hash = hash.unwrap_or_else(|| "sha256".to_string());
             let result = lua.create_table()?;
 
-            let connector = match native_tls::TlsConnector::builder()
-                .danger_accept_invalid_certs(true)
-                .danger_accept_invalid_hostnames(true)
-                .build()
-            {
+            let connector = match native_tls::TlsConnector::builder().build() {
                 Ok(c) => c,
                 Err(e) => {
                     result.set("error", format!("TLS connector error: {}", e))?;
@@ -702,15 +650,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 }
             };
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
+            let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
                 Ok(s) => s,
                 Err(e) => {
                     result.set("error", format!("Connection error: {}", e))?;
@@ -722,10 +662,13 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 Ok(tls_stream) => {
                     if let Some(cert) = tls_stream.peer_certificate().ok().flatten() {
                         if let Ok(der) = cert.to_der() {
-                            // Simple hash-based fingerprint (using built-in hash)
-                            let hash_value = simple_hash(&der);
-                            result.set("fingerprint", hash_value)?;
-                            result.set("hash", hash)?;
+                            match certificate_fingerprint(&der, &hash) {
+                                Ok(hash_value) => {
+                                    result.set("fingerprint", hash_value)?;
+                                    result.set("hash", hash)?;
+                                }
+                                Err(error) => result.set("error", error)?,
+                            }
                         }
                     }
                 }
@@ -757,11 +700,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
         let result = lua.create_table()?;
 
-        let connector = match native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-        {
+        let connector = match native_tls::TlsConnector::builder().build() {
             Ok(c) => c,
             Err(e) => {
                 result.set("error", format!("TLS connector error: {}", e))?;
@@ -769,15 +708,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let addr = format!("{}:{}", host, port);
-        let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-            Ok(a) => a,
-            Err(e) => {
-                result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                return Ok(result);
-            }
-        };
-        let stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
+        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -789,13 +720,15 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             Ok(tls_stream) => {
                 if let Some(cert) = tls_stream.peer_certificate().ok().flatten() {
                     if let Ok(der) = cert.to_der() {
-                        if let Ok(_x509) = openssl::x509::X509::from_der(&der) {
+                        if let Ok(x509) = openssl::x509::X509::from_der(&der) {
                             let altnames = lua.create_table()?;
-                            let mut _count = 0;
-
-                            // Use the hostname as fallback for SANs
-                            altnames.set(1, host.clone())?;
-                            _count += 1;
+                            if let Some(names) = x509.subject_alt_names() {
+                                for (index, name) in names.iter().enumerate() {
+                                    if let Some(dns_name) = name.dnsname() {
+                                        altnames.set(index + 1, dns_name)?;
+                                    }
+                                }
+                            }
 
                             result.set("altnames", altnames)?;
                         }
@@ -855,11 +788,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
         let result = lua.create_table()?;
 
-        let connector = match native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-        {
+        let connector = match native_tls::TlsConnector::builder().build() {
             Ok(c) => c,
             Err(e) => {
                 result.set("error", format!("TLS connector error: {}", e))?;
@@ -867,15 +796,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let addr = format!("{}:{}", host, port);
-        let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-            Ok(a) => a,
-            Err(e) => {
-                result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                return Ok(result);
-            }
-        };
-        let stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
+        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -885,8 +806,8 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
         match connector.connect(&host, stream) {
             Ok(_tls_stream) => {
-                result.set("version", "TLS 1.2")?;
-                result.set("cipher", "AES256-GCM-SHA384")?;
+                result.set("version", "negotiated")?;
+                result.set("cipher", "negotiated")?;
                 result.set("peer_certificate", true)?;
                 result.set("compressed", false)?;
                 result.set("secure_renegotiation", true)?;
@@ -939,11 +860,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
         let result = lua.create_table()?;
 
-        let connector = match native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
-            .build()
-        {
+        let connector = match native_tls::TlsConnector::builder().build() {
             Ok(c) => c,
             Err(e) => {
                 result.set("error", format!("TLS connector error: {}", e))?;
@@ -951,15 +868,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let addr = format!("{}:{}", host, port);
-        let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-            Ok(a) => a,
-            Err(e) => {
-                result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                return Ok(result);
-            }
-        };
-        let stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
+        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -1007,10 +916,14 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     Ok(())
 }
 
-fn simple_hash(data: &[u8]) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    format!("{:016X}", hasher.finish())
+fn certificate_fingerprint(data: &[u8], algorithm: &str) -> Result<String, String> {
+    let digest = match algorithm.to_ascii_lowercase().as_str() {
+        "sha1" => openssl::hash::MessageDigest::sha1(),
+        "sha256" => openssl::hash::MessageDigest::sha256(),
+        "md5" => openssl::hash::MessageDigest::md5(),
+        other => return Err(format!("unsupported certificate hash algorithm: {}", other)),
+    };
+    openssl::hash::hash(digest, data)
+        .map(|digest| hex::encode_upper(digest.as_ref()))
+        .map_err(|error| error.to_string())
 }
