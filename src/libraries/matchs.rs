@@ -6,6 +6,32 @@
 use mlua::{Lua, Result as LuaResult};
 use regex::RegexBuilder;
 
+/// Parse a dotted-quad IPv4 string into its u32 representation.
+/// Returns `None` unless exactly four valid octets are present.
+fn parse_ipv4_u32(s: &str) -> Option<u32> {
+    let octets: Vec<u8> = s.split('.').filter_map(|p| p.parse().ok()).collect();
+    if octets.len() != 4 {
+        return None;
+    }
+    Some(
+        octets
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| (v as u32) << (24 - i * 8))
+            .sum(),
+    )
+}
+
+/// Convert a CIDR prefix length (0-32) into a netmask.
+/// Returns `None` for out-of-range prefixes instead of shifting overflow.
+fn cidr_prefix_mask(prefix: u8) -> Option<u32> {
+    match prefix {
+        0 => Some(0),
+        p @ 1..=32 => Some(!((1u32 << (32 - p)) - 1)),
+        _ => None,
+    }
+}
+
 pub fn register_matchs_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
     let matchs = lua.create_table()?;
@@ -14,23 +40,11 @@ pub fn register_matchs_library(lua: &Lua) -> LuaResult<()> {
         let parts: Vec<&str> = pattern.split('/').collect();
         if parts.len() == 2 {
             if let Ok(cidr) = parts[1].parse::<u8>() {
-                let ip_parts: Vec<&str> = parts[0].split('.').collect();
-                if ip_parts.len() == 4 {
-                    let ip_num: u32 = ip_parts
-                        .iter()
-                        .filter_map(|p| p.parse::<u8>().ok())
-                        .enumerate()
-                        .map(|(i, v)| (v as u32) << (24 - i * 8))
-                        .sum();
-
-                    let mask = !((1u32 << (32 - cidr)) - 1);
-                    let test_ip: u32 = ip
-                        .split('.')
-                        .filter_map(|p| p.parse::<u8>().ok())
-                        .enumerate()
-                        .map(|(i, v)| (v as u32) << (24 - i * 8))
-                        .sum();
-
+                if let (Some(ip_num), Some(test_ip), Some(mask)) = (
+                    parse_ipv4_u32(parts[0]),
+                    parse_ipv4_u32(&ip),
+                    cidr_prefix_mask(cidr),
+                ) {
                     return Ok((test_ip & mask) == (ip_num & mask));
                 }
             }
@@ -69,33 +83,19 @@ pub fn register_matchs_library(lua: &Lua) -> LuaResult<()> {
             return Ok(false);
         }
 
-        let cidr_ip = parts[0];
-        if let Ok(_cidr_num) = parts[1].parse::<u8>() {
-            let cidr_parts: Vec<u8> = cidr_ip.split('.').filter_map(|p| p.parse().ok()).collect();
+        // Parse the prefix length first; it drives the mask computation.
+        let Ok(prefix_len) = parts[1].parse::<u8>() else {
+            return Ok(false);
+        };
+        let (Some(cidr_num), Some(ip_num), Some(mask)) = (
+            parse_ipv4_u32(parts[0]),
+            parse_ipv4_u32(&ip),
+            cidr_prefix_mask(prefix_len),
+        ) else {
+            return Ok(false);
+        };
 
-            let ip_parts: Vec<u8> = ip.split('.').filter_map(|p| p.parse().ok()).collect();
-
-            if cidr_parts.len() != 4 || ip_parts.len() != 4 {
-                return Ok(false);
-            }
-
-            let cidr_num: u32 = cidr_parts
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| (v as u32) << (24 - i * 8))
-                .sum();
-
-            let ip_num: u32 = ip_parts
-                .iter()
-                .enumerate()
-                .map(|(i, &v)| (v as u32) << (24 - i * 8))
-                .sum();
-
-            let mask = !((1u32 << (32 - cidr_num)) - 1);
-            Ok((ip_num & mask) == (cidr_num & mask))
-        } else {
-            Ok(false)
-        }
+        Ok((ip_num & mask) == (cidr_num & mask))
     })?;
     matchs.set("CIDR", cidr_fn)?;
 

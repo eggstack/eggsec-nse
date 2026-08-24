@@ -329,10 +329,7 @@ fn canonicalize_root(path: &Path) -> Option<PathBuf> {
 /// Check whether a canonical path is under an approved root using
 /// path-component semantics (not string prefix).
 fn is_under_root(canonical_path: &Path, canonical_root: &Path) -> bool {
-    match canonical_path.strip_prefix(canonical_root) {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    canonical_path.strip_prefix(canonical_root).is_ok()
 }
 
 /// Validate that an existing file path is under one of the approved roots.
@@ -717,13 +714,12 @@ impl ScriptResolver {
         name: &str,
     ) -> Result<Option<ResolvedNseModule>, NseLoadError> {
         // 1. Validate module name grammar
-        let validated_name = validate_nse_module_name(name).map_err(|e| {
+        let validated_name = validate_nse_module_name(name).inspect_err(|e| {
             self.diagnostics
                 .push(NseLoadDiagnostic::ModuleNameRejected {
                     name: name.to_string(),
                     reason: e.to_string(),
                 });
-            e
         })?;
 
         // 2. Check if filesystem modules are allowed

@@ -33,7 +33,9 @@ fn parse_stun_response(data: &[u8]) -> Option<(String, u16)> {
     while i + 4 <= data.len() {
         let attr_type = u16::from_be_bytes([data[i], data[i + 1]]);
         let attr_len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
-        if attr_type == STUN_ATTR_MAPPED_ADDRESS && i + 8 <= data.len() {
+        // MAPPED-ADDRESS value is 8 bytes after the 4-byte attribute header:
+        // require all 12 bytes before indexing through data[i + 11].
+        if attr_type == STUN_ATTR_MAPPED_ADDRESS && i + 12 <= data.len() {
             let family = data[i + 5];
             if family == 0x01 {
                 let port = u16::from_be_bytes([data[i + 6], data[i + 7]]);

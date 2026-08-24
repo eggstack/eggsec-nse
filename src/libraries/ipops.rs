@@ -73,12 +73,14 @@ pub fn register_ipops_library(lua: &Lua) -> LuaResult<()> {
     let is_ipv6_fn = lua.create_function(|_lua, ip: String| Ok(ip.contains(':')))?;
     ipops.set("is_ipv6", is_ipv6_fn)?;
 
-    let cidr_to_mask_fn = lua.create_function(|_lua, bits: u8| {
-        if bits >= 32 {
-            Ok(0u32)
-        } else {
-            Ok(!((1u32 << (32 - bits)) - 1))
-        }
+    let cidr_to_mask_fn = lua.create_function(|_lua, bits: u8| match bits {
+        0 => Ok(0u32),
+        b @ 1..=31 => Ok(!((1u32 << (32 - b)) - 1)),
+        32 => Ok(u32::MAX),
+        _ => Err(mlua::Error::runtime(format!(
+            "invalid CIDR prefix length: {} (expected 0-32)",
+            bits
+        ))),
     })?;
     ipops.set("cidr_to_mask", cidr_to_mask_fn)?;
 
