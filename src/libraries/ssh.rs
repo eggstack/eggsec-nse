@@ -3,6 +3,8 @@
 //! SSH (Secure Shell) protocol support for NSE scripts.
 //! Based on Nmap's ssh library: https://nmap.org/nsedoc/lib/ssh.html
 
+use crate::capabilities::NseCapabilityContext;
+use crate::wrappers;
 use mlua::{Lua, Result as LuaResult};
 #[cfg(feature = "nse-ssh2")]
 use ssh2::Session;
@@ -11,6 +13,26 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 const SSH_PORT: u16 = 22;
+
+/// Deny helper: returns an error table when the capability context rejects
+/// outbound TCP to `host` for `operation`.
+fn denied_result(lua: &Lua, operation: &str) -> LuaResult<mlua::Table> {
+    let result = lua.create_table()?;
+    result.set(
+        "error",
+        format!(
+            "network access denied by NSE capability policy: {}",
+            operation
+        ),
+    )?;
+    Ok(result)
+}
+
+/// Gate an outbound TCP connection through the capability sandbox.
+/// Returns `true` when the connection is allowed.
+fn network_allowed(ctx: &NseCapabilityContext, host: &str, operation: &'static str) -> bool {
+    !wrappers::check_network_tcp(ctx, host, operation).is_denied()
+}
 
 fn read_ssh_banner(stream: &mut TcpStream) -> std::io::Result<String> {
     let mut buffer = vec![0u8; 1024];
@@ -59,13 +81,17 @@ fn parse_ssh_banner(banner: &str) -> (String, String, String) {
     (version, software, comments)
 }
 
-pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_ssh_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let ssh = lua.create_table()?;
 
     // ssh.connect() - Connect to SSH server and get banner
-    let connect_fn = lua.create_function(|lua, (host, port): (String, Option<u16>)| {
+    let capability_ctx0 = capability_ctx.clone();
+    let connect_fn = lua.create_function(move |lua, (host, port): (String, Option<u16>)| {
         let port = port.unwrap_or(SSH_PORT);
+        if !network_allowed(&capability_ctx0, &host, "ssh.connect") {
+            return Ok(denied_result(lua, "ssh.connect")?);
+        }
         let addr = format!("{}:{}", host, port);
 
         let mut stream = match TcpStream::connect_timeout(
@@ -101,9 +127,13 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     ssh.set("connect", connect_fn)?;
 
     // ssh.login() - Authenticate to SSH server
+    let capability_ctx1 = capability_ctx.clone();
     let login_fn = lua.create_function(
-        |lua, (host, port, user, password): (String, Option<u16>, String, String)| {
+        move |lua, (host, port, user, password): (String, Option<u16>, String, String)| {
             let _port = port.unwrap_or(SSH_PORT);
+            if !network_allowed(&capability_ctx1, &host, "ssh.login") {
+                return Ok(denied_result(lua, "ssh.login")?);
+            }
             let _ = (&host, &user, &password);
 
             #[cfg(feature = "nse-ssh2")]
@@ -177,9 +207,13 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     ssh.set("login", login_fn)?;
 
     // ssh.execute() - Execute a command
+    let capability_ctx2 = capability_ctx.clone();
     let execute_fn = lua.create_function(
-        |lua, (host, port, command): (String, Option<u16>, String)| {
+        move |lua, (host, port, command): (String, Option<u16>, String)| {
             let _port = port.unwrap_or(SSH_PORT);
+            if !network_allowed(&capability_ctx2, &host, "ssh.execute") {
+                return Ok(denied_result(lua, "ssh.execute")?);
+            }
             let _ = &host;
 
             #[cfg(feature = "nse-ssh2")]
@@ -275,8 +309,12 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     ssh.set("shell", shell_fn)?;
 
     // ssh.get_info() - Get SSH server information
-    let get_info_fn = lua.create_function(|lua, (host, port): (String, Option<u16>)| {
+    let capability_ctx3 = capability_ctx.clone();
+    let get_info_fn = lua.create_function(move |lua, (host, port): (String, Option<u16>)| {
         let port = port.unwrap_or(SSH_PORT);
+        if !network_allowed(&capability_ctx3, &host, "ssh.get_info") {
+            return Ok(denied_result(lua, "ssh.get_info")?);
+        }
         let addr = format!("{}:{}", host, port);
 
         let mut stream = match TcpStream::connect_timeout(
@@ -406,9 +444,13 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     ssh.set("version", version_fn)?;
 
     // ssh.userauth_pubkey() - Public key authentication
+    let capability_ctx4 = capability_ctx.clone();
     let userauth_pubkey_fn = lua.create_function(
-        |lua, (host, port, user, key_file): (String, Option<u16>, String, String)| {
+        move |lua, (host, port, user, key_file): (String, Option<u16>, String, String)| {
             let _port = port.unwrap_or(SSH_PORT);
+            if !network_allowed(&capability_ctx4, &host, "ssh.userauth_pubkey") {
+                return Ok(denied_result(lua, "ssh.userauth_pubkey")?);
+            }
             let _ = (&host, &user, &key_file);
 
             #[cfg(feature = "nse-ssh2")]
@@ -544,126 +586,152 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     ssh.set("subsystem", subsystem_fn)?;
 
     // ssh.scp_download() - Download files via SCP
-    let scp_download_fn = lua.create_function(
-        |lua, (_host, _port, _remote_path, _local_path): (String, Option<u16>, String, String)| {
-            let _port = _port.unwrap_or(SSH_PORT);
-
-            #[cfg(feature = "nse-ssh2")]
-            {
-                let addr = format!("{}:{}", _host, _port);
-                let tcp = match TcpStream::connect_timeout(
-                    &addr.parse::<std::net::SocketAddr>().map_err(
-                        |e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()),
-                    )?,
-                    Duration::from_secs(10),
-                ) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        let result = lua.create_table()?;
-                        result.set("success", false)?;
-                        result.set("error", e.to_string())?;
-                        return Ok(result);
-                    }
-                };
-
-                let mut session = match Session::new() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let result = lua.create_table()?;
-                        result.set("success", false)?;
-                        result.set("error", format!("Failed to create session: {}", e))?;
-                        return Ok(result);
-                    }
-                };
-
-                session.set_tcp_stream(tcp);
-                if let Err(e) = session.handshake() {
-                    let result = lua.create_table()?;
-                    result.set("success", false)?;
-                    result.set("error", format!("Handshake failed: {}", e))?;
-                    return Ok(result);
+    let capability_ctx5 = capability_ctx.clone();
+    let scp_download_fn =
+        lua.create_function(
+            move |lua,
+                  (_host, _port, _remote_path, _local_path): (
+                String,
+                Option<u16>,
+                String,
+                String,
+            )| {
+                let _port = _port.unwrap_or(SSH_PORT);
+                if !network_allowed(&capability_ctx5, &_host, "ssh.scp_download") {
+                    return Ok(denied_result(lua, "ssh.scp_download")?);
                 }
 
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", "Authentication required for SCP")?;
-                Ok(result)
-            }
+                #[cfg(feature = "nse-ssh2")]
+                {
+                    let addr = format!("{}:{}", _host, _port);
+                    let tcp = match TcpStream::connect_timeout(
+                        &addr.parse::<std::net::SocketAddr>().map_err(
+                            |e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()),
+                        )?,
+                        Duration::from_secs(10),
+                    ) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            let result = lua.create_table()?;
+                            result.set("success", false)?;
+                            result.set("error", e.to_string())?;
+                            return Ok(result);
+                        }
+                    };
 
-            #[cfg(not(feature = "nse-ssh2"))]
-            {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", "SCP requires ssh2 crate")?;
-                Ok(result)
-            }
-        },
-    )?;
+                    let mut session = match Session::new() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let result = lua.create_table()?;
+                            result.set("success", false)?;
+                            result.set("error", format!("Failed to create session: {}", e))?;
+                            return Ok(result);
+                        }
+                    };
+
+                    session.set_tcp_stream(tcp);
+                    if let Err(e) = session.handshake() {
+                        let result = lua.create_table()?;
+                        result.set("success", false)?;
+                        result.set("error", format!("Handshake failed: {}", e))?;
+                        return Ok(result);
+                    }
+
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", "Authentication required for SCP")?;
+                    Ok(result)
+                }
+
+                #[cfg(not(feature = "nse-ssh2"))]
+                {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", "SCP requires ssh2 crate")?;
+                    Ok(result)
+                }
+            },
+        )?;
     ssh.set("scp_download", scp_download_fn)?;
 
     // ssh.scp_upload() - Upload files via SCP
-    let scp_upload_fn = lua.create_function(
-        |lua, (host, port, _local_path, _remote_path): (String, Option<u16>, String, String)| {
-            let _port = port.unwrap_or(SSH_PORT);
-            let _ = &host;
+    let capability_ctx6 = capability_ctx.clone();
+    let scp_upload_fn =
+        lua.create_function(
+            move |lua,
+                  (host, port, _local_path, _remote_path): (
+                String,
+                Option<u16>,
+                String,
+                String,
+            )| {
+                let _port = port.unwrap_or(SSH_PORT);
+                if !network_allowed(&capability_ctx6, &host, "ssh.scp_upload") {
+                    return Ok(denied_result(lua, "ssh.scp_upload")?);
+                }
+                let _ = &host;
 
-            #[cfg(feature = "nse-ssh2")]
-            {
-                let addr = format!("{}:{}", host, _port);
-                let tcp = match TcpStream::connect_timeout(
-                    &addr.parse::<std::net::SocketAddr>().map_err(
-                        |e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()),
-                    )?,
-                    Duration::from_secs(10),
-                ) {
-                    Ok(t) => t,
-                    Err(e) => {
+                #[cfg(feature = "nse-ssh2")]
+                {
+                    let addr = format!("{}:{}", host, _port);
+                    let tcp = match TcpStream::connect_timeout(
+                        &addr.parse::<std::net::SocketAddr>().map_err(
+                            |e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()),
+                        )?,
+                        Duration::from_secs(10),
+                    ) {
+                        Ok(t) => t,
+                        Err(e) => {
+                            let result = lua.create_table()?;
+                            result.set("success", false)?;
+                            result.set("error", e.to_string())?;
+                            return Ok(result);
+                        }
+                    };
+
+                    let mut session = match Session::new() {
+                        Ok(s) => s,
+                        Err(e) => {
+                            let result = lua.create_table()?;
+                            result.set("success", false)?;
+                            result.set("error", format!("Failed to create session: {}", e))?;
+                            return Ok(result);
+                        }
+                    };
+
+                    session.set_tcp_stream(tcp);
+                    if let Err(e) = session.handshake() {
                         let result = lua.create_table()?;
                         result.set("success", false)?;
-                        result.set("error", e.to_string())?;
+                        result.set("error", format!("Handshake failed: {}", e))?;
                         return Ok(result);
                     }
-                };
 
-                let mut session = match Session::new() {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let result = lua.create_table()?;
-                        result.set("success", false)?;
-                        result.set("error", format!("Failed to create session: {}", e))?;
-                        return Ok(result);
-                    }
-                };
-
-                session.set_tcp_stream(tcp);
-                if let Err(e) = session.handshake() {
                     let result = lua.create_table()?;
                     result.set("success", false)?;
-                    result.set("error", format!("Handshake failed: {}", e))?;
-                    return Ok(result);
+                    result.set("error", "Authentication required for SCP")?;
+                    Ok(result)
                 }
 
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", "Authentication required for SCP")?;
-                Ok(result)
-            }
-
-            #[cfg(not(feature = "nse-ssh2"))]
-            {
-                let result = lua.create_table()?;
-                result.set("success", false)?;
-                result.set("error", "SCP requires ssh2 crate")?;
-                Ok(result)
-            }
-        },
-    )?;
+                #[cfg(not(feature = "nse-ssh2"))]
+                {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", "SCP requires ssh2 crate")?;
+                    Ok(result)
+                }
+            },
+        )?;
     ssh.set("scp_upload", scp_upload_fn)?;
 
     // ssh.sftp() - SFTP operations
+    let capability_ctx7 = capability_ctx.clone();
     let sftp_fn = lua.create_function(
-        |lua, (host, port, operation, path): (String, Option<u16>, String, String)| {
+        move |lua, (host, port, operation, path): (String, Option<u16>, String, String)| {
             let _port = port.unwrap_or(SSH_PORT);
+            if !network_allowed(&capability_ctx7, &host, "ssh.sftp") {
+                return Ok(denied_result(lua, "ssh.sftp")?);
+            }
             let _ = (&host, &operation, &path);
 
             #[cfg(feature = "nse-ssh2")]
@@ -724,8 +792,12 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     ssh.set("sftp", sftp_fn)?;
 
     // ssh.hostkey() - Get host key
-    let hostkey_fn = lua.create_function(|lua, (_host, _port): (String, Option<u16>)| {
+    let capability_ctx8 = capability_ctx.clone();
+    let hostkey_fn = lua.create_function(move |lua, (_host, _port): (String, Option<u16>)| {
         let _port = _port.unwrap_or(SSH_PORT);
+        if !network_allowed(&capability_ctx8, &_host, "ssh.hostkey") {
+            return Ok(denied_result(lua, "ssh.hostkey")?);
+        }
 
         #[cfg(feature = "nse-ssh2")]
         {
@@ -779,9 +851,13 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     ssh.set("hostkey", hostkey_fn)?;
 
     // ssh.userauth() - Generic user authentication
+    let capability_ctx9 = capability_ctx.clone();
     let userauth_fn = lua.create_function(
-        |lua, (host, port, user, password): (String, Option<u16>, String, String)| {
+        move |lua, (host, port, user, password): (String, Option<u16>, String, String)| {
             let _port = port.unwrap_or(SSH_PORT);
+            if !network_allowed(&capability_ctx9, &host, "ssh.userauth") {
+                return Ok(denied_result(lua, "ssh.userauth")?);
+            }
             let _ = (&host, &user, &password);
 
             #[cfg(feature = "nse-ssh2")]
@@ -864,35 +940,41 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     ssh.set("direct_tcpip", direct_tcpip_fn)?;
 
     // Async connect
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, Option<u16>)| {
-        let port = port.unwrap_or(SSH_PORT);
-
-        // Use blocking implementation for async compatibility
-        let addr = format!("{}:{}", host, port);
-
-        let mut stream = match TcpStream::connect_timeout(
-            &addr
-                .parse::<std::net::SocketAddr>()
-                .map_err(|e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()))?,
-            Duration::from_secs(10),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e.to_string())?;
-                return Ok(result);
+    let capability_ctx10 = capability_ctx.clone();
+    let async_connect_fn =
+        lua.create_function(move |lua, (host, port): (String, Option<u16>)| {
+            let port = port.unwrap_or(SSH_PORT);
+            if !network_allowed(&capability_ctx10, &host, "ssh.connect_async") {
+                return Ok(denied_result(lua, "ssh.connect_async")?);
             }
-        };
 
-        let banner = read_ssh_banner(&mut stream).unwrap_or_else(|_| "SSH-2.0".to_string());
+            // Use blocking implementation for async compatibility
+            let addr = format!("{}:{}", host, port);
 
-        let result = lua.create_table()?;
-        result.set("host", host)?;
-        result.set("port", port)?;
-        result.set("banner", banner)?;
+            let mut stream =
+                match TcpStream::connect_timeout(
+                    &addr.parse::<std::net::SocketAddr>().map_err(
+                        |e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()),
+                    )?,
+                    Duration::from_secs(10),
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let result = lua.create_table()?;
+                        result.set("error", e.to_string())?;
+                        return Ok(result);
+                    }
+                };
 
-        Ok(result)
-    })?;
+            let banner = read_ssh_banner(&mut stream).unwrap_or_else(|_| "SSH-2.0".to_string());
+
+            let result = lua.create_table()?;
+            result.set("host", host)?;
+            result.set("port", port)?;
+            result.set("banner", banner)?;
+
+            Ok(result)
+        })?;
     ssh.set("connect_async", async_connect_fn)?;
 
     // keep_alive - Send SSH keepalive to maintain connection
@@ -919,9 +1001,14 @@ pub fn register_ssh_library(lua: &Lua) -> LuaResult<()> {
     ssh.set("get_kex", get_kex_info_fn)?;
 
     // get_auth_methods_async - Async version of auth methods
+    let capability_ctx11 = capability_ctx.clone();
     let get_auth_methods_async_fn =
-        lua.create_function(|lua, (host, port): (String, Option<u16>)| {
+        lua.create_function(move |lua, (host, port): (String, Option<u16>)| {
             let port = port.unwrap_or(22);
+
+            if !network_allowed(&capability_ctx11, &host, "ssh.get_auth_methods_async") {
+                return Ok(denied_result(lua, "ssh.get_auth_methods_async")?);
+            }
 
             // Try to connect and get auth methods
             let result = lua.create_table()?;

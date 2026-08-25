@@ -986,7 +986,7 @@ impl ExecutorCore {
             &self.capability_context,
         )?;
         crate::libraries::json::register_json_library(&self.lua)?;
-        crate::libraries::ssh::register_ssh_library(&self.lua)?;
+        crate::libraries::ssh::register_ssh_library(&self.lua, &self.capability_context)?;
         crate::libraries::dns::register_dns_library(&self.lua, &self.capability_context)?;
         crate::libraries::http2::register_http2_library(&self.lua)?;
         crate::libraries::httppipeline::register_httppipeline_library(
@@ -1058,7 +1058,7 @@ impl ExecutorCore {
             &self.sandbox,
             &self.capability_context,
         )?;
-        crate::libraries::libssh2::register_libssh2_library(&self.lua)?;
+        crate::libraries::libssh2::register_libssh2_library(&self.lua, &self.capability_context)?;
         crate::libraries::msrpcperformance::register_msrpcperformance_library(&self.lua)?;
         crate::libraries::msrpctypes::register_msrpctypes_library(&self.lua)?;
         crate::libraries::oops::register_oops_library(&self.lua)?;

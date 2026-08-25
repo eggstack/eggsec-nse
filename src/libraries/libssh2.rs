@@ -4,6 +4,10 @@
 //! Based on Nmap's libssh2 library: https://nmap.org/nsedoc/lib/libssh2.html
 
 #[cfg(feature = "nse-ssh2")]
+use crate::capabilities::NseCapabilityContext;
+#[cfg(feature = "nse-ssh2")]
+use crate::wrappers;
+#[cfg(feature = "nse-ssh2")]
 use mlua::{Lua, Result as LuaResult, Table, UserData, UserDataMethods, Value};
 #[cfg(feature = "nse-ssh2")]
 use ssh2::Session;
@@ -14,13 +18,22 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 #[cfg(feature = "nse-ssh2")]
-pub fn register_libssh2_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_libssh2_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let libssh2 = lua.create_table()?;
+    let ctx_session = capability_ctx.clone();
 
     // libssh2.session(host, port) - Create SSH session
-    let session_fn = lua.create_function(|lua, (host, port): (String, Option<u16>)| {
+    let session_fn = lua.create_function(move |lua, (host, port): (String, Option<u16>)| {
         let port = port.unwrap_or(22);
+        if wrappers::check_network_tcp(&ctx_session, &host, "libssh2.session").is_denied() {
+            let result = lua.create_table()?;
+            result.set(
+                "error",
+                "network access denied by NSE capability policy: libssh2.session",
+            )?;
+            return Ok(Value::Table(result));
+        }
         let addr = format!("{}:{}", host, port);
 
         let tcp = match TcpStream::connect_timeout(
@@ -401,7 +414,10 @@ impl UserData for LibSsh2Session {
 }
 
 #[cfg(not(feature = "nse-ssh2"))]
-pub fn register_libssh2_library(lua: &mlua::Lua) -> mlua::Result<()> {
+pub fn register_libssh2_library(
+    lua: &mlua::Lua,
+    _capability_ctx: &crate::capabilities::NseCapabilityContext,
+) -> mlua::Result<()> {
     let globals = lua.globals();
     let libssh2 = lua.create_table()?;
 
