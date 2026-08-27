@@ -188,11 +188,12 @@ pub fn register_httpspider_library(
                 .as_ref()
                 .and_then(|o| o.get::<u64>("timeout").ok())
                 .unwrap_or(10);
+            let insecure_tls = cap.allows_insecure_tls();
 
             let client = reqwest::blocking::Client::builder()
                 .timeout(Duration::from_secs(timeout))
-                .danger_accept_invalid_certs(true)
-                .danger_accept_invalid_hostnames(true)
+                .danger_accept_invalid_certs(insecure_tls)
+                .danger_accept_invalid_hostnames(insecure_tls)
                 .build();
 
             match client {

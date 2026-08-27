@@ -19,6 +19,7 @@ static SSL_SESSIONS: std::sync::LazyLock<Mutex<FxHashMap<String, TlsConnector>>>
 fn create_ssl_connection(
     host: &str,
     port: u16,
+    insecure_tls: bool,
 ) -> std::io::Result<native_tls::TlsStream<TcpStream>> {
     let addr = format!("{}:{}", host, port);
     let socket_addr: std::net::SocketAddr =
@@ -30,8 +31,8 @@ fn create_ssl_connection(
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
     let connector = TlsConnector::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
+        .danger_accept_invalid_certs(insecure_tls)
+        .danger_accept_invalid_hostnames(insecure_tls)
         .build()
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
@@ -77,7 +78,7 @@ pub fn register_openssl_library(lua: &Lua, capability_ctx: &NseCapabilityContext
         let host_clone = host.clone();
         let port_clone = port;
 
-        match create_ssl_connection(&host, port) {
+        match create_ssl_connection(&host, port, cap_ctx.allows_insecure_tls()) {
             Ok(_tls_stream) => {
                 result.set("success", true)?;
                 result.set("host", host)?;
@@ -122,8 +123,8 @@ pub fn register_openssl_library(lua: &Lua, capability_ctx: &NseCapabilityContext
 
         // Try to get the certificate
         match native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
+            .danger_accept_invalid_certs(cap_ctx.allows_insecure_tls())
+            .danger_accept_invalid_hostnames(cap_ctx.allows_insecure_tls())
             .build()
         {
             Ok(connector) => {

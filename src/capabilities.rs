@@ -200,6 +200,15 @@ impl NseCapabilityContext {
         )
     }
 
+    /// Whether the selected profile explicitly permits invalid TLS
+    /// certificates for compatibility/lab traffic.
+    pub fn allows_insecure_tls(&self) -> bool {
+        matches!(
+            self.profile_kind,
+            NseExecutionProfileKind::ManualPermissive | NseExecutionProfileKind::CompatibilityLab
+        )
+    }
+
     /// Check if an operation is allowed under the current policy.
     ///
     /// This is the central decision engine. It checks:

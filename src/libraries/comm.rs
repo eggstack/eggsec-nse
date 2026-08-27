@@ -153,10 +153,11 @@ pub fn register_comm_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 }
 
                 let url = format!("https://{}:{}", host, port);
+                let insecure_tls = capability_ctx.allows_insecure_tls();
 
                 let client = reqwest::blocking::Client::builder()
                     .timeout(Duration::from_secs(10))
-                    .danger_accept_invalid_certs(true)
+                    .danger_accept_invalid_certs(insecure_tls)
                     .build();
 
                 match client {

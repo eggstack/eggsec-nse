@@ -690,7 +690,8 @@ pub fn evaluate_rule(
                 mlua::Value::Vector(_) => "vector",
                 mlua::Value::Buffer(_) => "buffer",
                 mlua::Value::Error(_) => "error",
-                mlua::Value::Nil | mlua::Value::Boolean(_) => unreachable!(),
+                mlua::Value::Nil => "nil",
+                mlua::Value::Boolean(_) => "boolean",
                 _ => "unknown",
             };
             NseRuleEvaluationReport {

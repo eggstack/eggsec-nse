@@ -6,6 +6,8 @@ use mlua::{Lua, Result as LuaResult};
 use reqwest::blocking::Client;
 use std::time::Duration;
 
+use crate::capabilities::NseCapabilityContext;
+
 struct ElasticsearchConnection {
     client: Client,
     host: String,
@@ -15,10 +17,10 @@ struct ElasticsearchConnection {
 }
 
 impl ElasticsearchConnection {
-    fn new(host: &str, port: u16) -> Result<Self, String> {
+    fn new(host: &str, port: u16, insecure_tls: bool) -> Result<Self, String> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
-            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_certs(insecure_tls)
             .build()
             .map_err(|e| e.to_string())?;
 
@@ -62,12 +64,16 @@ impl ElasticsearchConnection {
     }
 }
 
-pub fn register_elasticsearch_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_elasticsearch_library(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let elasticsearch = lua.create_table()?;
 
-    let connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        let mut conn = match ElasticsearchConnection::new(&host, port) {
+    let cap = capability_ctx.clone();
+    let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let mut conn = match ElasticsearchConnection::new(&host, port, cap.allows_insecure_tls()) {
             Ok(c) => c,
             Err(e) => {
                 let result = lua.create_table()?;
@@ -94,8 +100,9 @@ pub fn register_elasticsearch_library(lua: &Lua) -> LuaResult<()> {
     })?;
     elasticsearch.set("connect", connect_fn)?;
 
-    let info_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        let _conn = match ElasticsearchConnection::new(&host, port) {
+    let cap = capability_ctx.clone();
+    let info_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        let _conn = match ElasticsearchConnection::new(&host, port, cap.allows_insecure_tls()) {
             Ok(c) => c,
             Err(e) => {
                 let result = lua.create_table()?;

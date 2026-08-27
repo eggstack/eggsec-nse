@@ -327,7 +327,13 @@ impl ExecutorCore {
         for (_, v) in script_output.pairs::<Value, Value>().flatten() {
             let val_str = match v {
                 Value::String(s) => s.to_string_lossy().to_string(),
-                _ => v.to_string().unwrap_or_default(),
+                _ => match v.to_string() {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "Failed to stringify Lua script output value");
+                        format!("<unprintable Lua value: {}>", error)
+                    }
+                },
             };
             if !result.is_empty() {
                 result.push('\n');
