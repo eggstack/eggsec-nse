@@ -242,6 +242,7 @@ fn decode_oid(bytes: &[u8], start: usize) -> (String, usize) {
 
     while pos < bytes.len() {
         let mut value = 0u32;
+        let mut has_terminator = false;
         while pos < bytes.len() && bytes[pos] >= 0x80 {
             value = (value << 7) | (bytes[pos] & 0x7F) as u32;
             pos += 1;
@@ -249,6 +250,10 @@ fn decode_oid(bytes: &[u8], start: usize) -> (String, usize) {
         if pos < bytes.len() {
             value = (value << 7) | bytes[pos] as u32;
             pos += 1;
+            has_terminator = true;
+        }
+        if !has_terminator {
+            break;
         }
         oid.push('.');
         oid.push_str(&format!("{}", value));
@@ -358,9 +363,15 @@ fn decode_snmp_response(data: &[u8]) -> Result<Vec<(String, String, String)>, St
 
         if pos < vb_end && data[pos] == 0x06 {
             pos += 1;
+            if pos >= data.len() || pos >= vb_end {
+                break;
+            }
             let oid_len = data[pos] as usize;
             pos += 1;
-            let (oid, _new_pos) = decode_oid(&data[pos..], 0);
+            if pos + oid_len > data.len() || pos + oid_len > vb_end {
+                break;
+            }
+            let (oid, _new_pos) = decode_oid(&data[pos..pos + oid_len], 0);
             pos += oid_len;
 
             let mut value = String::new();

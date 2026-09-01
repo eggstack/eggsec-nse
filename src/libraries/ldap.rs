@@ -182,13 +182,6 @@ fn build_search_request(
 
     search_content.extend(encode_boolean(false));
 
-    search_content.push(0x87);
-    if let Some((attr, value)) = filter.split_once('=') {
-        encode_length(attr.len() + value.len() + 1, &mut search_content);
-        search_content.extend(attr.as_bytes());
-    } else {
-        encode_length(filter.len(), &mut search_content);
-    }
     search_content.extend(encode_filter(filter));
 
     let mut attrs_content = Vec::new();

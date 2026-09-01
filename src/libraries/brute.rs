@@ -179,15 +179,21 @@ pub fn register_brute_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
         lua.create_function(|lua, (_driver, options): (Table, Option<Table>)| {
             let pins = lua.create_table()?;
 
-            let min_len = options
+            let mut min_len = options
                 .as_ref()
                 .and_then(|o| o.get::<u32>("min").ok())
-                .unwrap_or(4);
-            let max_len = options
+                .unwrap_or(4)
+                .min(9)
+                .max(1);
+            let mut max_len = options
                 .as_ref()
                 .and_then(|o| o.get::<u32>("max").ok())
                 .unwrap_or(6)
-                .min(9);
+                .min(9)
+                .max(1);
+            if min_len > max_len {
+                std::mem::swap(&mut min_len, &mut max_len);
+            }
 
             for len in min_len..=max_len {
                 let count = 10u32.pow(len);
