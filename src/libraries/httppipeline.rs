@@ -107,8 +107,8 @@ pub fn register_httppipeline_library(
 
         let client = match Client::builder()
             .timeout(Duration::from_secs(timeout))
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
+            .danger_accept_invalid_certs(cap.allows_insecure_tls())
+            .danger_accept_invalid_hostnames(cap.allows_insecure_tls())
             .build()
         {
             Ok(c) => c,
@@ -229,8 +229,8 @@ pub fn register_httppipeline_library(
 
             let client = match Client::builder()
                 .timeout(Duration::from_secs(timeout))
-                .danger_accept_invalid_certs(true)
-                .danger_accept_invalid_hostnames(true)
+                .danger_accept_invalid_certs(cap.allows_insecure_tls())
+                .danger_accept_invalid_hostnames(cap.allows_insecure_tls())
                 .build()
             {
                 Ok(c) => c,

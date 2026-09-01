@@ -13,10 +13,18 @@ use std::time::Duration;
 use tokio::net::TcpStream as AsyncTcpStream;
 
 use crate::capabilities::NseCapabilityContext;
+use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 static SMB_SESSIONS: LazyLock<Mutex<Vec<SmbSession>>> = LazyLock::new(|| Mutex::new(Vec::new()));
 const MAX_SMB_SESSIONS: usize = 64;
+
+/// Drop SMB session state so back-to-back scans cannot leak credentials.
+pub fn reset_for_run() {
+    if let Ok(mut sessions) = SMB_SESSIONS.lock() {
+        sessions.clear();
+    }
+}
 
 #[derive(Clone)]
 struct SmbSession {
@@ -782,7 +790,7 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
         }
         let addr = format!("{}:{}", host, port);
 
-        tokio::runtime::Handle::current().block_on(async {
+        block_on_async(async {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 AsyncTcpStream::connect(&addr),
@@ -838,7 +846,7 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             let domain_result = domain.clone();
             let host_result = host.clone();
 
-            tokio::runtime::Handle::current().block_on(async move {
+            block_on_async(async move {
                 let host_inner = host_clone.clone();
                 let user_inner = user_clone.clone();
                 let password_inner = password_clone.clone();
@@ -894,7 +902,7 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
         }
         let host_clone = host.clone();
 
-        tokio::runtime::Handle::current().block_on(async move {
+        block_on_async(async move {
             match tokio::task::spawn_blocking(move || smb_list_shares(&host_clone, port)).await {
                 Ok(Ok(shares)) => {
                     let result = lua.create_table()?;

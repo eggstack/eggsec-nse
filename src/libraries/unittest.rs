@@ -10,6 +10,13 @@ use std::sync::Mutex;
 static TEST_RESULTS: std::sync::LazyLock<Mutex<FxHashMap<String, Vec<TestResult>>>> =
     std::sync::LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
+/// Clear per-run unittest results so back-to-back scans do not leak.
+pub fn reset_for_run() {
+    if let Ok(mut results) = TEST_RESULTS.lock() {
+        results.clear();
+    }
+}
+
 #[derive(Debug)]
 struct TestResult {
     name: String,

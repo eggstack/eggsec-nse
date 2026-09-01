@@ -10,6 +10,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::capabilities::NseCapabilityContext;
+use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 const RDP_HEADER_SIZE: usize = 4;
@@ -279,7 +280,7 @@ pub fn register_rdp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
         }
         let host_clone = host.clone();
 
-        tokio::runtime::Handle::current().block_on(async move {
+        block_on_async(async move {
             let result = tokio::task::spawn_blocking(move || rdp_connect(&host_clone, port)).await;
 
             match result {

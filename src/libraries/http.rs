@@ -12,10 +12,11 @@ use std::time::Duration;
 
 use super::helpers::fallback_lua_table;
 use crate::capabilities::NseCapabilityContext;
+use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
-static ACCEPT_INVALID_CERTS: AtomicBool = AtomicBool::new(true);
-static ACCEPT_INVALID_HOSTNAMES: AtomicBool = AtomicBool::new(true);
+static ACCEPT_INVALID_CERTS: AtomicBool = AtomicBool::new(false);
+static ACCEPT_INVALID_HOSTNAMES: AtomicBool = AtomicBool::new(false);
 
 pub fn set_accept_invalid_certs(accept: bool) {
     ACCEPT_INVALID_CERTS.store(accept, Ordering::SeqCst);
@@ -831,7 +832,7 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
             let client = get_async_client(&url).clone();
 
             // Run blocking HTTP call in a tokio spawn
-            let result = tokio::runtime::Handle::current().block_on(async {
+            let result = block_on_async(async {
                 match client.get(&url).send().await {
                     Ok(resp) => build_response_async(lua, resp),
                     Err(e) => error_response(lua, e),
@@ -858,7 +859,7 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 let url = build_url(&host, port, &path);
                 let client = get_async_client(&url).clone();
 
-                let result = tokio::runtime::Handle::current().block_on(async {
+                let result = block_on_async(async {
                     match client.post(&url).body(data).send().await {
                         Ok(resp) => build_response_async(lua, resp),
                         Err(e) => error_response(lua, e),
@@ -886,7 +887,7 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 let url = build_url(&host, port, &path);
                 let client = get_async_client(&url).clone();
 
-                let result = tokio::runtime::Handle::current().block_on(async {
+                let result = block_on_async(async {
                     let req = client.request(method.parse().unwrap_or(reqwest::Method::GET), &url);
                     match req.send().await {
                         Ok(resp) => build_response_async(lua, resp),

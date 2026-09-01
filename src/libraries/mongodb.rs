@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream as AsyncTcpStream;
 
 use crate::capabilities::NseCapabilityContext;
+use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 fn maybe_denied_mongodb(
@@ -230,7 +231,7 @@ pub fn register_mongodb_library(lua: &Lua, capability_ctx: &NseCapabilityContext
         }
         let addr = format!("{}:{}", host, port);
 
-        tokio::runtime::Handle::current().block_on(async {
+        block_on_async(async {
             match AsyncTcpStream::connect(&addr).await {
                 Ok(mut stream) => {
                     let mongo_req_id = 1u32;

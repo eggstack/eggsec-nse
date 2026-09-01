@@ -10,6 +10,7 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use crate::capabilities::NseCapabilityContext;
+use crate::libraries::runtime_bridge::block_on_async;
 
 enum StreamType {
     Tcp(TcpStream),
@@ -760,7 +761,7 @@ pub fn register_socket_library(
 
             let addr = format!("{}:{}", host, port);
 
-            let result = tokio::runtime::Handle::current().block_on(async {
+            let result = block_on_async(async {
                 match tokio::net::TcpStream::connect(&addr).await {
                     Ok(_stream) => {
                         capability_ctx.after_blocking_operation(&request, None);
@@ -825,7 +826,7 @@ pub fn register_socket_library(
 
             let addr = format!("{}:{}", host, port);
 
-            let result = tokio::runtime::Handle::current().block_on(async {
+            let result = block_on_async(async {
                 match tokio::net::TcpStream::connect(&addr).await {
                     Ok(_stream) => {
                         capability_ctx.after_blocking_operation(&request, None);
@@ -879,7 +880,7 @@ pub fn register_socket_library(
                 }
             }
 
-            let result = tokio::runtime::Handle::current().block_on(async {
+            let result = block_on_async(async {
                 match tokio::net::lookup_host(&format!("{}:0", host)).await {
                     Ok(addrs) => {
                         let r = lua.create_table()?;

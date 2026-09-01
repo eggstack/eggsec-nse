@@ -10,6 +10,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::capabilities::NseCapabilityContext;
+use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 fn smtp_connect(host: &str, port: u16) -> std::io::Result<(TcpStream, String)> {
@@ -393,7 +394,7 @@ pub fn register_smtp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
             }
             let host_clone = host.clone();
 
-            tokio::runtime::Handle::current().block_on(async {
+            block_on_async(async {
                 let result =
                     tokio::task::spawn_blocking(move || smtp_connect(&host_clone, port)).await;
 
@@ -440,7 +441,7 @@ pub fn register_smtp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 let subject_clone = subject.clone();
                 let body_clone = body.clone();
 
-                tokio::runtime::Handle::current().block_on(async {
+                block_on_async(async {
                     let result = tokio::task::spawn_blocking(move || {
                         let port = 25;
                         let (mut stream, _banner) = smtp_connect(&host_clone, port)?;

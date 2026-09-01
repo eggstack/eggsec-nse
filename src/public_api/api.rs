@@ -300,7 +300,7 @@ pub fn nse_sslcert_get(host: &str, port: u16) -> NseResult<NseSslCertResult> {
     )?;
 
     let connector = TlsConnector::builder()
-        .danger_accept_invalid_certs(true)
+        .danger_accept_invalid_certs(false)
         .build()
         .map_err(|e| NseError::Tls(e.to_string()))?;
 
@@ -392,8 +392,8 @@ pub fn nse_http_get(host: &str, port: u16, path: &str) -> NseResult<NseHttpRespo
     };
 
     let client = reqwest::blocking::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
+        .danger_accept_invalid_certs(false)
+        .danger_accept_invalid_hostnames(false)
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| NseError::Connection(e.to_string()))?;
@@ -441,8 +441,8 @@ pub fn nse_http_post(host: &str, port: u16, path: &str, data: &str) -> NseResult
     };
 
     let client = reqwest::blocking::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
+        .danger_accept_invalid_certs(false)
+        .danger_accept_invalid_hostnames(false)
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| NseError::Connection(e.to_string()))?;
@@ -491,8 +491,8 @@ pub struct NseHttpRequest {
 pub fn nse_http_request(request: NseHttpRequest) -> NseResult<NseHttpResponse> {
     crate::install_tls_provider();
     let client = reqwest::blocking::Client::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
+        .danger_accept_invalid_certs(false)
+        .danger_accept_invalid_hostnames(false)
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| NseError::Connection(e.to_string()))?;

@@ -23,6 +23,9 @@ pub fn install_tls_provider() {
     use std::sync::Once;
     static INIT: Once = Once::new();
     INIT.call_once(|| {
+        // `install_default()` returns Err if another provider is already
+        // installed; either outcome is acceptable because the process-level
+        // provider must simply exist when rustls clients are constructed.
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
 }

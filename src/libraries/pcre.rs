@@ -14,6 +14,17 @@ static COMPILED_REGEX: std::sync::LazyLock<Mutex<FxHashMap<usize, regex::Regex>>
 static REGEX_COUNTER: std::sync::LazyLock<Mutex<usize>> =
     std::sync::LazyLock::new(|| Mutex::new(1));
 
+/// Clear per-run library globals so back-to-back scans do not
+/// leak state (handles, sessions, compiled patterns) between runs.
+pub fn reset_for_run() {
+    if let Ok(mut s) = COMPILED_REGEX.lock() {
+        s.clear();
+    }
+    if let Ok(mut s) = REGEX_COUNTER.lock() {
+        *s = 0;
+    }
+}
+
 pub fn register_pcre_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
     let pcre = lua.create_table()?;

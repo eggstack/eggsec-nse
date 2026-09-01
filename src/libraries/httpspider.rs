@@ -18,6 +18,17 @@ static CRAWLERS: LazyLock<Mutex<FxHashMap<String, CrawlerState>>> =
     LazyLock::new(|| Mutex::new(FxHashMap::default()));
 static CRAWLER_COUNTER: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(0));
 
+/// Clear per-run library globals so back-to-back scans do not
+/// leak state (handles, sessions, compiled patterns) between runs.
+pub fn reset_for_run() {
+    if let Ok(mut s) = CRAWLERS.lock() {
+        s.clear();
+    }
+    if let Ok(mut s) = CRAWLER_COUNTER.lock() {
+        *s = 0;
+    }
+}
+
 struct CrawlerState {
     host: String,
     port: u16,

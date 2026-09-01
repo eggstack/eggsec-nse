@@ -3,6 +3,7 @@
 //! Provides low-level socket communication for banner grabbing and data exchange.
 
 use crate::capabilities::NseCapabilityContext;
+use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 use mlua::{Lua, Result as LuaResult, Table};
 use std::io::{Read, Write};
@@ -204,10 +205,9 @@ pub fn register_comm_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                     return Ok(result);
                 }
 
-                let runtime = tokio::runtime::Handle::current();
                 let host_clone = host.clone();
 
-                runtime.block_on(async {
+                block_on_async(async {
                     let result = lua.create_table()?;
                     let connect_result = timeout(
                         Duration::from_secs(5),
@@ -255,10 +255,9 @@ pub fn register_comm_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                     return Ok(result);
                 }
 
-                let runtime = tokio::runtime::Handle::current();
                 let host_clone = host.clone();
 
-                runtime.block_on(async {
+                block_on_async(async {
                     let result = lua.create_table()?;
                     let connect_result = timeout(
                         Duration::from_secs(5),

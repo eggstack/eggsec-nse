@@ -9,6 +9,16 @@ use std::sync::{Mutex, OnceLock};
 
 static HASH_STORE: OnceLock<Mutex<FxHashMap<String, (String, String)>>> = OnceLock::new();
 
+/// Clear per-run library globals so back-to-back scans do not
+/// leak state (handles, sessions, compiled patterns) between runs.
+pub fn reset_for_run() {
+    if let Some(store) = HASH_STORE.get() {
+        if let Ok(mut s) = store.lock() {
+            s.clear();
+        }
+    }
+}
+
 pub fn register_smbauth_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
     let smbauth = lua.create_table()?;

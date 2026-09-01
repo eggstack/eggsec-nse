@@ -60,11 +60,17 @@ fn maybe_network_denied_response(
 }
 
 /// Build a TLS connection to the given host and port.
+/// `insecure_tls` controls whether cert/hostname validation is bypassed;
+/// callers must derive this from the NSE capability context.
 /// Returns `Ok(TlsStream)` on success, or `Err(error_message)` on failure.
-fn tls_connect(host: &str, port: u16) -> Result<native_tls::TlsStream<TcpStream>, String> {
+fn tls_connect(
+    host: &str,
+    port: u16,
+    insecure_tls: bool,
+) -> Result<native_tls::TlsStream<TcpStream>, String> {
     let connector = native_tls::TlsConnector::builder()
-        .danger_accept_invalid_certs(true)
-        .danger_accept_invalid_hostnames(true)
+        .danger_accept_invalid_certs(insecure_tls)
+        .danger_accept_invalid_hostnames(insecure_tls)
         .build()
         .map_err(|e| format!("TLS connector error: {}", e))?;
 
@@ -108,7 +114,7 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
             return Ok(resp);
         }
 
-        let stream = match tls_connect(&host, port) {
+        let stream = match tls_connect(&host, port, cap_ctx.allows_insecure_tls()) {
             Ok(s) => s,
             Err(e) => {
                 let result = lua.create_table()?;
@@ -153,7 +159,7 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
             return Ok(resp);
         }
 
-        let tls_stream = match tls_connect(&host, port) {
+        let tls_stream = match tls_connect(&host, port, cap_ctx.allows_insecure_tls()) {
             Ok(s) => s,
             Err(e) => {
                 let result = lua.create_table()?;
@@ -346,7 +352,7 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
             return Ok(String::new());
         }
 
-        let tls_stream = match tls_connect(&host, port) {
+        let tls_stream = match tls_connect(&host, port, cap_ctx.allows_insecure_tls()) {
             Ok(s) => s,
             Err(_) => return Ok(String::new()),
         };

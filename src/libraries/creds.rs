@@ -12,6 +12,14 @@ use crate::capabilities::NseCapabilityContext;
 static CREDENTIALS_STORE: std::sync::LazyLock<Mutex<FxHashMap<String, Vec<Credential>>>> =
     std::sync::LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
+/// Clear per-run library globals so back-to-back scans do not
+/// leak state (handles, sessions, compiled patterns) between runs.
+pub fn reset_for_run() {
+    if let Ok(mut s) = CREDENTIALS_STORE.lock() {
+        s.clear();
+    }
+}
+
 #[derive(Clone, Debug)]
 struct Credential {
     username: String,

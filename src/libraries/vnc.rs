@@ -10,6 +10,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::capabilities::NseCapabilityContext;
+use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 fn maybe_denied_vnc(
@@ -613,7 +614,7 @@ pub fn register_vnc_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
         }
         let host_clone = host.clone();
 
-        tokio::runtime::Handle::current().block_on(async move {
+        block_on_async(async move {
             let result = tokio::task::spawn_blocking(move || vnc_connect(&host_clone, port)).await;
 
             match result {
@@ -654,7 +655,7 @@ pub fn register_vnc_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
             let host_clone = host.clone();
 
-            tokio::runtime::Handle::current().block_on(async move {
+            block_on_async(async move {
                 let result =
                     tokio::task::spawn_blocking(move || vnc_login(&host_clone, port, &password))
                         .await;

@@ -20,6 +20,17 @@ static CREDS_STORE: std::sync::LazyLock<Mutex<FxHashMap<String, Vec<(String, Str
 static ACCOUNT_STORE: std::sync::LazyLock<Mutex<Vec<(String, String, bool)>>> =
     std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
 
+/// Clear per-run credentials and account lists so back-to-back scans do
+/// not leak credentials into unrelated targets.
+pub fn reset_for_run() {
+    if let Ok(mut store) = CREDS_STORE.lock() {
+        store.clear();
+    }
+    if let Ok(mut store) = ACCOUNT_STORE.lock() {
+        store.clear();
+    }
+}
+
 pub fn register_brute_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let brute = lua.create_table()?;
@@ -278,13 +289,14 @@ pub fn register_brute_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
 
     brute.set(
         "http_auth",
-        lua.create_function(
-            |lua, (host, port, uri, username, password): (String, u16, String, String, String)| {
+        lua.create_function({
+            let cap = capability_ctx.clone();
+            move |lua, (host, port, uri, username, password): (String, u16, String, String, String)| {
                 let result = lua.create_table()?;
 
                 let client = match reqwest::blocking::Client::builder()
                     .timeout(std::time::Duration::from_secs(10))
-                    .danger_accept_invalid_certs(true)
+                    .danger_accept_invalid_certs(cap.allows_insecure_tls())
                     .build()
                 {
                     Ok(c) => c,
@@ -315,8 +327,8 @@ pub fn register_brute_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
                 }
 
                 Ok(result)
-            },
-        )?,
+            }
+        })?,
     )?;
 
     brute.set(

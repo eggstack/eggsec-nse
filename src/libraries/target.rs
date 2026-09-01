@@ -9,6 +9,14 @@ use std::sync::{Arc, Mutex};
 static TARGET_QUEUE: std::sync::LazyLock<Arc<Mutex<Vec<String>>>> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
 
+/// Clear per-run library globals so back-to-back scans do not
+/// leak state (handles, sessions, compiled patterns) between runs.
+pub fn reset_for_run() {
+    if let Ok(mut s) = TARGET_QUEUE.lock() {
+        s.clear();
+    }
+}
+
 pub fn register_target_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
     let target = lua.create_table()?;

@@ -10,6 +10,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::capabilities::NseCapabilityContext;
+use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 const MYSQL_HANDSHAKE_V10: u8 = 10;
@@ -259,7 +260,7 @@ pub fn register_mysql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
         }
         let host_clone = host.clone();
 
-        tokio::runtime::Handle::current().block_on(async move {
+        block_on_async(async move {
             let result =
                 tokio::task::spawn_blocking(move || mysql_handshake(&host_clone, port)).await;
 
@@ -333,7 +334,7 @@ pub fn register_mysql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
             let host_clone = host.clone();
             let user_clone = user.clone();
 
-            tokio::runtime::Handle::current().block_on(async move {
+            block_on_async(async move {
                 let result = tokio::task::spawn_blocking(move || {
                     let mut conn = mysql_handshake(&host_clone, port)?;
                     mysql_login(&mut conn, &user_clone, &pass)
@@ -409,7 +410,7 @@ pub fn register_mysql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
             }
             let host_clone = host.clone();
 
-            tokio::runtime::Handle::current().block_on(async move {
+            block_on_async(async move {
                 let result = tokio::task::spawn_blocking(move || {
                     let mut conn = mysql_handshake(&host_clone, port)?;
                     mysql_query(&mut conn, &query)

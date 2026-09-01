@@ -11,6 +11,7 @@ use std::time::Duration;
 use tokio::net::TcpStream as AsyncTcpStream;
 
 use crate::capabilities::NseCapabilityContext;
+use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 fn maybe_denied_redis(
@@ -119,7 +120,7 @@ pub fn register_redis_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
         }
         let addr = format!("{}:{}", host, port);
 
-        tokio::runtime::Handle::current().block_on(async {
+        block_on_async(async {
             match AsyncTcpStream::connect(&addr).await {
                 Ok(_) => {
                     let r = lua.create_table()?;
@@ -173,7 +174,7 @@ pub fn register_redis_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
             }
             let addr = format!("{}:{}", host, port);
 
-            tokio::runtime::Handle::current().block_on(async {
+            block_on_async(async {
                 let cmd = format!(
                     "*2\r\n$4\r\nAUTH\r\n${}\r\n{}\r\n",
                     password.len(),
@@ -248,7 +249,7 @@ pub fn register_redis_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
         }
         let addr = format!("{}:{}", host, port);
 
-        tokio::runtime::Handle::current().block_on(async {
+        block_on_async(async {
             let cmd = "*1\r\n$4\r\nPING\r\n";
 
             let result = tokio::task::spawn_blocking(move || redis_command(&addr, cmd)).await;
@@ -328,7 +329,7 @@ pub fn register_redis_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
             }
             let addr = format!("{}:{}", host, port);
 
-            tokio::runtime::Handle::current().block_on(async {
+            block_on_async(async {
                 let cmd = format!("*2\r\n$3\r\nGET\r\n${}\r\n{}\r\n", key.len(), key);
 
                 let result = tokio::task::spawn_blocking(move || redis_command(&addr, &cmd)).await;
@@ -414,7 +415,7 @@ pub fn register_redis_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
             }
             let addr = format!("{}:{}", host, port);
 
-            tokio::runtime::Handle::current().block_on(async {
+            block_on_async(async {
                 let cmd = format!(
                     "*3\r\n$3\r\nSET\r\n${}\r\n{}\r\n${}\r\n{}\r\n",
                     key.len(),
@@ -494,7 +495,7 @@ pub fn register_redis_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
         }
         let addr = format!("{}:{}", host, port);
 
-        tokio::runtime::Handle::current().block_on(async {
+        block_on_async(async {
             let cmd = "*1\r\n$4\r\nINFO\r\n";
 
             let result = tokio::task::spawn_blocking(move || redis_command(&addr, cmd)).await;

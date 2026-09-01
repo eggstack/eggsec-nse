@@ -14,6 +14,17 @@ static USERNAMES: std::sync::LazyLock<Mutex<Vec<String>>> =
 static PASSWORDS: std::sync::LazyLock<Mutex<Vec<String>>> =
     std::sync::LazyLock::new(|| Mutex::new(get_default_passwords()));
 
+/// Clear per-run library globals so back-to-back scans do not
+/// leak state (handles, sessions, compiled patterns) between runs.
+pub fn reset_for_run() {
+    if let Ok(mut s) = USERNAMES.lock() {
+        s.clear();
+    }
+    if let Ok(mut s) = PASSWORDS.lock() {
+        s.clear();
+    }
+}
+
 fn get_default_usernames() -> Vec<String> {
     vec![
         "root".to_string(),

@@ -264,7 +264,7 @@ impl NseCapabilityContext {
         match request.kind {
             NseCapabilityKind::NetworkTcp | NseCapabilityKind::NetworkUdp => {
                 if let Some(max) = self.limits.max_network_operations {
-                    let current = self.counters.network_operations.load(Ordering::Relaxed);
+                    let current = self.counters.network_operations.load(Ordering::Acquire);
                     if current >= max {
                         return Err(format!(
                             "Network operation limit exceeded: {}/{}",
@@ -274,7 +274,7 @@ impl NseCapabilityContext {
                 }
                 if let Some(bytes) = request.bytes_hint {
                     if let Some(max) = self.limits.max_network_bytes_read {
-                        let current = self.counters.network_bytes_read.load(Ordering::Relaxed);
+                        let current = self.counters.network_bytes_read.load(Ordering::Acquire);
                         if current + bytes > max {
                             return Err(format!(
                                 "Network bytes read limit exceeded: {}/{}",
@@ -287,7 +287,7 @@ impl NseCapabilityContext {
             }
             NseCapabilityKind::FilesystemRead | NseCapabilityKind::FilesystemWrite => {
                 if let Some(max) = self.limits.max_filesystem_operations {
-                    let current = self.counters.filesystem_operations.load(Ordering::Relaxed);
+                    let current = self.counters.filesystem_operations.load(Ordering::Acquire);
                     if current >= max {
                         return Err(format!(
                             "Filesystem operation limit exceeded: {}/{}",
@@ -299,7 +299,7 @@ impl NseCapabilityContext {
                     if let Some(bytes) = request.bytes_hint {
                         if let Some(max) = self.limits.max_filesystem_bytes_read {
                             let current =
-                                self.counters.filesystem_bytes_read.load(Ordering::Relaxed);
+                                self.counters.filesystem_bytes_read.load(Ordering::Acquire);
                             if current + bytes > max {
                                 return Err(format!(
                                     "Filesystem bytes read limit exceeded: {}/{}",
@@ -329,22 +329,22 @@ impl NseCapabilityContext {
             NseCapabilityKind::NetworkTcp | NseCapabilityKind::NetworkUdp => {
                 self.counters
                     .network_operations
-                    .fetch_add(1, Ordering::Relaxed);
+                    .fetch_add(1, Ordering::AcqRel);
                 if let Some(bytes) = result_bytes {
                     self.counters
                         .network_bytes_read
-                        .fetch_add(bytes, Ordering::Relaxed);
+                        .fetch_add(bytes, Ordering::AcqRel);
                 }
             }
             NseCapabilityKind::FilesystemRead | NseCapabilityKind::FilesystemWrite => {
                 self.counters
                     .filesystem_operations
-                    .fetch_add(1, Ordering::Relaxed);
+                    .fetch_add(1, Ordering::AcqRel);
                 if request.kind == NseCapabilityKind::FilesystemRead {
                     if let Some(bytes) = result_bytes {
                         self.counters
                             .filesystem_bytes_read
-                            .fetch_add(bytes, Ordering::Relaxed);
+                            .fetch_add(bytes, Ordering::AcqRel);
                     }
                 }
             }
@@ -840,8 +840,8 @@ mod tests {
         ctx.after_blocking_operation(&request, Some(1024));
 
         let counters = &ctx.counters;
-        assert_eq!(counters.network_operations.load(Ordering::Relaxed), 1);
-        assert_eq!(counters.network_bytes_read.load(Ordering::Relaxed), 1024);
+        assert_eq!(counters.network_operations.load(Ordering::Acquire), 1);
+        assert_eq!(counters.network_bytes_read.load(Ordering::Acquire), 1024);
     }
 
     #[test]

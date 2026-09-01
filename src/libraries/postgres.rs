@@ -10,6 +10,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::capabilities::NseCapabilityContext;
+use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 fn maybe_denied_postgres(
@@ -389,7 +390,7 @@ pub fn register_postgres_library(
         }
         let host_clone = host.clone();
 
-        tokio::runtime::Handle::current().block_on(async move {
+        block_on_async(async move {
             let result = tokio::task::spawn_blocking(move || pg_connect(&host_clone, port)).await;
 
             match result {
@@ -430,7 +431,7 @@ pub fn register_postgres_library(
             let user_clone = user.clone();
             let db = "postgres".to_string();
 
-            tokio::runtime::Handle::current().block_on(async move {
+            block_on_async(async move {
                 let result = tokio::task::spawn_blocking(move || {
                     let mut conn = pg_connect(&host_clone, port)?;
                     pg_login(&mut conn, &user_clone, &password, &db)
@@ -472,7 +473,7 @@ pub fn register_postgres_library(
             }
             let host_clone = host.clone();
 
-            tokio::runtime::Handle::current().block_on(async move {
+            block_on_async(async move {
                 let result = tokio::task::spawn_blocking(move || {
                     let mut conn = pg_connect(&host_clone, port)?;
                     pg_query(&mut conn, &query)

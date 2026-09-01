@@ -261,7 +261,7 @@ impl ExecutorCore {
 
         // Check output size limit
         if let Some(max_output) = self.limits.max_output_bytes {
-            let current = self.resource_counters.output_bytes.load(Ordering::Relaxed) as usize;
+            let current = self.resource_counters.output_bytes.load(Ordering::Acquire) as usize;
             if current + output_bytes > max_output {
                 *self.limit_violation.lock() = Some(NseLimitViolation::OutputLimitExceeded);
                 return Err(format!(
@@ -303,6 +303,7 @@ impl ExecutorCore {
 
     pub(crate) fn clear_library_reports(&self) {
         self.clear_required_modules();
+        reset_per_run_globals();
     }
 
     pub fn get_sandbox_metrics(&self) -> SandboxMetrics {
@@ -435,7 +436,7 @@ impl ExecutorCore {
         let violation = self.limit_violation.clone();
 
         self.lua.set_interrupt(move |_lua| {
-            let count = instruction_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            let count = instruction_counter.fetch_add(1, Ordering::AcqRel) + 1;
 
             // Check cancellation
             if cancellation.is_cancelled() {
@@ -473,7 +474,7 @@ impl ExecutorCore {
     pub fn execution_stats(&self) -> NseExecutionStats {
         let guard = self.execution_start.lock();
         let elapsed = (*guard).map(|s| s.elapsed()).unwrap_or_default();
-        let instructions = self.lua_instruction_count.load(Ordering::Relaxed);
+        let instructions = self.lua_instruction_count.load(Ordering::Acquire);
         let mut stats = self.resource_counters.snapshot(elapsed, instructions);
         stats.limit_violation = self.limit_violation.lock().clone();
         stats
@@ -1045,7 +1046,7 @@ impl ExecutorCore {
         crate::libraries::ipmi::register_ipmi_library(&self.lua)?;
         crate::libraries::irc::register_irc_library(&self.lua)?;
         crate::libraries::versant::register_versant_library(&self.lua)?;
-        crate::libraries::omp2::register_omp2_library(&self.lua)?;
+        crate::libraries::omp2::register_omp2_library(&self.lua, &self.capability_context)?;
         crate::libraries::gps::register_gps_library(&self.lua)?;
         crate::libraries::mobileme::register_mobileme_library(&self.lua)?;
         crate::libraries::ls::register_ls_library(&self.lua, &self.capability_context)?;
@@ -1317,6 +1318,25 @@ pub fn default_module_policy() -> NseModulePolicy {
     }
 }
 
+/// Reset all per-run library globals so back-to-back `run_script` calls do
+/// not leak credentials, file handles, compiled regexes, or other scan state
+/// across scans. Each library module is responsible for exposing a public
+/// `reset_for_run` function that drops or clears its global state.
+fn reset_per_run_globals() {
+    crate::libraries::brute::reset_for_run();
+    crate::libraries::io::reset_for_run();
+    crate::libraries::httpspider::reset_for_run();
+    crate::libraries::smb::reset_for_run();
+    crate::libraries::pcre::reset_for_run();
+    crate::libraries::re::reset_for_run();
+    crate::libraries::openssl::reset_for_run();
+    crate::libraries::creds::reset_for_run();
+    crate::libraries::target::reset_for_run();
+    crate::libraries::unpwdb::reset_for_run();
+    crate::libraries::unittest::reset_for_run();
+    crate::libraries::smbauth::reset_for_run();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1332,5 +1352,19 @@ mod tests {
         let mut core = ExecutorCore::new().unwrap();
         assert!(core.set_target("example.com").is_ok());
         assert_eq!(core.target(), "example.com");
+    }
+
+    #[test]
+    fn test_reset_per_run_globals_does_not_panic() {
+        // reset_per_run_globals must be safe to invoke even when no library
+        // has been used yet, and must not panic on multiple invocations.
+        reset_per_run_globals();
+        reset_per_run_globals();
+    }
+
+    #[test]
+    fn test_clear_library_reports_resets_globals() {
+        let core = ExecutorCore::new().unwrap();
+        core.clear_library_reports();
     }
 }

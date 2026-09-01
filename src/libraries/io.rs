@@ -31,6 +31,17 @@ static FILE_HANDLES: std::sync::LazyLock<Mutex<FxHashMap<i32, FileHandle>>> =
 
 static NEXT_FD: std::sync::LazyLock<Mutex<i32>> = std::sync::LazyLock::new(|| Mutex::new(100));
 
+/// Clear per-run library globals so back-to-back scans do not
+/// leak state (handles, sessions, compiled patterns) between runs.
+pub fn reset_for_run() {
+    if let Ok(mut s) = FILE_HANDLES.lock() {
+        s.clear();
+    }
+    if let Ok(mut s) = NEXT_FD.lock() {
+        *s = 100;
+    }
+}
+
 pub static IO_SANDBOX_VIOLATIONS: AtomicUsize = AtomicUsize::new(0);
 
 pub fn get_io_sandbox_metrics() -> (usize, usize) {

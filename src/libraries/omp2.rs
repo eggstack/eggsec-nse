@@ -5,7 +5,9 @@
 
 use mlua::{Lua, Result as LuaResult, Table};
 
-pub fn register_omp2_library(lua: &Lua) -> LuaResult<()> {
+use crate::capabilities::NseCapabilityContext;
+
+pub fn register_omp2_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
     let globals = lua.globals();
     let omp2 = lua.create_table()?;
 
@@ -19,15 +21,16 @@ pub fn register_omp2_library(lua: &Lua) -> LuaResult<()> {
     })?;
     omp2.set("Session", new_fn)?;
 
+    let insecure_tls = capability_ctx.allows_insecure_tls();
     let connect_fn = lua.create_function(
-        |lua, (host, port, _user, _password): (String, u16, String, String)| {
+        move |lua, (host, port, _user, _password): (String, u16, String, String)| {
             let result = lua.create_table()?;
 
             let addr = format!("{}:{}", host, port);
 
             match native_tls::TlsConnector::builder()
-                .danger_accept_invalid_certs(true)
-                .danger_accept_invalid_hostnames(true)
+                .danger_accept_invalid_certs(insecure_tls)
+                .danger_accept_invalid_hostnames(insecure_tls)
                 .build()
             {
                 Ok(_connector) => {

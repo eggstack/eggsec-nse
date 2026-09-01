@@ -16,6 +16,14 @@ use crate::wrappers;
 static SSL_SESSIONS: std::sync::LazyLock<Mutex<FxHashMap<String, TlsConnector>>> =
     std::sync::LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
+/// Clear per-run library globals so back-to-back scans do not
+/// leak state (handles, sessions, compiled patterns) between runs.
+pub fn reset_for_run() {
+    if let Ok(mut s) = SSL_SESSIONS.lock() {
+        s.clear();
+    }
+}
+
 fn create_ssl_connection(
     host: &str,
     port: u16,

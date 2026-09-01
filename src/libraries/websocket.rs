@@ -3,6 +3,7 @@
 //! WebSocket protocol support for NSE scripts.
 //! Includes both blocking and async implementations.
 
+use crate::libraries::runtime_bridge::block_on_async;
 use mlua::{Lua, Result as LuaResult};
 use tokio::net::TcpStream as AsyncTcpStream;
 
@@ -64,7 +65,7 @@ pub fn register_websocket_library(lua: &Lua) -> LuaResult<()> {
         lua.create_function(|lua, (host, port, path): (String, u16, String)| {
             let addr = format!("{}:{}", host, port);
 
-            tokio::runtime::Handle::current().block_on(async {
+            block_on_async(async {
                 match AsyncTcpStream::connect(&addr).await {
                     Ok(_stream) => {
                         let r = lua.create_table()?;

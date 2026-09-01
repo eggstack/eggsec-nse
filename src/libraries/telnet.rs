@@ -10,6 +10,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream as AsyncTcpStream;
+use crate::libraries::runtime_bridge::block_on_async;
 
 pub fn register_telnet_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
@@ -135,7 +136,7 @@ pub fn register_telnet_library(lua: &Lua) -> LuaResult<()> {
     let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
         let addr = format!("{}:{}", host, port);
 
-        tokio::runtime::Handle::current().block_on(async {
+        block_on_async(async {
             match AsyncTcpStream::connect(&addr).await {
                 Ok(mut stream) => {
                     let mut buffer = vec![0u8; 4096];

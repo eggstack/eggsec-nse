@@ -3,6 +3,9 @@
 //! These modules provide NSE-compatible APIs by wrapping existing Eggsec functionality.
 
 #[cfg(feature = "nse")]
+pub(crate) mod runtime_bridge;
+
+#[cfg(feature = "nse")]
 pub mod afp;
 #[cfg(feature = "nse")]
 pub mod ajp;

@@ -287,7 +287,7 @@ pub fn register_ssh2_library(lua: &Lua) -> LuaResult<()> {
         let host_clone = host.clone();
         let port = port.unwrap_or(22);
 
-        tokio::runtime::Handle::current().block_on(async {
+        block_on_async(async {
             let result =
                 tokio::task::spawn_blocking(move || SshSession::connect(&host_clone, port)).await;
 
@@ -317,6 +317,7 @@ pub fn register_ssh2_library(lua: &Lua) -> LuaResult<()> {
     Ok(())
 }
 
+use crate::libraries::runtime_bridge::block_on_async;
 #[cfg(not(feature = "nse-ssh2"))]
 use mlua::{Lua, Result as LuaResult};
 #[cfg(not(feature = "nse-ssh2"))]
@@ -379,7 +380,7 @@ pub fn register_ssh2_library(lua: &Lua) -> LuaResult<()> {
             let port = port.unwrap_or(22);
             let host_for_blocking = host_clone.clone();
 
-            tokio::runtime::Handle::current().block_on(async {
+            block_on_async(async {
                 let result = tokio::task::spawn_blocking(move || {
                     use std::net::TcpStream;
                     use std::time::Duration;

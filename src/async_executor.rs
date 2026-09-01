@@ -71,12 +71,15 @@ impl AsyncNseExecutor {
     /// This constructor hardcodes `ManualPermissive` profile kind and
     /// `AllowAllManual` network policy in the capability context. It is
     /// intended for manual CLI/TUI surfaces where the operator is trusted
-    /// to scope behavior interactively.
+    /// to scope behavior interactively. Marked `#[doc(hidden)]` to
+    /// discourage future automated callers from routing around the profile
+    /// engine.
     ///
     /// Automated surfaces (MCP, agent, REST, daemon, CI) MUST use
     /// [`AsyncNseExecutor::with_full_policy`] or
     /// [`AsyncNseExecutor::with_profile`] so the capability engine enforces
     /// the resolved profile's `profile_kind` and `network_policy`.
+    #[doc(hidden)]
     pub fn with_policy(
         sandbox: crate::SandboxConfig,
         limits: NseExecutionLimits,

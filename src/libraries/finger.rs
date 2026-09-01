@@ -3,6 +3,7 @@
 //! Finger protocol support for NSE scripts.
 //! Includes both blocking and async implementations.
 
+use crate::libraries::runtime_bridge::block_on_async;
 use mlua::{Lua, Result as LuaResult};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -109,7 +110,7 @@ pub fn register_finger_library(lua: &Lua) -> LuaResult<()> {
     let async_query_fn = lua.create_function(|lua, (host, user): (String, String)| {
         let addr = format!("{}:79", host);
 
-        tokio::runtime::Handle::current().block_on(async {
+        block_on_async(async {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 AsyncTcpStream::connect(&addr),

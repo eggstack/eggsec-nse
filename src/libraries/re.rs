@@ -11,6 +11,14 @@ use std::sync::Mutex;
 static COMPILED_PATTERNS: std::sync::LazyLock<Mutex<FxHashMap<String, Regex>>> =
     std::sync::LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
+/// Clear per-run library globals so back-to-back scans do not
+/// leak state (handles, sessions, compiled patterns) between runs.
+pub fn reset_for_run() {
+    if let Ok(mut s) = COMPILED_PATTERNS.lock() {
+        s.clear();
+    }
+}
+
 fn parse_options(options: &str) -> (bool, bool) {
     let mut case_insensitive = false;
     let mut multiline = false;

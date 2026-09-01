@@ -3,6 +3,7 @@
 //! WHOIS protocol support for NSE scripts.
 //! Includes both blocking and async implementations.
 
+use crate::libraries::runtime_bridge::block_on_async;
 use mlua::{Lua, Result as LuaResult};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -79,7 +80,7 @@ pub fn register_whois_library(lua: &Lua) -> LuaResult<()> {
     let async_whois_fn = lua.create_function(|lua, (host, query): (String, String)| {
         let addr = format!("{}:43", host);
 
-        tokio::runtime::Handle::current().block_on(async {
+        block_on_async(async {
             match AsyncTcpStream::connect(&addr).await {
                 Ok(mut stream) => {
                     let query_with_newline = format!("{}\r\n", query);

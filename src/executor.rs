@@ -72,7 +72,9 @@ impl NseExecutor {
     /// Automated surfaces (MCP, agent, REST, daemon, CI) MUST use
     /// [`NseExecutor::with_full_policy`] or [`NseExecutor::with_profile`]
     /// so the capability engine enforces the resolved profile's
-    /// `profile_kind` and `network_policy`.
+    /// `profile_kind` and `network_policy`. Marked `#[doc(hidden)]` to
+    /// discourage future automated callers.
+    #[doc(hidden)]
     pub fn with_policy(
         sandbox: crate::SandboxConfig,
         limits: NseExecutionLimits,

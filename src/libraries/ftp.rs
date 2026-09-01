@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream as AsyncTcpStream;
 
 use crate::capabilities::NseCapabilityContext;
+use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 fn ftp_send_command(stream: &mut TcpStream, cmd: &str) -> std::io::Result<String> {
@@ -1263,7 +1264,7 @@ pub fn register_ftp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
         }
         let addr = format!("{}:{}", host, port);
 
-        tokio::runtime::Handle::current().block_on(async {
+        block_on_async(async {
             match AsyncTcpStream::connect(&addr).await {
                 Ok(mut stream) => {
                     let mut buffer = vec![0u8; 4096];
@@ -1292,7 +1293,7 @@ pub fn register_ftp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
             let addr = format!("{}:{}", host, port);
 
-            tokio::runtime::Handle::current().block_on(async {
+            block_on_async(async {
                 match AsyncTcpStream::connect(&addr).await {
                     Ok(mut stream) => {
                         if stream.read(&mut vec![0u8; 4096]).await.is_err() {
