@@ -260,26 +260,41 @@ fn decode_oid(bytes: &[u8], start: usize) -> (String, usize) {
 fn decode_snmp_response(data: &[u8]) -> Result<Vec<(String, String, String)>, String> {
     let mut results = Vec::new();
 
-    let mut pos = 2;
     if data.len() < 2 {
         return Err("Response too short".to_string());
     }
 
+    let mut pos = 2;
     if data[1] >= 0x81 {
         pos = 2 + (data[1] - 0x80) as usize;
     }
 
+    macro_rules! need {
+        ($n:expr) => {
+            if pos + $n > data.len() {
+                return Err("Truncated SNMP response".to_string());
+            }
+        };
+    }
+
+    need!(2);
     pos += 2;
+    need!(1);
     let version_len = data[pos] as usize;
     pos += version_len + 1;
 
+    need!(2);
     pos += 2;
+    need!(1);
     let community_len = data[pos] as usize;
     pos += community_len + 1;
 
+    need!(1);
     pos += 1;
+    need!(1);
     let _pdu_len = if data[pos] >= 0x81 {
         let num_bytes = (data[pos] - 0x80) as usize;
+        need!(num_bytes);
         let mut len = 0usize;
         for i in 1..=num_bytes {
             len = (len << 8) | data[pos + i] as usize;
@@ -292,13 +307,19 @@ fn decode_snmp_response(data: &[u8]) -> Result<Vec<(String, String, String)>, St
         len
     };
 
+    need!(2);
     pos += 2 + data[pos + 1] as usize;
+    need!(2);
     pos += 2 + data[pos + 1] as usize;
+    need!(2);
     pos += 2 + data[pos + 1] as usize;
 
+    need!(1);
     pos += 1;
+    need!(1);
     let varbind_list_len = if data[pos] >= 0x81 {
         let num_bytes = (data[pos] - 0x80) as usize;
+        need!(num_bytes);
         let mut len = 0usize;
         for i in 1..=num_bytes {
             len = (len << 8) | data[pos + i] as usize;
@@ -316,6 +337,9 @@ fn decode_snmp_response(data: &[u8]) -> Result<Vec<(String, String, String)>, St
         pos += 1;
         let vb_len = if pos < data.len() && data[pos] >= 0x81 {
             let num_bytes = (data[pos] - 0x80) as usize;
+            if pos + num_bytes >= data.len() {
+                break;
+            }
             let mut len = 0usize;
             for i in 1..=num_bytes {
                 len = (len << 8) | data[pos + i] as usize;
@@ -974,4 +998,34 @@ pub fn register_snmp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
     globals.set("snmp", snmp)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_snmp_response;
+
+    #[test]
+    fn decode_snmp_response_rejects_too_short() {
+        assert!(decode_snmp_response(&[]).is_err());
+        assert!(decode_snmp_response(&[0x30]).is_err());
+    }
+
+    #[test]
+    fn decode_snmp_response_rejects_truncated() {
+        for len in 2..=20 {
+            let buf = vec![0x30u8; len];
+            let res = decode_snmp_response(&buf);
+            assert!(res.is_err(), "expected err for truncated length {}", len);
+        }
+    }
+
+    #[test]
+    fn decode_snmp_response_rejects_adversarial_with_long_len_field() {
+        let mut buf = vec![0x30u8; 16];
+        buf[1] = 0x82;
+        buf[2] = 0xff;
+        buf[3] = 0xff;
+        let res = decode_snmp_response(&buf);
+        assert!(res.is_err(), "expected err for forged long-form length");
+    }
 }

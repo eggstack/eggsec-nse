@@ -28,7 +28,16 @@ where
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .expect("failed to construct dedicated runtime for NSE async bridge");
+                .unwrap_or_else(|e| {
+                    tracing::error!(
+                        "failed to construct dedicated runtime for NSE async bridge: {}",
+                        e
+                    );
+                    panic!(
+                        "failed to construct dedicated runtime for NSE async bridge: {}",
+                        e
+                    );
+                });
             rt.block_on(fut)
         }
     }

@@ -417,8 +417,10 @@ fn decode_ldap_search_response(
     }
 
     if pos < data.len() && data[pos] == 0x02 {
-        let len = data[pos + 1] as usize;
-        pos += 2 + len;
+        if pos + 1 < data.len() {
+            let len = data[pos + 1] as usize;
+            pos += 2 + len;
+        }
     }
 
     while pos < data.len() {
@@ -446,11 +448,13 @@ fn decode_ldap_search_response(
 
             let mut dn = String::new();
             if pos < entry_end && data[pos] == 0x04 {
-                let dn_len = data[pos + 1] as usize;
-                pos += 2;
-                if pos + dn_len <= entry_end {
-                    dn = String::from_utf8_lossy(&data[pos..pos + dn_len]).to_string();
-                    pos += dn_len;
+                if pos + 1 < entry_end {
+                    let dn_len = data[pos + 1] as usize;
+                    pos += 2;
+                    if pos + dn_len <= entry_end {
+                        dn = String::from_utf8_lossy(&data[pos..pos + dn_len]).to_string();
+                        pos += dn_len;
+                    }
                 }
             }
 
@@ -503,26 +507,32 @@ fn decode_ldap_search_response(
 
                         let mut attr_name = String::new();
                         if pos < attr_end && data[pos] == 0x04 {
-                            let name_len = data[pos + 1] as usize;
-                            pos += 2;
-                            if pos + name_len <= attr_end {
-                                attr_name =
-                                    String::from_utf8_lossy(&data[pos..pos + name_len]).to_string();
-                                pos += name_len;
+                            if pos + 1 < attr_end {
+                                let name_len = data[pos + 1] as usize;
+                                pos += 2;
+                                if pos + name_len <= attr_end {
+                                    attr_name = String::from_utf8_lossy(&data[pos..pos + name_len])
+                                        .to_string();
+                                    pos += name_len;
+                                }
                             }
                         }
 
                         let mut values = Vec::new();
                         while pos < attr_end {
                             if data[pos] == 0x04 {
-                                let val_len = data[pos + 1] as usize;
-                                pos += 2;
-                                if pos + val_len <= attr_end {
-                                    values.push(
-                                        String::from_utf8_lossy(&data[pos..pos + val_len])
-                                            .to_string(),
-                                    );
-                                    pos += val_len;
+                                if pos + 1 < attr_end {
+                                    let val_len = data[pos + 1] as usize;
+                                    pos += 2;
+                                    if pos + val_len <= attr_end {
+                                        values.push(
+                                            String::from_utf8_lossy(&data[pos..pos + val_len])
+                                                .to_string(),
+                                        );
+                                        pos += val_len;
+                                    }
+                                } else {
+                                    break;
                                 }
                             } else {
                                 break;

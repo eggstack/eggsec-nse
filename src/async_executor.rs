@@ -259,15 +259,3 @@ impl Drop for AsyncNseExecutor {
         }
     }
 }
-
-impl Default for AsyncNseExecutor {
-    fn default() -> Self {
-        match Self::new() {
-            Ok(executor) => executor,
-            Err(e) => {
-                tracing::error!("Lua VM initialization failed: {}", e);
-                panic!("Lua VM initialization failed: {}", e);
-            }
-        }
-    }
-}

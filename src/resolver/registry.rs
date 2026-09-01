@@ -608,7 +608,7 @@ pub fn libraries_with_side_effects() -> Vec<&'static NseLibraryDescriptor> {
 /// the list of side effects that sandbox policy must account for.
 pub fn sandbox_policy_for_library(name: &str) -> Option<&'static [NseSandboxSideEffect]> {
     find_library(name).and_then(|lib| {
-        if lib.sandbox_side_effects == &[NseSandboxSideEffect::None] {
+        if lib.sandbox_side_effects == [NseSandboxSideEffect::None] {
             None
         } else {
             Some(lib.sandbox_side_effects)

@@ -186,7 +186,8 @@ pub fn register_brute_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
             let max_len = options
                 .as_ref()
                 .and_then(|o| o.get::<u32>("max").ok())
-                .unwrap_or(6);
+                .unwrap_or(6)
+                .min(9);
 
             for len in min_len..=max_len {
                 let count = 10u32.pow(len);
