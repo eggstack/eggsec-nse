@@ -165,11 +165,22 @@ pub fn register_comm_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                     Ok(c) => match c.get(&url).send() {
                         Ok(resp) => {
                             let status = resp.status().as_u16();
-                            let body = resp.text().unwrap_or_default();
-
                             let result = lua.create_table()?;
                             result.set("status", status as i32)?;
-                            result.set("data", body)?;
+                            match resp.text() {
+                                Ok(body) => {
+                                    result.set("data", body)?;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "comm.tryssl body read failed for {}: {}",
+                                        url,
+                                        e
+                                    );
+                                    result.set("data", "")?;
+                                    result.set("error", format!("body read failed: {}", e))?;
+                                }
+                            }
                             Ok(result)
                         }
                         Err(e) => {

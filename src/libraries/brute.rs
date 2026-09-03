@@ -241,10 +241,11 @@ pub fn register_brute_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
         lua.create_function(|lua, (_driver, options): (Table, Option<Table>)| {
             let iterator = lua.create_table()?;
             iterator.set("driver", "libcurl")?;
-            iterator.set(
-                "options",
-                options.unwrap_or_else(|| fallback_lua_table(lua)),
-            )?;
+            let options_table = match options {
+                Some(t) => t,
+                None => fallback_lua_table(lua)?,
+            };
+            iterator.set("options", options_table)?;
             Ok(iterator)
         })?,
     )?;

@@ -186,10 +186,20 @@ pub fn register_bjnp_library(lua: &Lua) -> LuaResult<()> {
                         }
                     };
 
-                let content = std::fs::read(&filename).unwrap_or_default();
+                let content = match std::fs::read(&filename) {
+                    Ok(content) => content,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set(
+                            "error",
+                            format!("Could not read file '{}': {}", filename, e),
+                        )?;
+                        return Ok(result);
+                    }
+                };
                 if content.is_empty() {
                     result.set("status", "error")?;
-                    result.set("error", "Could not read file")?;
+                    result.set("error", format!("File '{}' is empty", filename))?;
                     return Ok(result);
                 }
 

@@ -11,20 +11,30 @@ use std::time::Duration;
 
 static DNSBL_RESOLVER: OnceLock<TokioResolver> = OnceLock::new();
 
-fn get_resolver() -> &'static TokioResolver {
-    DNSBL_RESOLVER.get_or_init(|| {
-        let config = ResolverConfig::default();
+fn get_resolver() -> Result<&'static TokioResolver, String> {
+    if let Some(resolver) = DNSBL_RESOLVER.get() {
+        return Ok(resolver);
+    }
+    let resolver = TokioResolver::builder_with_config(
+        ResolverConfig::default(),
+        hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
+    )
+    .with_options({
         let mut opts = ResolverOpts::default();
         opts.timeout = Duration::from_secs(3);
         opts.attempts = 1;
-        TokioResolver::builder_with_config(
-            config,
-            hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
-        )
-        .with_options(opts)
-        .build()
-        .expect("failed to initialize DNSBL resolver")
+        opts
     })
+    .build()
+    .map_err(|e| {
+        tracing::warn!("failed to initialize DNSBL resolver: {}", e);
+        e.to_string()
+    })?;
+    // If another thread won the init race, drop ours and use theirs.
+    let _ = DNSBL_RESOLVER.set(resolver);
+    DNSBL_RESOLVER
+        .get()
+        .ok_or_else(|| "DNSBL resolver unavailable after init".to_string())
 }
 
 static DNSBL_SERVERS: &[&str] = &[
@@ -257,7 +267,18 @@ pub fn register_dnsbl_library(lua: &Lua) -> LuaResult<()> {
                 format!("{}.zen.spamhaus.org", reverse_ip(&ip))
             };
 
-            match get_resolver().lookup_ip(&target).await {
+            let resolver = match get_resolver() {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!("DNSBL resolver unavailable: {}", e);
+                    result.set("listed", false)?;
+                    result.set("ip", ip)?;
+                    result.set("categories", lua.create_table()?)?;
+                    result.set("details", format!("Resolver unavailable: {}", e))?;
+                    return Ok(result);
+                }
+            };
+            match resolver.lookup_ip(&target).await {
                 Ok(lookup) => {
                     let mut listed = false;
                     let mut categories = Vec::new();

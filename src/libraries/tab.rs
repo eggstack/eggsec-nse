@@ -4,7 +4,7 @@
 
 use mlua::{Lua, Result as LuaResult, Table};
 
-use super::helpers::fallback_lua_table;
+use super::helpers::or_fallback_table;
 
 pub fn register_tab_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
@@ -24,7 +24,7 @@ pub fn register_tab_library(lua: &Lua) -> LuaResult<()> {
     tab.set(
         "add_row",
         lua.create_function(|lua, (t, row): (Table, Table)| {
-            let rows: Table = t.get("_rows").unwrap_or_else(|_| fallback_lua_table(lua));
+            let rows: Table = or_fallback_table(t.get("_rows"), lua)?;
             let row_num = rows.len().unwrap_or(0) + 1;
             rows.set(row_num, row)?;
             t.set("_rows", rows)?;
@@ -36,7 +36,7 @@ pub fn register_tab_library(lua: &Lua) -> LuaResult<()> {
     tab.set(
         "add_separator",
         lua.create_function(|lua, t: Table| {
-            let rows: Table = t.get("_rows").unwrap_or_else(|_| fallback_lua_table(lua));
+            let rows: Table = or_fallback_table(t.get("_rows"), lua)?;
             let row_num = rows.len().unwrap_or(0) + 1;
 
             let sep = lua.create_table()?;
@@ -67,7 +67,7 @@ pub fn register_tab_library(lua: &Lua) -> LuaResult<()> {
     tab.set(
         "size",
         lua.create_function(|lua, t: Table| {
-            let rows: Table = t.get("_rows").unwrap_or_else(|_| fallback_lua_table(lua));
+            let rows: Table = or_fallback_table(t.get("_rows"), lua)?;
             let len = rows.len().unwrap_or(0) as i32;
             Ok(len)
         })?,
@@ -76,7 +76,7 @@ pub fn register_tab_library(lua: &Lua) -> LuaResult<()> {
     tab.set(
         "dump",
         lua.create_function(|lua, t: Table| {
-            let rows: Table = t.get("_rows").unwrap_or_else(|_| fallback_lua_table(lua));
+            let rows: Table = or_fallback_table(t.get("_rows"), lua)?;
             let indent: i32 = t.get("_indent").unwrap_or(0);
 
             let indent_str = " ".repeat(indent as usize);

@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use std::sync::RwLock;
 use std::time::Duration;
 
-use super::helpers::fallback_lua_table;
+use super::helpers::{fallback_lua_table, or_fallback_table};
 use crate::capabilities::NseCapabilityContext;
 
 struct ConnectionEntry {
@@ -137,13 +137,16 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         lua.create_function(|lua, ()| {
             let globals = lua.globals();
             let nmap_tbl: Table = globals.get("nmap")?;
-            let registry: Table = nmap_tbl.get("registry").unwrap_or_else(|_| {
-                let t = fallback_lua_table(lua);
-                if let Err(e) = nmap_tbl.set("registry", t.clone()) {
-                    tracing::warn!("nmap: failed to set initial registry: {}", e);
+            let registry: Table = match nmap_tbl.get("registry") {
+                Ok(t) => t,
+                Err(_) => {
+                    let t = fallback_lua_table(lua)?;
+                    if let Err(e) = nmap_tbl.set("registry", t.clone()) {
+                        tracing::warn!("nmap: failed to set initial registry: {}", e);
+                    }
+                    t
                 }
-                t
-            });
+            };
             Ok(registry)
         })?,
     )?;
@@ -154,12 +157,8 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "get_hostname",
         lua.create_function(|lua, host: Option<String>| {
             let globals = lua.globals();
-            let nmap_tbl: Table = globals
-                .get("nmap")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
-            let hostinfo: Table = nmap_tbl
-                .get("_hostinfo")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
+            let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), lua)?;
+            let hostinfo: Table = or_fallback_table(nmap_tbl.get("_hostinfo"), lua)?;
 
             if let Some(h) = host {
                 hostinfo
@@ -177,12 +176,8 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "get_host_ip",
         lua.create_function(|lua, _host: Option<String>| {
             let globals = lua.globals();
-            let nmap_tbl: Table = globals
-                .get("nmap")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
-            let hostinfo: Table = nmap_tbl
-                .get("_hostinfo")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
+            let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), lua)?;
+            let hostinfo: Table = or_fallback_table(nmap_tbl.get("_hostinfo"), lua)?;
             hostinfo.get::<String>("ip").or_else(|_| Ok("".to_string()))
         })?,
     )?;
@@ -191,12 +186,8 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "get_port_state",
         lua.create_function(|lua, (host, port): (Option<String>, u16)| {
             let globals = lua.globals();
-            let nmap_tbl: Table = globals
-                .get("nmap")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
-            let ports: Table = nmap_tbl
-                .get("_ports")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
+            let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), lua)?;
+            let ports: Table = or_fallback_table(nmap_tbl.get("_ports"), lua)?;
 
             let key = if let Some(ref h) = host {
                 format!("{}.{}.tcp", h, port)
@@ -220,12 +211,8 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         |lua, args: (Option<String>, Option<u16>, Option<String>, Option<String>)| {
             let (host, port, protocol, state) = args;
             let globals = lua.globals();
-            let nmap_tbl: Table = globals
-                .get("nmap")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
-            let ports: Table = nmap_tbl
-                .get("_ports")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
+            let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), lua)?;
+            let ports: Table = or_fallback_table(nmap_tbl.get("_ports"), lua)?;
 
             let results = lua.create_table()?;
             let mut idx = 1;
@@ -261,12 +248,8 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "set_port_state",
         lua.create_function(|lua, (host, port, state): (Option<String>, u16, String)| {
             let globals = lua.globals();
-            let nmap_tbl: Table = globals
-                .get("nmap")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
-            let ports: Table = nmap_tbl
-                .get("_ports")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
+            let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), lua)?;
+            let ports: Table = or_fallback_table(nmap_tbl.get("_ports"), lua)?;
 
             let key = if let Some(h) = host {
                 format!("{}.{}.tcp", h, port)
@@ -700,12 +683,8 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "registry_get",
         lua.create_function(|lua, key: String| {
             let globals = lua.globals();
-            let nmap_tbl: Table = globals
-                .get("nmap")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
-            let registry: Table = nmap_tbl
-                .get("registry")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
+            let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), lua)?;
+            let registry: Table = or_fallback_table(nmap_tbl.get("registry"), lua)?;
             registry.get(key.as_str()).or_else(|_| Ok(mlua::Value::Nil))
         })?,
     )?;
@@ -714,16 +693,17 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "registry_set",
         lua.create_function(|lua, (key, value): (String, mlua::Value)| {
             let globals = lua.globals();
-            let nmap_tbl: Table = globals
-                .get("nmap")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
-            let registry: Table = nmap_tbl.get("registry").unwrap_or_else(|_| {
-                let t = fallback_lua_table(lua);
-                if let Err(e) = nmap_tbl.set("registry", t.clone()) {
-                    tracing::warn!("nmap registry_set: failed to set initial registry: {}", e);
+            let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), lua)?;
+            let registry: Table = match nmap_tbl.get("registry") {
+                Ok(t) => t,
+                Err(_) => {
+                    let t = fallback_lua_table(lua)?;
+                    if let Err(e) = nmap_tbl.set("registry", t.clone()) {
+                        tracing::warn!("nmap registry_set: failed to set initial registry: {}", e);
+                    }
+                    t
                 }
-                t
-            });
+            };
             registry.set(key.as_str(), value)?;
             Ok(true)
         })?,
@@ -733,9 +713,7 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "ref_increment",
         lua.create_function(|lua, _: ()| {
             let globals = lua.globals();
-            let nmap_tbl: Table = globals
-                .get("nmap")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
+            let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), lua)?;
             let mut count: i32 = nmap_tbl.get("refcount").unwrap_or(0);
             count += 1;
             nmap_tbl.set("refcount", count)?;
@@ -747,9 +725,7 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "ref_decrement",
         lua.create_function(|lua, _: ()| {
             let globals = lua.globals();
-            let nmap_tbl: Table = globals
-                .get("nmap")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
+            let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), lua)?;
             let mut count: i32 = nmap_tbl.get("refcount").unwrap_or(0);
             count = (count - 1).max(0);
             nmap_tbl.set("refcount", count)?;
@@ -817,12 +793,8 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "status",
         lua.create_function(|lua, (_host, state): (Option<String>, String)| {
             let globals = lua.globals();
-            let nmap_tbl: Table = globals
-                .get("nmap")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
-            let hostinfo: Table = nmap_tbl
-                .get("_hostinfo")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
+            let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), lua)?;
+            let hostinfo: Table = or_fallback_table(nmap_tbl.get("_hostinfo"), lua)?;
             hostinfo.set("status", state.as_str())?;
             Ok(())
         })?,
@@ -850,10 +822,7 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "nse_get_output",
         lua.create_function(|lua, _: ()| {
             let globals = lua.globals();
-            let output: Table = globals.get("_SCRIPT_OUTPUT").unwrap_or_else(|_| {
-                lua.create_table()
-                    .unwrap_or_else(|_| fallback_lua_table(lua))
-            });
+            let output: Table = or_fallback_table(globals.get("_SCRIPT_OUTPUT"), lua)?;
             let result = lua.create_table()?;
             result.set("lines", output)?;
             Ok(result)
@@ -1141,7 +1110,7 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
             condvar.set("waiting", lua.create_table()?)?;
 
             let wait_fn = lua.create_function(|lua, c: Table| {
-                let waiting: Table = c.get("waiting").unwrap_or_else(|_| fallback_lua_table(lua));
+                let waiting: Table = or_fallback_table(c.get("waiting"), lua)?;
                 let len = waiting.len().unwrap_or(0);
                 waiting.set(len + 1, true)?;
                 if let Err(e) = c.set("waiting", waiting) {
@@ -1152,7 +1121,7 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
             condvar.set("wait", wait_fn)?;
 
             let signal_fn = lua.create_function(|lua, c: Table| {
-                let waiting: Table = c.get("waiting").unwrap_or_else(|_| fallback_lua_table(lua));
+                let waiting: Table = or_fallback_table(c.get("waiting"), lua)?;
                 if waiting.len().unwrap_or(0) > 0 {
                     waiting.set(1, mlua::Value::Nil)?;
                 }
@@ -1740,9 +1709,7 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "get_target",
         lua.create_function(|lua, ()| {
             let globals = lua.globals();
-            let nmap_tbl: Table = globals
-                .get("nmap")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
+            let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), lua)?;
             let target = nmap_tbl.get::<String>("target").unwrap_or_default();
             Ok(target)
         })?,
@@ -1779,9 +1746,7 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "ref_increment",
         lua.create_function(|_lua, ()| {
             let globals = _lua.globals();
-            let nmap_tbl: Table = globals
-                .get("nmap")
-                .unwrap_or_else(|_| fallback_lua_table(_lua));
+            let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), _lua)?;
             let refcount: i32 = nmap_tbl.get("refcount").unwrap_or(0);
             nmap_tbl.set("refcount", refcount + 1)?;
             Ok(refcount + 1)
@@ -1792,9 +1757,7 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "ref_decrement",
         lua.create_function(|_lua, ()| {
             let globals = _lua.globals();
-            let nmap_tbl: Table = globals
-                .get("nmap")
-                .unwrap_or_else(|_| fallback_lua_table(_lua));
+            let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), _lua)?;
             let refcount: i32 = nmap_tbl.get("refcount").unwrap_or(0);
             let new_count = (refcount - 1).max(0);
             nmap_tbl.set("refcount", new_count)?;

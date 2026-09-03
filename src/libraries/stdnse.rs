@@ -4,7 +4,7 @@
 
 use mlua::{Lua, Result as LuaResult, Table, Value};
 
-use super::helpers::{fallback_lua_table, parse_hex_pairs};
+use super::helpers::{fallback_lua_table, or_fallback_table, parse_hex_pairs};
 use crate::capabilities::NseCapabilityContext;
 
 pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
@@ -477,10 +477,7 @@ pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaR
         let output: Table = stdnse_tbl.get("output")?;
         output.set(key.clone(), value.clone())?;
 
-        let script_output: Table = globals.get("_SCRIPT_OUTPUT").unwrap_or_else(|_| {
-            lua.create_table()
-                .unwrap_or_else(|_| fallback_lua_table(lua))
-        });
+        let script_output: Table = or_fallback_table(globals.get("_SCRIPT_OUTPUT"), lua)?;
         let len = script_output.len().unwrap_or(0) + 1;
         script_output.set(len, format!("{}: {:?}", key, value))?;
 
@@ -808,9 +805,7 @@ pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaR
     let base_fn = lua.create_function(|lua, _: ()| {
         let globals = lua.globals();
         let stdnse_tbl: Table = globals.get("stdnse")?;
-        let base: Table = stdnse_tbl
-            .get("base_coroutine")
-            .unwrap_or_else(|_| fallback_lua_table(lua));
+        let base: Table = or_fallback_table(stdnse_tbl.get("base_coroutine"), lua)?;
         Ok(base)
     })?;
     stdnse.set("base", base_fn)?;
@@ -852,9 +847,7 @@ pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaR
     let get_thread_count_fn = lua.create_function(|lua, _: ()| {
         let globals = lua.globals();
         if let Ok(stdnse_tbl) = globals.get::<Table>("stdnse") {
-            let threads: Table = stdnse_tbl
-                .get("_threads")
-                .unwrap_or_else(|_| fallback_lua_table(lua));
+            let threads: Table = or_fallback_table(stdnse_tbl.get("_threads"), lua)?;
             let count = threads.len().unwrap_or(0);
             return Ok(count as i32);
         }
@@ -890,12 +883,8 @@ pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaR
 
     let registry_add_array_fn = lua.create_function(|lua, (keys, value): (Table, String)| {
         let globals = lua.globals();
-        let nmap_tbl: Table = globals
-            .get("nmap")
-            .unwrap_or_else(|_| fallback_lua_table(lua));
-        let registry: Table = nmap_tbl
-            .get("registry")
-            .unwrap_or_else(|_| fallback_lua_table(lua));
+        let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), lua)?;
+        let registry: Table = or_fallback_table(nmap_tbl.get("registry"), lua)?;
 
         let len = keys.len().unwrap_or(0);
         if len == 0 {
@@ -909,9 +898,7 @@ pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaR
             }
         }
 
-        let arr = registry
-            .get::<Table>(current_key.clone())
-            .unwrap_or_else(|_| fallback_lua_table(lua));
+        let arr = or_fallback_table(registry.get::<Table>(current_key.clone()), lua)?;
         let arr_len = arr.len().unwrap_or(0) as usize;
         arr.set(arr_len + 1, value).unwrap_or(());
 
@@ -936,12 +923,8 @@ pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaR
 
     let registry_add_table_fn = lua.create_function(|lua, (keys, value): (Table, Table)| {
         let globals = lua.globals();
-        let nmap_tbl: Table = globals
-            .get("nmap")
-            .unwrap_or_else(|_| fallback_lua_table(lua));
-        let registry: Table = nmap_tbl
-            .get("registry")
-            .unwrap_or_else(|_| fallback_lua_table(lua));
+        let nmap_tbl: Table = or_fallback_table(globals.get("nmap"), lua)?;
+        let registry: Table = or_fallback_table(nmap_tbl.get("registry"), lua)?;
 
         let len = keys.len().unwrap_or(0);
         if len == 0 {
@@ -1135,7 +1118,10 @@ pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaR
 
     let provide_fn = lua.create_function(|lua, (module, exports): (String, Option<Table>)| {
         let globals = lua.globals();
-        let exports = exports.unwrap_or_else(|| fallback_lua_table(lua));
+        let exports = match exports {
+            Some(t) => t,
+            None => fallback_lua_table(lua)?,
+        };
 
         let exports_clone = exports.clone();
 

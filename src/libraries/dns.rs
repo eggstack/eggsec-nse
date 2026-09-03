@@ -14,20 +14,30 @@ use crate::wrappers;
 
 static RESOLVER: OnceLock<TokioResolver> = OnceLock::new();
 
-fn get_resolver() -> &'static TokioResolver {
-    RESOLVER.get_or_init(|| {
-        let config = ResolverConfig::default();
+fn get_resolver() -> Result<&'static TokioResolver, String> {
+    if let Some(resolver) = RESOLVER.get() {
+        return Ok(resolver);
+    }
+    let resolver = TokioResolver::builder_with_config(
+        ResolverConfig::default(),
+        hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
+    )
+    .with_options({
         let mut opts = ResolverOpts::default();
         opts.timeout = std::time::Duration::from_secs(5);
         opts.attempts = 2;
-        TokioResolver::builder_with_config(
-            config,
-            hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
-        )
-        .with_options(opts)
-        .build()
-        .expect("failed to initialize DNS resolver")
+        opts
     })
+    .build()
+    .map_err(|e| {
+        tracing::warn!("failed to initialize DNS resolver: {}", e);
+        e.to_string()
+    })?;
+    // If another thread won the init race, drop ours and use theirs.
+    let _ = RESOLVER.set(resolver);
+    RESOLVER
+        .get()
+        .ok_or_else(|| "DNS resolver unavailable after init".to_string())
 }
 
 pub fn register_dns_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
@@ -79,10 +89,16 @@ pub fn register_dns_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                         _ => RecordType::A,
                     };
 
-                    match get_resolver()
-                        .lookup(hostname_clone.clone(), record_type)
-                        .await
-                    {
+                    let resolver = match get_resolver() {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let result = lua.create_table()?;
+                            result.set("type", qtype_clone.as_str())?;
+                            result.set("error", format!("DNS resolver unavailable: {}", e))?;
+                            return Ok(result);
+                        }
+                    };
+                    match resolver.lookup(hostname_clone.clone(), record_type).await {
                         Ok(lookup) => {
                             let result = lua.create_table()?;
                             result.set("type", qtype_clone.as_str())?;
@@ -186,7 +202,15 @@ pub fn register_dns_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 result.set("name", name_clone.as_str())?;
                 result.set("type", qt_clone.as_str())?;
 
-                match get_resolver().lookup(name_clone.clone(), record_type).await {
+                let resolver = match get_resolver() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", format!("DNS resolver unavailable: {}", e))?;
+                        return Ok(result);
+                    }
+                };
+                match resolver.lookup(name_clone.clone(), record_type).await {
                     Ok(lookup) => {
                         result.set("status", "ok")?;
                         let answers = lua.create_table()?;
@@ -259,10 +283,15 @@ pub fn register_dns_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
 
             runtime.block_on(async {
-                match get_resolver()
-                    .lookup(hostname_clone.clone(), RecordType::A)
-                    .await
-                {
+                let resolver = match get_resolver() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", format!("DNS resolver unavailable: {}", e))?;
+                        return Ok(result);
+                    }
+                };
+                match resolver.lookup(hostname_clone.clone(), RecordType::A).await {
                     Ok(lookup) => {
                         result.set("status", "ok")?;
                         let addresses = lua.create_table()?;
@@ -312,7 +341,15 @@ pub fn register_dns_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 return runtime.block_on(async {
                     let result = lua.create_table()?;
 
-                    match get_resolver()
+                    let resolver = match get_resolver() {
+                        Ok(r) => r,
+                        Err(e) => {
+                            result.set("status", "error")?;
+                            result.set("error", format!("DNS resolver unavailable: {}", e))?;
+                            return Ok(result);
+                        }
+                    };
+                    match resolver
                         .lookup(reversed_clone.clone(), RecordType::PTR)
                         .await
                     {

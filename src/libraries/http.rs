@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
 use std::time::Duration;
 
-use super::helpers::fallback_lua_table;
+use super::helpers::or_fallback_table;
 use crate::capabilities::NseCapabilityContext;
 use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
@@ -571,10 +571,7 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "auth_required",
         lua.create_function(|lua, response: Table| {
             let status: i32 = response.get("status").unwrap_or(0);
-            let _headers: Table = response.get("headers").unwrap_or_else(|_| {
-                lua.create_table()
-                    .unwrap_or_else(|_| fallback_lua_table(lua))
-            });
+            let _headers: Table = or_fallback_table(response.get("headers"), lua)?;
 
             Ok(status == 401)
         })?,
@@ -591,10 +588,7 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     http.set(
         "get_cookie",
         lua.create_function(|lua, (response, name): (Table, String)| {
-            let header: Table = response.get("header").unwrap_or_else(|_| {
-                lua.create_table()
-                    .unwrap_or_else(|_| fallback_lua_table(lua))
-            });
+            let header: Table = or_fallback_table(response.get("header"), lua)?;
             let cookies: Option<String> = header
                 .get("set-cookie")
                 .or_else(|_| header.get("Set-Cookie"))
@@ -617,10 +611,7 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "set_cookie",
         lua.create_function(|lua, (request, name, value): (Table, String, String)| {
             let cookie = format!("{}={}", name, value);
-            let header: Table = request.get("headers").unwrap_or_else(|_| {
-                lua.create_table()
-                    .unwrap_or_else(|_| fallback_lua_table(lua))
-            });
+            let header: Table = or_fallback_table(request.get("headers"), lua)?;
             header.set("Cookie", cookie)?;
             Ok(request)
         })?,
@@ -779,10 +770,7 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
             let host: String = request.get("host").unwrap_or_default();
             let port: u16 = request.get("port").unwrap_or(80);
             let path: String = request.get("path").unwrap_or_else(|_| "/".to_string());
-            let headers: Table = request.get("headers").unwrap_or_else(|_| {
-                lua.create_table()
-                    .unwrap_or_else(|_| fallback_lua_table(lua))
-            });
+            let headers: Table = or_fallback_table(request.get("headers"), lua)?;
 
             cloned.set("method", method)?;
             cloned.set("host", host)?;

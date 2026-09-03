@@ -9,9 +9,21 @@ use std::time::Duration;
 
 pub use mlua::Table as LuaTable;
 
-pub fn fallback_lua_table(lua: &Lua) -> Table {
-    lua.create_table()
-        .expect("failed to create fallback Lua table")
+pub fn fallback_lua_table(lua: &Lua) -> LuaResult<Table> {
+    lua.create_table().map_err(|e| {
+        tracing::warn!("failed to create fallback Lua table: {}", e);
+        e
+    })
+}
+
+/// Resolve `result` or, on lookup failure, create a fallback table.
+///
+/// Propagates Lua OOM as `Err` instead of panicking.
+pub fn or_fallback_table<E>(result: Result<Table, E>, lua: &Lua) -> LuaResult<Table> {
+    match result {
+        Ok(table) => Ok(table),
+        Err(_) => fallback_lua_table(lua),
+    }
 }
 
 pub fn parse_hex_pairs(input: &str) -> Vec<u8> {
