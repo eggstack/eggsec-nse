@@ -251,7 +251,7 @@ pub fn register_mongodb_library(lua: &Lua, capability_ctx: &NseCapabilityContext
                     let r = lua.create_table()?;
                     r.set("host", host)?;
                     r.set("port", port)?;
-                    r.set("status", if n > 0 { "connected" } else { "connected" })?;
+                    r.set("status", if n > 0 { "connected" } else { "no-response" })?;
                     r.set("wire_version", 20)?;
                     Ok(r)
                 }

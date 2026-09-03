@@ -5,6 +5,28 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as FmtWrite;
 
+/// `writeln!` for infallible `String` buffers.
+///
+/// `fmt::Write for String` fails only on allocator OOM, so the result is
+/// debug-asserted rather than panicked on (`.unwrap()`) or silently
+/// discarded (`let _ =`).
+macro_rules! writeln_checked {
+    ($dst:expr) => {{
+        let result: std::fmt::Result = writeln!($dst);
+        debug_assert!(
+            result.is_ok(),
+            "writing to a String buffer is infallible"
+        );
+    }};
+    ($dst:expr, $($arg:tt)*) => {{
+        let result: std::fmt::Result = writeln!($dst, $($arg)*);
+        debug_assert!(
+            result.is_ok(),
+            "writing to a String buffer is infallible"
+        );
+    }};
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NseOutput {
     pub target: String,
@@ -28,8 +50,8 @@ pub enum OutputFormat {
 pub fn generate_xml(results: &[NseOutput]) -> String {
     let mut xml = String::new();
 
-    let _ = writeln!(xml, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
-    let _ = writeln!(
+    writeln_checked!(xml, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>");
+    writeln_checked!(
         xml,
         "<nmaprun scanner=\"eggsec\" args=\"eggsec nse\" start=\"{}\" version=\"1.0\">",
         std::time::SystemTime::now()
@@ -38,11 +60,11 @@ pub fn generate_xml(results: &[NseOutput]) -> String {
             .as_secs()
     );
 
-    let _ = writeln!(xml, "  <verbose level=\"0\"/>");
-    let _ = writeln!(xml, "  <debugging level=\"0\"/>");
+    writeln_checked!(xml, "  <verbose level=\"0\"/>");
+    writeln_checked!(xml, "  <debugging level=\"0\"/>");
 
     for result in results {
-        let _ = writeln!(
+        writeln_checked!(
             xml,
             "  <host starttime=\"{}\" endtime=\"{}\">",
             std::time::SystemTime::now()
@@ -56,54 +78,54 @@ pub fn generate_xml(results: &[NseOutput]) -> String {
                 + 1
         );
 
-        let _ = writeln!(xml, "    <status state=\"up\" reason=\"echo-reply\"/>");
-        let _ = writeln!(
+        writeln_checked!(xml, "    <status state=\"up\" reason=\"echo-reply\"/>");
+        writeln_checked!(
             xml,
             "    <address addr=\"{}\" addrtype=\"ipv4\"/>",
-            result.target
+            escape_xml(&result.target)
         );
 
-        let _ = writeln!(xml, "    <hostnames>");
-        let _ = writeln!(
+        writeln_checked!(xml, "    <hostnames>");
+        writeln_checked!(
             xml,
             "      <hostname name=\"{}\" type=\"user\"/>",
-            result.target
+            escape_xml(&result.target)
         );
-        let _ = writeln!(xml, "    </hostnames>");
+        writeln_checked!(xml, "    </hostnames>");
 
-        let _ = writeln!(xml, "    <ports>");
+        writeln_checked!(xml, "    <ports>");
         let port_line = result.ports.as_deref().unwrap_or("80/tcp   open  http");
         let port_id = port_line.split('/').next().unwrap_or("80");
-        let _ = writeln!(xml, "      <port protocol=\"tcp\" portid=\"{}\">", port_id);
-        let _ = writeln!(xml, "        <state state=\"open\" reason=\"syn-ack\"/>");
-        let _ = writeln!(
+        writeln_checked!(xml, "      <port protocol=\"tcp\" portid=\"{}\">", port_id);
+        writeln_checked!(xml, "        <state state=\"open\" reason=\"syn-ack\"/>");
+        writeln_checked!(
             xml,
             "        <service name=\"http\" method=\"probed\" conf=\"10\"/>"
         );
-        let _ = writeln!(
+        writeln_checked!(
             xml,
             "        <script id=\"{}\" output=\"{}\">",
             escape_xml(&result.scripts),
             escape_xml(&result.output)
         );
-        let _ = writeln!(xml, "        </script>");
-        let _ = writeln!(xml, "      </port>");
-        let _ = writeln!(xml, "    </ports>");
+        writeln_checked!(xml, "        </script>");
+        writeln_checked!(xml, "      </port>");
+        writeln_checked!(xml, "    </ports>");
 
-        let _ = writeln!(xml, "    <times srtt=\"0\" rttvar=\"0\" to=\"100000\"/>");
-        let _ = writeln!(xml, "  </host>");
+        writeln_checked!(xml, "    <times srtt=\"0\" rttvar=\"0\" to=\"100000\"/>");
+        writeln_checked!(xml, "  </host>");
     }
 
-    let _ = writeln!(xml, "  <runstats>");
-    let _ = writeln!(xml, "    <finished elapsed=\"1\" exit=\"success\"/>");
-    let _ = writeln!(
+    writeln_checked!(xml, "  <runstats>");
+    writeln_checked!(xml, "    <finished elapsed=\"1\" exit=\"success\"/>");
+    writeln_checked!(
         xml,
         "    <hosts up=\"{}\" down=\"0\" total=\"{}\"/>",
         results.len(),
         results.len()
     );
-    let _ = writeln!(xml, "  </runstats>");
-    let _ = writeln!(xml, "</nmaprun>");
+    writeln_checked!(xml, "  </runstats>");
+    writeln_checked!(xml, "</nmaprun>");
 
     xml
 }
@@ -112,22 +134,23 @@ pub fn generate_xml(results: &[NseOutput]) -> String {
 pub fn generate_grepable(results: &[NseOutput]) -> String {
     let mut output = String::new();
 
-    let _ = writeln!(output, "# Nmap scan report generated by Eggsec");
+    writeln_checked!(output, "# Nmap scan report generated by Eggsec");
 
     for result in results {
-        let _ = writeln!(output, "Host: {} () Status: Up", result.target);
+        writeln_checked!(output, "Host: {} () Status: Up", result.target);
         let ports_str = result.ports.as_deref().unwrap_or("80/open/tcp//http///");
-        let _ = writeln!(
+        writeln_checked!(
             output,
             "Host: {} ()     Ports: {}",
-            result.target, ports_str
+            result.target,
+            ports_str
         );
 
         let script_output = result.output.replace('\n', "\\n");
-        let _ = writeln!(output, "| {}: {}", result.scripts, script_output);
+        writeln_checked!(output, "| {}: {}", result.scripts, script_output);
     }
 
-    let _ = writeln!(
+    writeln_checked!(
         output,
         "# Scan done: {} IP address (1 host up) scanned in 0.01 seconds",
         results.len()
@@ -140,33 +163,37 @@ pub fn generate_grepable(results: &[NseOutput]) -> String {
 pub fn generate_normal(results: &[NseOutput]) -> String {
     let mut output = String::new();
 
-    let _ = writeln!(
+    writeln_checked!(
         output,
         "Starting Eggsec NSE scan at {}",
         chrono_lite_timestamp()
     );
-    let _ = writeln!(
+    writeln_checked!(
         output,
         "NSE Timing: About {}% done",
         (results.len() as f32 * 33.0).min(100.0)
     );
-    let _ = writeln!(output);
+    writeln_checked!(output);
 
     for result in results {
-        let _ = writeln!(output, "Nmap scan report for {}", result.target);
-        let _ = writeln!(output, "Host is up (0.0010s latency).");
-        let _ = writeln!(output, "PORT     STATE SERVICE");
-        let _ = write_ports(&mut output, result.ports.as_deref());
+        writeln_checked!(output, "Nmap scan report for {}", result.target);
+        writeln_checked!(output, "Host is up (0.0010s latency).");
+        writeln_checked!(output, "PORT     STATE SERVICE");
+        let _ports_result = write_ports(&mut output, result.ports.as_deref());
+        debug_assert!(
+            _ports_result.is_ok(),
+            "writing to a String buffer is infallible"
+        );
 
-        let _ = writeln!(output, "| {}:", result.scripts);
+        writeln_checked!(output, "| {}:", result.scripts);
         for line in result.output.lines() {
-            let _ = writeln!(output, "|   {}", line);
+            writeln_checked!(output, "|   {}", line);
         }
 
-        let _ = writeln!(output);
+        writeln_checked!(output);
     }
 
-    let _ = writeln!(
+    writeln_checked!(
         output,
         "Nmap done: {} IP address ({} host up) scanned",
         results.len(),
@@ -234,6 +261,24 @@ mod tests {
         let xml = generate_xml(&results);
         assert!(xml.contains("<?xml"));
         assert!(xml.contains("example.com"));
+    }
+
+    #[test]
+    fn test_xml_output_escapes_target() {
+        // Regression test: attacker-influenced targets must not break XML
+        // structure or inject attributes.
+        let results = vec![NseOutput {
+            target: "example.com\"/><injected>&".to_string(),
+            scripts: "http-title".to_string(),
+            output: "Example Domain".to_string(),
+            ports: Some("80".to_string()),
+            timing: 3,
+            debug: 0,
+        }];
+
+        let xml = generate_xml(&results);
+        assert!(!xml.contains("<injected>"));
+        assert!(xml.contains("example.com&quot;/&gt;&lt;injected&gt;&amp;"));
     }
 
     #[test]

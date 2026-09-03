@@ -1,28 +1,50 @@
 use crate::report::NseRunReport;
 
+/// `writeln_checked!` for infallible `String` buffers.
+///
+/// `fmt::Write for String` fails only on allocator OOM, so the result is
+/// debug-asserted rather than panicked on (`.unwrap()`) or silently
+/// discarded (`let _ =`).
+macro_rules! writeln_checked {
+    ($dst:expr) => {{
+        let result: std::fmt::Result = writeln!($dst);
+        debug_assert!(
+            result.is_ok(),
+            "writing to a String buffer is infallible"
+        );
+    }};
+    ($dst:expr, $($arg:tt)*) => {{
+        let result: std::fmt::Result = writeln!($dst, $($arg)*);
+        debug_assert!(
+            result.is_ok(),
+            "writing to a String buffer is infallible"
+        );
+    }};
+}
+
 pub fn format_human_report(report: &NseRunReport) -> String {
     use crate::report::{NseRunCompatibilityStatus, NseRunFidelity};
     use std::fmt::Write;
 
     let mut out = String::new();
 
-    writeln!(out).unwrap();
-    writeln!(out, "NSE Script Report").unwrap();
-    writeln!(out, "=================").unwrap();
-    writeln!(out, "  Target:    {}", report.target).unwrap();
-    writeln!(out, "  Script:    {}", report.script_name).unwrap();
-    writeln!(
+    writeln_checked!(out);
+    writeln_checked!(out, "NSE Script Report");
+    writeln_checked!(out, "=================");
+    writeln_checked!(out, "  Target:    {}", report.target);
+    writeln_checked!(out, "  Script:    {}", report.script_name);
+    writeln_checked!(
         out,
         "  Source:    {} ({})",
-        report.script_source.label, report.script_source.kind
-    )
-    .unwrap();
-    writeln!(out, "  Profile:   {}", report.profile.kind).unwrap();
-    writeln!(out, "  Elapsed:   {:.2}s", report.stats.elapsed_secs).unwrap();
+        report.script_source.label,
+        report.script_source.kind
+    );
+    writeln_checked!(out, "  Profile:   {}", report.profile.kind);
+    writeln_checked!(out, "  Elapsed:   {:.2}s", report.stats.elapsed_secs);
 
-    writeln!(out).unwrap();
-    writeln!(out, "Compatibility").unwrap();
-    writeln!(out, "-------------").unwrap();
+    writeln_checked!(out);
+    writeln_checked!(out, "Compatibility");
+    writeln_checked!(out, "-------------");
     let status_str = match report.compatibility.status {
         NseRunCompatibilityStatus::Compatible => "COMPATIBLE",
         NseRunCompatibilityStatus::CompatibleWithWarnings => "COMPATIBLE (warnings)",
@@ -31,7 +53,7 @@ pub fn format_human_report(report: &NseRunReport) -> String {
         NseRunCompatibilityStatus::Failed => "FAILED",
         NseRunCompatibilityStatus::Unknown => "UNKNOWN",
     };
-    writeln!(out, "  Status:  {}", status_str).unwrap();
+    writeln_checked!(out, "  Status:  {}", status_str);
 
     let fidelity_str = match report.compatibility.fidelity {
         NseRunFidelity::Full => "full".to_string(),
@@ -39,29 +61,27 @@ pub fn format_human_report(report: &NseRunReport) -> String {
         NseRunFidelity::Minimal => "~minimal".to_string(),
         NseRunFidelity::Unknown => "unknown".to_string(),
     };
-    writeln!(out, "  Fidelity: {}", fidelity_str).unwrap();
+    writeln_checked!(out, "  Fidelity: {}", fidelity_str);
 
     if !report.compatibility.unsupported_features.is_empty() {
-        writeln!(
+        writeln_checked!(
             out,
             "  Unsupported: {}",
             report.compatibility.unsupported_features.join(", ")
-        )
-        .unwrap();
+        );
     }
     if !report.compatibility.approximations.is_empty() {
-        writeln!(
+        writeln_checked!(
             out,
             "  Approximations: {}",
             report.compatibility.approximations.join(", ")
-        )
-        .unwrap();
+        );
     }
 
     if !report.rules.is_empty() {
-        writeln!(out).unwrap();
-        writeln!(out, "Rule Evaluation").unwrap();
-        writeln!(out, "---------------").unwrap();
+        writeln_checked!(out);
+        writeln_checked!(out, "Rule Evaluation");
+        writeln_checked!(out, "---------------");
         for rule in &report.rules {
             let status = if rule.matched {
                 "matched"
@@ -70,20 +90,20 @@ pub fn format_human_report(report: &NseRunReport) -> String {
             } else {
                 "not evaluated"
             };
-            writeln!(out, "  [{}] {} ({})", rule.kind, status, rule.exactness).unwrap();
+            writeln_checked!(out, "  [{}] {} ({})", rule.kind, status, rule.exactness);
             if !rule.summary.is_empty() {
-                writeln!(out, "    {}", rule.summary).unwrap();
+                writeln_checked!(out, "    {}", rule.summary);
             }
             if let Some(ref unsupported) = rule.unsupported {
-                writeln!(out, "    unsupported: {}", unsupported).unwrap();
+                writeln_checked!(out, "    unsupported: {}", unsupported);
             }
         }
     }
 
     if !report.libraries.is_empty() {
-        writeln!(out).unwrap();
-        writeln!(out, "Libraries").unwrap();
-        writeln!(out, "---------").unwrap();
+        writeln_checked!(out);
+        writeln_checked!(out, "Libraries");
+        writeln_checked!(out, "---------");
         for lib in &report.libraries {
             let status = if lib.loaded {
                 "loaded"
@@ -97,14 +117,16 @@ pub fn format_human_report(report: &NseRunReport) -> String {
             } else {
                 format!(" [{}]", lib.side_effects.join(", "))
             };
-            writeln!(
+            writeln_checked!(
                 out,
                 "  {} ({}, {}{})",
-                lib.name, lib.category, status, se_str
-            )
-            .unwrap();
+                lib.name,
+                lib.category,
+                status,
+                se_str
+            );
             for w in &lib.warnings {
-                writeln!(out, "    [*] {}", w).unwrap();
+                writeln_checked!(out, "    [*] {}", w);
             }
         }
     }
@@ -115,79 +137,78 @@ pub fn format_human_report(report: &NseRunReport) -> String {
         .filter(|e| !e.allowed)
         .collect();
     if !denials.is_empty() {
-        writeln!(out).unwrap();
-        writeln!(out, "Capability Denials").unwrap();
-        writeln!(out, "------------------").unwrap();
+        writeln_checked!(out);
+        writeln_checked!(out, "Capability Denials");
+        writeln_checked!(out, "------------------");
         for denial in &denials {
             let target_str = denial
                 .target
                 .as_deref()
                 .map(|t| format!(" on {}", t))
                 .unwrap_or_default();
-            writeln!(
+            writeln_checked!(
                 out,
                 "  [!] {}{}: {}",
                 denial.kind,
                 target_str,
                 denial.reason.as_deref().unwrap_or("denied by policy")
-            )
-            .unwrap();
+            );
         }
     }
 
     if !report.evidence.is_empty() {
-        writeln!(out).unwrap();
-        writeln!(out, "Evidence ({} items)", report.evidence.len()).unwrap();
-        writeln!(out, "--------------------").unwrap();
+        writeln_checked!(out);
+        writeln_checked!(out, "Evidence ({} items)", report.evidence.len());
+        writeln_checked!(out, "--------------------");
         for item in &report.evidence {
-            writeln!(
+            writeln_checked!(
                 out,
                 "  [{}] {} (confidence: {})",
-                item.kind, item.title, item.confidence
-            )
-            .unwrap();
-            writeln!(out, "    {}", item.summary).unwrap();
+                item.kind,
+                item.title,
+                item.confidence
+            );
+            writeln_checked!(out, "    {}", item.summary);
         }
     }
 
     if !report.errors.is_empty() {
-        writeln!(out).unwrap();
-        writeln!(out, "Errors").unwrap();
-        writeln!(out, "------").unwrap();
+        writeln_checked!(out);
+        writeln_checked!(out, "Errors");
+        writeln_checked!(out, "------");
         for err in &report.errors {
-            writeln!(out, "  - {}", err).unwrap();
+            writeln_checked!(out, "  - {}", err);
         }
     }
 
     if !report.warnings.is_empty() {
-        writeln!(out).unwrap();
-        writeln!(out, "Warnings").unwrap();
-        writeln!(out, "--------").unwrap();
+        writeln_checked!(out);
+        writeln_checked!(out, "Warnings");
+        writeln_checked!(out, "--------");
         for warn in &report.warnings {
-            writeln!(out, "  [*] {}", warn).unwrap();
+            writeln_checked!(out, "  [*] {}", warn);
         }
     }
 
     let output_str = report.output.content.trim();
     if !output_str.is_empty() {
-        writeln!(out).unwrap();
-        writeln!(out, "Raw Output").unwrap();
-        writeln!(out, "----------").unwrap();
+        writeln_checked!(out);
+        writeln_checked!(out, "Raw Output");
+        writeln_checked!(out, "----------");
         let lines: Vec<&str> = output_str.lines().collect();
         let max_lines = 20;
         for line in lines.iter().take(max_lines) {
-            writeln!(out, "  {}", line).unwrap();
+            writeln_checked!(out, "  {}", line);
         }
         if lines.len() > max_lines {
-            writeln!(
+            writeln_checked!(
                 out,
                 "  ... ({} more lines, use --json for full output)",
                 lines.len() - max_lines
-            )
-            .unwrap();
+            );
         }
     }
 
-    writeln!(out).unwrap();
+    writeln_checked!(out);
     out
 }
