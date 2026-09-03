@@ -338,7 +338,9 @@ impl UserData for LibSsh2Session {
         // disconnect
         methods.add_method_mut("disconnect", |_lua, this, (_reason, _message, _lang): (Option<String>, Option<String>, Option<String>)| {
             if let Some(ref session) = this.session {
-                let _ = session.disconnect(None, "User disconnected", None);
+                if let Err(e) = session.disconnect(None, "User disconnected", None) {
+                    tracing::warn!("libssh2 disconnect failed: {}", e);
+                }
             }
             this.session = None;
             Ok(true)
