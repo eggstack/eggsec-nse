@@ -68,44 +68,54 @@ macro_rules! set_fn {
     }};
 }
 
-/// Helper macro to set a function on a table (soft mode - ignores errors)
+/// Helper macro to set a function on a table (soft mode - logs errors at debug)
 /// Usage: try_set_fn!(table, "function_name", lua, |lua, arg1, arg2| { ... })
 #[macro_export]
 macro_rules! try_set_fn {
     // No arguments
     ($table:expr_2021, $name:expr_2021, $lua:expr_2021, |$lua_arg:ident| $body:expr_2021) => {{
         if let Ok(func) = $lua.create_function(|$lua_arg| $body) {
-            let _ = $table.set($name, func);
+            if let Err(e) = $table.set($name, func) {
+                tracing::debug!("nse compat: failed to register function: {}", e);
+            }
         }
     }};
     // Single argument
     ($table:expr_2021, $name:expr_2021, $lua:expr_2021, |$lua_arg:ident, $arg1:ident| $body:expr_2021) => {{
         if let Ok(func) = $lua.create_function(|$lua_arg, $arg1| $body) {
-            let _ = $table.set($name, func);
+            if let Err(e) = $table.set($name, func) {
+                tracing::debug!("nse compat: failed to register function: {}", e);
+            }
         }
     }};
     // Multiple arguments (captures rest as tuple)
     ($table:expr_2021, $name:expr_2021, $lua:expr_2021, |$lua_arg:ident, $($arg:ident),*| $body:expr_2021) => {{
         if let Ok(func) = $lua.create_function(|$lua_arg, ($($arg,)*)| $body) {
-            let _ = $table.set($name, func);
+            if let Err(e) = $table.set($name, func) {
+                tracing::debug!("nse compat: failed to register function: {}", e);
+            }
         }
     }};
 }
 
-/// Helper macro to set a simple value on a table (soft mode)
+/// Helper macro to set a simple value on a table (soft mode - logs errors at debug)
 #[macro_export]
 macro_rules! try_set {
     ($table:expr_2021, $name:expr_2021, $value:expr_2021) => {{
-        let _ = $table.set($name, $value);
+        if let Err(e) = $table.set($name, $value) {
+            tracing::debug!("nse compat: failed to set table value: {}", e);
+        }
     }};
 }
 
-/// Helper macro to set a value that returns Result (soft mode)
+/// Helper macro to set a value that returns Result (soft mode - logs errors at debug)
 #[macro_export]
 macro_rules! try_set_result {
     ($table:expr_2021, $name:expr_2021, $value:expr_2021) => {{
         if let Ok(v) = $value {
-            let _ = $table.set($name, v);
+            if let Err(e) = $table.set($name, v) {
+                tracing::debug!("nse compat: failed to set table value: {}", e);
+            }
         }
     }};
 }
@@ -120,13 +130,17 @@ macro_rules! create_global_table {
     }};
 }
 
-/// Version of create_global_table that ignores errors
+/// Version of create_global_table that logs errors at debug and yields None
 #[macro_export]
 macro_rules! try_create_global_table {
     ($lua:expr_2021, $name:expr_2021) => {{
         if let Ok(table) = $lua.create_table() {
-            let _ = $lua.globals().set($name, table);
-            Some(table)
+            if let Err(e) = $lua.globals().set($name, table.clone()) {
+                tracing::debug!("nse compat: failed to set global table: {}", e);
+                None
+            } else {
+                Some(table)
+            }
         } else {
             None
         }

@@ -85,6 +85,18 @@ fn pop3_send_with_body(host: &str, port: u16, command: &str) -> Result<String, m
     Ok(response)
 }
 
+/// Reject POP3 argument values containing CR/LF so Lua-supplied
+/// credentials cannot inject additional protocol commands.
+fn reject_crlf(value: &str, field: &str) -> Result<(), mlua::Error> {
+    if value.contains('\r') || value.contains('\n') {
+        return Err(mlua::Error::RuntimeError(format!(
+            "pop3: {} must not contain CR or LF",
+            field
+        )));
+    }
+    Ok(())
+}
+
 pub fn register_pop3_library(lua: &Lua) -> LuaResult<()> {
     let globals = lua.globals();
     let pop3 = lua.create_table()?;
@@ -108,6 +120,7 @@ pub fn register_pop3_library(lua: &Lua) -> LuaResult<()> {
     pop3.set("connect", connect_fn)?;
 
     let user_fn = lua.create_function(|lua, (host, port, username): (String, u16, String)| {
+        reject_crlf(&username, "username")?;
         let tag = format!("USER {}\r\n", username);
         let response = pop3_send(&host, port, &tag)?;
         let result = lua.create_table()?;
@@ -119,6 +132,7 @@ pub fn register_pop3_library(lua: &Lua) -> LuaResult<()> {
     pop3.set("user", user_fn)?;
 
     let pass_fn = lua.create_function(|lua, (host, port, password): (String, u16, String)| {
+        reject_crlf(&password, "password")?;
         let tag = format!("PASS {}\r\n", password);
         let response = pop3_send(&host, port, &tag)?;
         let result = lua.create_table()?;
@@ -321,6 +335,8 @@ pub fn register_pop3_library(lua: &Lua) -> LuaResult<()> {
 
     let apop_fn = lua.create_function(
         |lua, (host, port, username, digest): (String, u16, String, String)| {
+            reject_crlf(&username, "username")?;
+            reject_crlf(&digest, "digest")?;
             let cmd = format!("APOP {} {}\r\n", username, digest);
             let response = pop3_send(&host, port, &cmd)?;
             let result = lua.create_table()?;
@@ -336,4 +352,30 @@ pub fn register_pop3_library(lua: &Lua) -> LuaResult<()> {
 
     globals.set("pop3", pop3)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_pass_apop_reject_crlf_before_network() {
+        let lua = Lua::new();
+        register_pop3_library(&lua).expect("pop3 library must register");
+        for chunk in [
+            r#"return pop3.user("127.0.0.1", 9, "alice\r\nDELE 1")"#,
+            r#"return pop3.pass("127.0.0.1", 9, "s3cret\nQUIT")"#,
+            r#"return pop3.apop("127.0.0.1", 9, "alice", "d\ngest")"#,
+        ] {
+            let err = lua
+                .load(chunk)
+                .call::<mlua::Table>(())
+                .expect_err("CRLF credentials must be rejected");
+            assert!(
+                err.to_string().contains("must not contain CR or LF"),
+                "unexpected error: {}",
+                err
+            );
+        }
+    }
 }

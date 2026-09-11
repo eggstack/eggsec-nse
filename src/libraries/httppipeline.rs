@@ -144,7 +144,12 @@ pub fn register_httppipeline_library(
 
                         let headers = lua.create_table()?;
                         for (k, v) in r.headers() {
-                            let _ = headers.set(k.to_string(), v.to_str().unwrap_or(""));
+                            if let Err(e) = headers.set(k.to_string(), v.to_str().unwrap_or("")) {
+                                tracing::debug!(
+                                    "nse httppipeline: failed to set response header: {}",
+                                    e
+                                );
+                            }
                         }
                         resp_tbl.set("headers", headers)?;
 

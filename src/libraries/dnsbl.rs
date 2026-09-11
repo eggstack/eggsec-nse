@@ -31,7 +31,10 @@ fn get_resolver() -> Result<&'static TokioResolver, String> {
         e.to_string()
     })?;
     // If another thread won the init race, drop ours and use theirs.
-    let _ = DNSBL_RESOLVER.set(resolver);
+    // First-wins: a failed `set` means the resolver is already initialized.
+    if DNSBL_RESOLVER.set(resolver).is_err() {
+        tracing::debug!("DNSBL resolver already initialized; keeping existing instance");
+    }
     DNSBL_RESOLVER
         .get()
         .ok_or_else(|| "DNSBL resolver unavailable after init".to_string())

@@ -288,7 +288,12 @@ pub fn register_xdmcp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
                                 if len > 0 {
                                     count += 1;
                                     let server = lua.create_table()?;
-                                    let _ = server.set("address", src.to_string());
+                                    if let Err(e) = server.set("address", src.to_string()) {
+                                        tracing::debug!(
+                                            "nse xdmcp: failed to set server address: {}",
+                                            e
+                                        );
+                                    }
 
                                     if let Some(name) = parse_willing(&buf[..len]) {
                                         server.set("name", name.0)?;

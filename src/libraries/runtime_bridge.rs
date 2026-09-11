@@ -18,27 +18,53 @@
 /// Returns the future's output. If no tokio runtime is active in the
 /// current thread, a dedicated current-thread runtime is constructed
 /// and torn down on completion.
-pub fn block_on_async<F>(fut: F) -> F::Output
+///
+/// Fallible variant of [`block_on_async`]: runtime-construction failure
+/// is returned to the caller instead of panicking. Prefer this in new
+/// code so Lua callbacks can surface the error via `mlua::Error`.
+pub fn try_block_on_async<F>(fut: F) -> std::io::Result<F::Output>
 where
     F: std::future::Future,
 {
     match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.block_on(fut),
+        Ok(handle) => Ok(handle.block_on(fut)),
         Err(_) => {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
-                .build()
-                .unwrap_or_else(|e| {
-                    tracing::error!(
-                        "failed to construct dedicated runtime for NSE async bridge: {}",
-                        e
-                    );
-                    panic!(
-                        "failed to construct dedicated runtime for NSE async bridge: {}",
-                        e
-                    );
-                });
-            rt.block_on(fut)
+                .build()?;
+            Ok(rt.block_on(fut))
+        }
+    }
+}
+
+/// Run an async future to completion from a synchronous context.
+///
+/// Returns the future's output. If no tokio runtime is active in the
+/// current thread, a dedicated current-thread runtime is constructed
+/// and torn down on completion.
+///
+/// # Panics
+///
+/// Panics only if the ephemeral runtime cannot be constructed. The
+/// builder uses a fixed, valid configuration, so construction fails
+/// solely on process-global resource exhaustion (unrecoverable); the
+/// failure is logged before panicking. Callers that must handle the
+/// error should use [`try_block_on_async`] instead.
+pub fn block_on_async<F>(fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    match try_block_on_async(fut) {
+        Ok(output) => output,
+        Err(e) => {
+            tracing::error!(
+                "failed to construct dedicated runtime for NSE async bridge: {}",
+                e
+            );
+            panic!(
+                "failed to construct dedicated runtime for NSE async bridge: {}",
+                e
+            );
         }
     }
 }
