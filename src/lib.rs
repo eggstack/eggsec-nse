@@ -275,6 +275,8 @@ pub mod executor;
 pub mod executor_core;
 #[cfg(feature = "nse")]
 pub mod format;
+#[cfg(feature = "nse")]
+pub mod http_capability;
 pub mod limits;
 pub mod output;
 pub mod profile;
