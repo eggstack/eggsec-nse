@@ -17,7 +17,9 @@ categories = ["development-tools"]
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+# Phase E WS3: Lua sync closures block_on a current-thread/multi-thread runtime;
+# net/io/sync/time for socket/dns helpers. No fs/process/signal/io-std.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "sync", "time", "io-util"] }
 parking_lot.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
