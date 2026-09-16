@@ -4,7 +4,7 @@ use eggsec_core::types::Severity;
 use eggsec_nse::capabilities::NseCapabilityEvent;
 use eggsec_nse::capabilities::NseCapabilityKind;
 use eggsec_nse::report::*;
-use eggsec_output::envelope::EvidenceKind as OutputEvidenceKind;
+use eggsec_report_model::EvidenceKind as OutputEvidenceKind;
 
 fn empty_compatibility() -> NseCompatibilitySummary {
     NseCompatibilitySummary {

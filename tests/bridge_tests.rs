@@ -2,7 +2,7 @@
 
 use eggsec_core::types::Severity;
 use eggsec_nse::report::*;
-use eggsec_output::envelope::EvidenceKind as OutputEvidenceKind;
+use eggsec_report_model::EvidenceKind as OutputEvidenceKind;
 
 fn compatible_report_with_evidence(evidence: Vec<NseEvidenceItem>) -> NseRunReport {
     NseRunReport::new("10.0.0.1", "test_script")

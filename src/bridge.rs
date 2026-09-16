@@ -1,6 +1,6 @@
 //! Bridge from NseRunReport to normalized ReportEnvelope.
 //!
-//! Maps NSE evidence items and report metadata into the eggsec-output
+//! Maps NSE evidence items and report metadata into the eggsec-report-model
 //! normalized report envelope for cross-domain report integration.
 //!
 //! This module follows the same pattern as `eggsec-db-lab/src/bridge.rs`:
@@ -9,12 +9,12 @@
 
 use crate::report::NseRunReport;
 use eggsec_core::types::Severity;
-use eggsec_output::envelope::{
+use eggsec_report_model::{
     EvidenceItem as OutputEvidenceItem, EvidenceKind as OutputEvidenceKind, EvidenceSource,
     FindingRecord, RedactionState, ReportEnvelope, ToolMetadata,
 };
 
-/// Map NseEvidenceKind to eggsec-output EvidenceKind.
+/// Map NseEvidenceKind to report-model EvidenceKind.
 fn evidence_kind_to_output(kind: &crate::report::NseEvidenceKind) -> OutputEvidenceKind {
     match kind {
         crate::report::NseEvidenceKind::ServiceFingerprint => OutputEvidenceKind::Banner,
