@@ -262,11 +262,10 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
         };
 
         match connector.connect(&host, stream) {
-            Ok(tls_stream) => {
+            Ok(_tls_stream) => {
                 result.set("version", "negotiated")?;
                 result.set("cipher", "negotiated")?;
                 result.set("curve", "negotiated")?;
-                let _ = tls_stream;
             }
             Err(e) => {
                 result.set("error", format!("TLS handshake error: {}", e))?;
@@ -428,11 +427,10 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
         };
 
         match connector.connect(&host, stream) {
-            Ok(tls_stream) => {
+            Ok(_tls_stream) => {
                 result.set("version", "negotiated")?;
                 result.set("cipher", "negotiated")?;
                 result.set("peer_certificate", true)?;
-                let _ = tls_stream;
             }
             Err(e) => {
                 result.set("error", format!("TLS handshake error: {}", e))?;

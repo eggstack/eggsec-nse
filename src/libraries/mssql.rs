@@ -93,7 +93,7 @@ pub fn register_mssql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
     let query_fn =
         lua.create_function(move |_lua, (host, port, query): (String, u16, String)| {
             if let Some(denied) = maybe_denied_mssql(_lua, &cap, &host, "mssql.query")? {
-                let _ = denied;
+                tracing::debug!(denial = ?denied, "mssql.query denied by capability policy");
                 return Ok(String::new());
             }
             let addr = format!("{}:{}", host, port);

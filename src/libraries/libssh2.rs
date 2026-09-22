@@ -281,20 +281,15 @@ impl UserData for LibSsh2Session {
         });
 
         // channel_eof
-        methods.add_method_mut("channel_eof", |_lua, _this, channel: Table| {
-            let _ = channel;
-            Ok(true)
-        });
+        methods.add_method_mut("channel_eof", |_lua, _this, _channel: Table| Ok(true));
 
         // channel_exit_status
-        methods.add_method("channel_exit_status", |_lua, _this, channel: Table| {
-            let _ = channel;
+        methods.add_method("channel_exit_status", |_lua, _this, _channel: Table| {
             Ok(0i32)
         });
 
         // channel_exit_signal
-        methods.add_method("channel_exit_signal", |_lua, _this, channel: Table| {
-            let _ = channel;
+        methods.add_method("channel_exit_signal", |_lua, _this, _channel: Table| {
             Ok("".to_string())
         });
 
@@ -308,8 +303,7 @@ impl UserData for LibSsh2Session {
         });
 
         // hostkey_hash
-        methods.add_method("hostkey_hash", |_lua, this, hash_type: String| {
-            let _ = hash_type;
+        methods.add_method("hostkey_hash", |_lua, this, _hash_type: String| {
             if let Some(ref _session) = this.session {
                 Ok("xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx:xx".to_string())
             } else {
@@ -320,17 +314,13 @@ impl UserData for LibSsh2Session {
         // knownhost_check
         methods.add_method(
             "knownhost_check",
-            |_lua, this, (host, port, key): (String, i32, String)| {
-                let _ = (this, host, port, key);
-                Ok(1i32)
-            },
+            |_lua, _this, (_host, _port, _key): (String, i32, String)| Ok(1i32),
         );
 
         // knownhost_add
         methods.add_method_mut(
             "knownhost_add",
-            |_lua, this, (host, port, key, _comment): (String, i32, String, Option<String>)| {
-                let _ = (this, host, port, key);
+            |_lua, _this, (_host, _port, _key, _comment): (String, i32, String, Option<String>)| {
                 Ok(0i32)
             },
         );
@@ -347,27 +337,16 @@ impl UserData for LibSsh2Session {
         });
 
         // keepalive_send
-        methods.add_method_mut("keepalive_send", |_lua, this, _: ()| {
-            let _ = this;
-            Ok(0i32)
-        });
+        methods.add_method_mut("keepalive_send", |_lua, _this, _: ()| Ok(0i32));
 
         // set_blocking
-        methods.add_method_mut("set_blocking", |_lua, this, blocking: bool| {
-            let _ = this;
-            let _ = blocking;
-            Ok(true)
-        });
+        methods.add_method_mut("set_blocking", |_lua, _this, _blocking: bool| Ok(true));
 
         // get_blocking
-        methods.add_method("get_blocking", |_lua, this, _: ()| {
-            let _ = this;
-            Ok(true)
-        });
+        methods.add_method("get_blocking", |_lua, _this, _: ()| Ok(true));
 
         // session_last_error
-        methods.add_method("session_last_error", |_lua, this, _: ()| {
-            let _ = this;
+        methods.add_method("session_last_error", |_lua, _this, _: ()| {
             let result = _lua.create_table()?;
             result.set("error", "")?;
             result.set("errcode", 0)?;
@@ -377,41 +356,28 @@ impl UserData for LibSsh2Session {
         // session_flag
         methods.add_method_mut(
             "session_flag",
-            |_lua, this, (flag, value): (String, bool)| {
-                let _ = (this, flag, value);
-                Ok(true)
-            },
+            |_lua, _this, (_flag, _value): (String, bool)| Ok(true),
         );
 
         // session_method_pref
         methods.add_method_mut(
             "session_method_pref",
-            |_lua, this, (method, pref): (String, String)| {
-                let _ = (this, method, pref);
-                Ok(0i32)
-            },
+            |_lua, _this, (_method, _pref): (String, String)| Ok(0i32),
         );
 
         // require_session_methods
         methods.add_method(
             "require_session_methods",
-            |_lua, this, method_type: String| {
-                let _ = (this, method_type);
-                Ok(true)
-            },
+            |_lua, _this, _method_type: String| Ok(true),
         );
 
         // get_auth_methods (property)
-        methods.add_method("get_auth_methods", |_lua, this, _: ()| {
-            let _ = this;
+        methods.add_method("get_auth_methods", |_lua, _this, _: ()| {
             Ok("publickey,password,keyboard-interactive".to_string())
         });
 
         // server_publickey (property)
-        methods.add_method("server_publickey", |_lua, this, _: ()| {
-            let _ = this;
-            Ok(Value::Nil)
-        });
+        methods.add_method("server_publickey", |_lua, _this, _: ()| Ok(Value::Nil));
     }
 }
 
@@ -423,8 +389,7 @@ pub fn register_libssh2_library(
     let globals = lua.globals();
     let libssh2 = lua.create_table()?;
 
-    let session_fn = lua.create_function(|lua, (host, port): (String, Option<u16>)| {
-        let _ = (host, port);
+    let session_fn = lua.create_function(|lua, (_host, _port): (String, Option<u16>)| {
         let result = lua.create_table()?;
         result.set("error", "libssh2 requires nse-ssh2 feature")?;
         Ok(result)

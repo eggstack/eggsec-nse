@@ -39,7 +39,6 @@ pub fn register_bin_library(lua: &Lua) -> LuaResult<()> {
                     if i >= chars.len() {
                         break;
                     }
-                    let _ = c;
                 }
 
                 match c {

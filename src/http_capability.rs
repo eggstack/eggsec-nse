@@ -30,7 +30,7 @@
 //! for NSE protocol compatibility (`sslcert`/`openssl` libs + `nse` feature),
 //! never for ordinary HTTP aesthetics.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 use eggsec_transport::{
     HttpTransport, NetworkAuthority, RedirectPolicy, RequestBody, ScopedHttpRequest, TimeoutPolicy,
@@ -113,7 +113,7 @@ pub fn build_scoped_request(
     ctx: &NseCapabilityContext,
     method: &str,
     url: &str,
-    headers: &HashMap<String, String>,
+    headers: &FxHashMap<String, String>,
     body: Option<Vec<u8>>,
     timeout_secs: u64,
 ) -> Result<ScopedHttpRequest, String> {
@@ -212,7 +212,7 @@ mod tests {
             &ctx,
             "GET",
             "http://user:pass@example.com/",
-            &HashMap::new(),
+            &FxHashMap::default(),
             None,
             30,
         )
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn invalid_headers_rejected() {
         let ctx = test_context(NseExecutionProfileKind::AgentSafe);
-        let mut headers = HashMap::new();
+        let mut headers = FxHashMap::default();
         headers.insert("Bad Header Name!!".to_string(), "v".to_string());
         let err = build_scoped_request(&ctx, "GET", "http://example.com/", &headers, None, 30)
             .unwrap_err();
@@ -247,7 +247,7 @@ mod tests {
                 &ctx,
                 "GET",
                 "http://example.com/",
-                &HashMap::new(),
+                &FxHashMap::default(),
                 None,
                 30,
             )
@@ -258,7 +258,7 @@ mod tests {
             &manual,
             "POST",
             "http://example.com/submit",
-            &HashMap::new(),
+            &FxHashMap::default(),
             Some(b"a=1".to_vec()),
             30,
         )
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn policies_match_parity() {
         let ctx = test_context(NseExecutionProfileKind::AgentSafe);
-        let mut headers = HashMap::new();
+        let mut headers = FxHashMap::default();
         headers.insert("X-Custom".to_string(), "1".to_string());
         let req = build_scoped_request(
             &ctx,
@@ -299,9 +299,15 @@ mod tests {
         assert!(req.body.is_replayable());
         assert_eq!(req.body.len(), 2);
         // Timeout floor: 0 clamps to 1s (fail-closed, never zero).
-        let floored =
-            build_scoped_request(&ctx, "GET", "http://example.com/", &HashMap::new(), None, 0)
-                .expect("builds");
+        let floored = build_scoped_request(
+            &ctx,
+            "GET",
+            "http://example.com/",
+            &FxHashMap::default(),
+            None,
+            0,
+        )
+        .expect("builds");
         assert_eq!(
             floored.timeout.request_timeout,
             std::time::Duration::from_secs(1)

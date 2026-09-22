@@ -129,12 +129,11 @@ pub fn register_ssh_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     // ssh.login() - Authenticate to SSH server
     let capability_ctx1 = capability_ctx.clone();
     let login_fn = lua.create_function(
-        move |lua, (host, port, user, password): (String, Option<u16>, String, String)| {
+        move |lua, (host, port, user, _password): (String, Option<u16>, String, String)| {
             let _port = port.unwrap_or(SSH_PORT);
             if !network_allowed(&capability_ctx1, &host, "ssh.login") {
                 return Ok(denied_result(lua, "ssh.login")?);
             }
-            let _ = (&host, &user, &password);
 
             #[cfg(feature = "nse-ssh2")]
             {
@@ -172,7 +171,7 @@ pub fn register_ssh_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                     return Ok(result);
                 }
 
-                match session.userauth_password(&user, &password) {
+                match session.userauth_password(&user, &_password) {
                     Ok(()) => {
                         let result = lua.create_table()?;
                         result.set("success", true)?;
@@ -214,7 +213,6 @@ pub fn register_ssh_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             if !network_allowed(&capability_ctx2, &host, "ssh.execute") {
                 return Ok(denied_result(lua, "ssh.execute")?);
             }
-            let _ = &host;
 
             #[cfg(feature = "nse-ssh2")]
             {
@@ -446,12 +444,11 @@ pub fn register_ssh_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     // ssh.userauth_pubkey() - Public key authentication
     let capability_ctx4 = capability_ctx.clone();
     let userauth_pubkey_fn = lua.create_function(
-        move |lua, (host, port, user, key_file): (String, Option<u16>, String, String)| {
+        move |lua, (host, port, user, _key_file): (String, Option<u16>, String, String)| {
             let _port = port.unwrap_or(SSH_PORT);
             if !network_allowed(&capability_ctx4, &host, "ssh.userauth_pubkey") {
                 return Ok(denied_result(lua, "ssh.userauth_pubkey")?);
             }
-            let _ = (&host, &user, &key_file);
 
             #[cfg(feature = "nse-ssh2")]
             {
@@ -490,11 +487,11 @@ pub fn register_ssh_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 }
 
                 // Try to read the public key file
-                let key_path = std::path::Path::new(&key_file);
+                let key_path = std::path::Path::new(&_key_file);
                 if !key_path.exists() {
                     let result = lua.create_table()?;
                     result.set("success", false)?;
-                    result.set("error", format!("Key file not found: {}", key_file))?;
+                    result.set("error", format!("Key file not found: {}", _key_file))?;
                     return Ok(result);
                 }
 
@@ -669,7 +666,6 @@ pub fn register_ssh_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 if !network_allowed(&capability_ctx6, &host, "ssh.scp_upload") {
                     return Ok(denied_result(lua, "ssh.scp_upload")?);
                 }
-                let _ = &host;
 
                 #[cfg(feature = "nse-ssh2")]
                 {
@@ -732,7 +728,6 @@ pub fn register_ssh_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             if !network_allowed(&capability_ctx7, &host, "ssh.sftp") {
                 return Ok(denied_result(lua, "ssh.sftp")?);
             }
-            let _ = (&host, &operation, &path);
 
             #[cfg(feature = "nse-ssh2")]
             {
@@ -853,12 +848,11 @@ pub fn register_ssh_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     // ssh.userauth() - Generic user authentication
     let capability_ctx9 = capability_ctx.clone();
     let userauth_fn = lua.create_function(
-        move |lua, (host, port, user, password): (String, Option<u16>, String, String)| {
+        move |lua, (host, port, user, _password): (String, Option<u16>, String, String)| {
             let _port = port.unwrap_or(SSH_PORT);
             if !network_allowed(&capability_ctx9, &host, "ssh.userauth") {
                 return Ok(denied_result(lua, "ssh.userauth")?);
             }
-            let _ = (&host, &user, &password);
 
             #[cfg(feature = "nse-ssh2")]
             {
@@ -896,7 +890,7 @@ pub fn register_ssh_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                     return Ok(result);
                 }
 
-                match session.userauth_password(&user, &password) {
+                match session.userauth_password(&user, &_password) {
                     Ok(()) => {
                         let result = lua.create_table()?;
                         result.set("success", true)?;

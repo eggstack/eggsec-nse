@@ -3,8 +3,8 @@
 //! Provides OS operations compatible with NSE.
 
 use mlua::{Lua, Result as LuaResult, Table};
+use rustc_hash::FxHashMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::env;
 use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,7 +13,7 @@ use crate::capabilities::NseCapabilityContext;
 use crate::SandboxConfig;
 
 thread_local! {
-    static NSE_ENV: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
+    static NSE_ENV: RefCell<FxHashMap<String, String>> = RefCell::new(FxHashMap::default());
 }
 
 static EXIT_CODE: AtomicI32 = AtomicI32::new(0);

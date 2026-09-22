@@ -806,10 +806,14 @@ pub fn nse_network_udp_receive(
 /// Perform a DNS lookup after checking DNS resolution capability.
 ///
 /// Returns the resolved addresses or a denial/error string.
+///
+/// `record_type` is currently informational: resolution uses the system
+/// resolver (`ToSocketAddrs`, A/AAAA only); callers pass the requested type
+/// for forward-compatibility with a record-aware resolver.
 pub fn nse_dns_lookup(
     ctx: &NseCapabilityContext,
     name: &str,
-    record_type: Option<&str>,
+    _record_type: Option<&str>,
 ) -> Result<Vec<String>, String> {
     let op = "wrapper.dns_lookup";
     ctx.check_cancelled(op)?;
@@ -1689,7 +1693,7 @@ mod tests {
 
         // TCP connect to a non-existent host will fail, but the counter
         // should still be updated after the capability check passes
-        let _ = nse_network_tcp_connect(
+        let connect_result = nse_network_tcp_connect(
             &ctx,
             "192.0.2.1",
             1,
@@ -1702,6 +1706,8 @@ mod tests {
         let ops_after = ctx.counters.network_operations.load(Ordering::Relaxed);
         // Connect may fail at the OS level, but the check passed
         assert!(ops_after >= ops_before);
+        // 192.0.2.1 is TEST-NET-1: the connect itself must fail.
+        assert!(connect_result.is_err(), "connect to TEST-NET-1 must fail");
     }
 
     // -----------------------------------------------------------------------

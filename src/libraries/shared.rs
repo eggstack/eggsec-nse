@@ -212,7 +212,9 @@ pub fn sync_require_modules(lua: &Lua) -> LuaResult<()> {
 
     for name in STANDARD_SYNC_MODULES {
         if let Ok(table) = globals.get::<Table>(*name) {
-            let _ = modules.set(*name, table);
+            if let Err(e) = modules.set(*name, table) {
+                tracing::debug!(module = name, error = %e, "failed to register sync module");
+            }
         }
     }
 
