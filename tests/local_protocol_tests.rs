@@ -1603,12 +1603,14 @@ fn local_protocol_report_json_roundtrip() {
     );
 }
 
-/// Verify that local protocol reports produce valid ReportEnvelopes.
+/// Verify that local protocol reports carry output evidence at the runtime
+/// level. Envelope conversion is engine-owned (`eggsec::nse_bridge`) and
+/// covered by `crates/eggsec/tests/nse_bridge_tests.rs`.
 #[test]
-fn local_protocol_report_to_envelope_bridge() {
+fn local_protocol_report_carries_output_evidence() {
     let server = local_fixtures::HttpServer::start();
     let profile = make_manual_permissive_profile(vec![]);
-    let (report, _evidence) = run_local_fixture(
+    let (report, evidence) = run_local_fixture(
         "scripts/protocol/http_get_local.nse",
         "127.0.0.1",
         server.port(),
@@ -1618,11 +1620,13 @@ fn local_protocol_report_to_envelope_bridge() {
         &profile,
     );
 
-    let envelope = eggsec_nse::bridge::to_report_envelope(&report);
-    assert_eq!(envelope.domain_id.as_deref(), Some("nse"));
     assert!(
-        !envelope.findings.is_empty(),
-        "envelope should have findings for HTTP GET"
+        !evidence.is_empty(),
+        "local HTTP GET report should carry evidence"
+    );
+    assert!(
+        report.output.has_output,
+        "local HTTP GET report should have output"
     );
 }
 

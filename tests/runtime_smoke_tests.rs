@@ -6,16 +6,18 @@
 //! 3. Inject target/ports via `set_target` / `add_port`.
 //! 4. Resolve and execute the script via `run_script_with_rules`.
 //! 5. Build an `NseRunReport` via the builder chain.
-//! 6. Bridge to `ReportEnvelope` and assert envelope shape.
 //!
-//! The goal is to verify the full pipeline (profile → context → execution →
-//! report → envelope) produces a consistent, well-formed envelope for
+//! Report-envelope conversion is engine-owned (`eggsec::nse_bridge`) and
+//! covered by `crates/eggsec/tests/nse_bridge_tests.rs`; these tests stop
+//! at the runtime report boundary.
+//!
+//! The goal is to verify the full runtime pipeline (profile → context →
+//! execution → report) produces a consistent, well-formed report for
 //! representative NSE scenarios. This complements the runtime_corpus_tests
 //! manifest-driven tests and the unit-level profile_report_tests.
 
 #![cfg(feature = "nse")]
 
-use eggsec_nse::bridge::to_report_envelope;
 use eggsec_nse::executor::NseExecutor;
 use eggsec_nse::profile::{
     NseExecutionProfileKind, NseModulePolicy, NseNetworkPolicy, NseScriptPolicy,
@@ -111,7 +113,7 @@ fn build_envelope_from_execution(
 }
 
 #[test]
-fn smoke_compatibility_lab_executes_and_emits_compatible_envelope() {
+fn smoke_compatibility_lab_executes_with_compatible_report() {
     let profile = make_profile(NseExecutionProfileKind::CompatibilityLab, true);
     let script = r#"
 description = [[Smoke: simple portrule that matches our injected port.]]
@@ -122,7 +124,7 @@ action = function(host, port)
   return "smoke-ok"
 end
 "#;
-    let (report, _evidence) = build_envelope_from_execution(&profile, script, "127.0.0.1", 80);
+    let (report, evidence) = build_envelope_from_execution(&profile, script, "127.0.0.1", 80);
 
     assert!(
         matches!(
@@ -141,23 +143,17 @@ end
     ));
     assert!(!report.output.content.is_empty());
 
-    let envelope = to_report_envelope(&report);
-    assert_eq!(envelope.domain_id.as_deref(), Some("nse"));
+    // Output evidence is runtime-owned: non-empty output yields ScriptOutput.
     assert!(
-        envelope.findings.iter().any(|f| f.id == "metadata-nse"),
-        "envelope must include execution metadata finding",
-    );
-    assert!(
-        envelope
-            .findings
+        evidence
             .iter()
-            .all(|f| f.severity == eggsec_core::types::Severity::Info),
-        "compatible smoke envelope should have only Info findings",
+            .any(|e| matches!(e.kind, NseEvidenceKind::ScriptOutput)),
+        "non-empty smoke output must produce ScriptOutput evidence",
     );
 }
 
 #[test]
-fn smoke_agent_safe_executes_and_capability_denials_surface_in_envelope() {
+fn smoke_agent_safe_executes_and_capability_denials_surface_in_report() {
     let profile = make_profile(NseExecutionProfileKind::AgentSafe, true);
     let script = r#"
 description = [[Smoke: process exec under AgentSafe is denied.]]
@@ -180,12 +176,8 @@ end
         report.compatibility.status,
     );
 
-    let envelope = to_report_envelope(&report);
-    assert_eq!(envelope.domain_id.as_deref(), Some("nse"));
-
     // Either the report records a process_exec capability denial, or the
-    // evidence list contains a CapabilityDenial item — either signals the
-    // envelope carried the runtime instrumentation.
+    // evidence list contains a CapabilityDenial item.
     let saw_denial_in_evidence = evidence
         .iter()
         .any(|e| matches!(e.kind, NseEvidenceKind::CapabilityDenial));

@@ -269,8 +269,6 @@ pub mod executor;
 pub mod executor_core;
 #[cfg(feature = "nse")]
 pub mod format;
-#[cfg(feature = "nse")]
-pub mod http_capability;
 pub mod limits;
 pub mod output;
 pub mod profile;
@@ -286,9 +284,6 @@ pub mod wrappers;
 
 #[cfg(feature = "nse")]
 pub mod libraries;
-
-#[cfg(feature = "nse")]
-pub mod bridge;
 
 #[cfg(feature = "nse")]
 pub use async_executor::AsyncNseExecutor;

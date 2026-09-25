@@ -1028,22 +1028,23 @@ fn corpus_runtime_report_json_roundtrip() {
     }
 }
 
-/// Verify report envelope bridge produces a valid envelope for a runtime report.
+/// Verify a runtime corpus report carries evidence at the runtime level.
+/// Envelope conversion is engine-owned (`eggsec::nse_bridge`) and covered by
+/// `crates/eggsec/tests/nse_bridge_tests.rs`.
 #[test]
-fn corpus_runtime_report_to_envelope_bridge() {
+fn corpus_runtime_report_carries_evidence() {
     let manifest = get_manifest();
     let entry = manifest
         .fixture
         .iter()
         .find(|e| e.id == "simple-portrule")
         .expect("simple-portrule fixture");
-    let (report, _evidence) = run_fixture_runtime(entry);
-    let envelope = eggsec_nse::bridge::to_report_envelope(&report);
-    assert_eq!(envelope.domain_id.as_deref(), Some("nse"));
+    let (report, evidence) = run_fixture_runtime(entry);
     assert!(
-        !envelope.findings.is_empty(),
-        "envelope should have findings"
+        !evidence.is_empty(),
+        "matched corpus fixture should carry evidence"
     );
+    assert!(report.output.has_output);
 }
 
 // ---------------------------------------------------------------------------

@@ -47,9 +47,10 @@ openssl = { version = "0.10", features = ["vendored"], optional = true }
 des = { version = "0.8", optional = true }
 ssh2 = { version = "0.9", optional = true }
 ipnetwork.workspace = true
-eggsec-core = { path = "../eggsec-core", version = "0.1.0" }
-eggsec-report-model = { path = "../eggsec-report-model", version = "0.1.0" }
-eggsec-transport = { workspace = true }
+# Runtime-extraction Milestone 002: zero `eggsec-*` dependencies. Eggsec
+# report conversion lives in `eggsec::nse_bridge` and the scoped-transport
+# HTTP adapter in `eggsec::nse_http_capability`; the runtime uses only
+# public-ecosystem and std types for NSE semantics.
 
 [dev-dependencies]
 toml = "0.8"
