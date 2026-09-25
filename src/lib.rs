@@ -5,14 +5,8 @@
 //! to provide NSE-compatible libraries.
 
 use ipnetwork::IpNetwork;
-#[cfg(feature = "nse")]
-use regex::Regex;
-#[cfg(feature = "nse")]
-use rustc_hash::FxHashSet;
 use std::net::IpAddr;
 use std::path::PathBuf;
-#[cfg(feature = "nse")]
-use std::sync::LazyLock;
 
 #[cfg(all(feature = "nse", target_family = "unix"))]
 #[link(name = "z")]
@@ -286,6 +280,8 @@ pub mod public_api;
 pub mod report;
 pub mod resolver;
 #[cfg(feature = "nse")]
+pub mod run;
+#[cfg(feature = "nse")]
 pub mod wrappers;
 
 #[cfg(feature = "nse")]
@@ -343,6 +339,11 @@ pub use report::{
 
 #[cfg(feature = "nse")]
 pub use context::{NseContextSource, NseHostContext, NsePortContext, NseServiceContext};
+#[cfg(feature = "nse")]
+pub use run::{
+    execute_nse_run, extract_static_requires, script_name_for_source, NseRunError, NseRunErrorKind,
+    NseRunRequest,
+};
 
 /// Compatibility wrapper that defaults to `ManualPermissive` profile.
 ///
@@ -380,30 +381,6 @@ pub async fn run_cli_with_profile(
         tracing::warn!("{}", warning);
     }
 
-    if script_file.is_some() && !resolved_profile.script_policy.allow_script_files {
-        let failure_source = crate::resolver::NseScriptSource::File {
-            path: std::path::PathBuf::from(script_file.as_ref().unwrap()),
-        };
-        let report = build_failure_report(
-            &config.target,
-            &config.script,
-            &failure_source,
-            &resolved_profile,
-            &format!(
-                "Profile '{}' does not allow arbitrary script files.",
-                resolved_profile.kind
-            ),
-        );
-        if json {
-            println!("{}", serde_json::to_string_pretty(&report)?);
-        }
-        anyhow::bail!(
-            "Profile '{}' does not allow arbitrary script files. \
-             Use built-in scripts only.",
-            resolved_profile.kind
-        );
-    }
-
     println!("Running NSE script '{}' against '{}'", script, target);
     if resolved_profile
         .warnings
@@ -413,98 +390,38 @@ pub async fn run_cli_with_profile(
         println!("Warning: sandbox enforcement is disabled (feature not compiled)");
     }
 
-    let report_profile = resolved_profile.clone();
-    // Clone for the blocking task so we still hold `resolved_profile` for the
-    // post-execution report/profile label rendering below.
-    let execution_profile = resolved_profile.clone();
-
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, crate::resolver::NseScriptSource, Vec<crate::resolver::NseLoadDiagnostic>, Vec<crate::report::NseRuleEvaluationReport>, Vec<crate::report::NseLibraryUseReport>, Vec<crate::capabilities::NseCapabilityEvent>)> {
-        let mut executor = NseExecutor::with_profile(&execution_profile)
-            .map_err(|e| anyhow::anyhow!("Failed to create NSE executor: {}", e))?;
-        executor
-            .set_target(&target)
-            .map_err(|e| anyhow::anyhow!("Failed to set target: {}", e))?;
-        executor
-            .set_script_args(&script_args)
-            .map_err(|e| anyhow::anyhow!("Invalid script args: {}", e))?;
-
-        let mut resolver = crate::resolver::ScriptResolver::new(
-            resolved_profile.script_policy.clone(),
-            resolved_profile.module_policy.clone(),
-            resolved_profile.limits.clone(),
-        );
-        let (script_content, script_source) = if let Some(ref script_file) = script_file {
-            let source = crate::resolver::NseScriptSource::File {
-                path: std::path::PathBuf::from(script_file),
-            };
-            let src = source.clone();
-            match resolver.resolve_script(source) {
-                Ok(resolved) => (resolved.content, src),
-                Err(e) => {
-                    tracing::error!(error = %e, "Script file resolution failed");
-                    anyhow::bail!("{}", e);
-                }
-            }
-        } else {
-            let content = get_builtin_script(&script);
-            let source = crate::resolver::NseScriptSource::InlineManual {
-                label: script.clone(),
-                content: content.clone(),
-            };
-            let src = source.clone();
-            match resolver.resolve_script(source) {
-                Ok(_) => (content, src),
-                Err(e) => {
-                    tracing::error!(error = %e, "Built-in script resolution failed");
-                    anyhow::bail!("{}", e);
-                }
-            }
-        };
-
-        let diagnostics = resolver.take_diagnostics();
-
-        let (output, _raw_outputs, rule_reports) = executor
-            .run_script_with_rules(&script_content)
-            .map_err(|e| anyhow::anyhow!("Script execution failed: {}", e))?;
-
-        let mut library_reports = executor.library_reports();
-        if library_reports.is_empty() {
-            let static_requires = extract_static_requires(&script_content);
-            if !static_requires.is_empty() {
-                library_reports = crate::report::library_use_reports_from_static_requires(
-                    &static_requires,
-                );
-            }
+    // Thin adapter over the canonical runtime pipeline: named scripts use
+    // the built-in source identity so policy and diagnostics match the
+    // Eggsec dispatch surface; file sources resolve through ScriptResolver.
+    let script_source = if let Some(ref script_file) = script_file {
+        crate::resolver::NseScriptSource::File {
+            path: std::path::PathBuf::from(script_file),
         }
+    } else {
+        crate::resolver::NseScriptSource::Builtin {
+            name: script.clone(),
+        }
+    };
+    let request = crate::run::NseRunRequest::new(&target, script_source, resolved_profile)
+        .with_script_args(&script_args);
 
-        let capability_events = executor.capability_events();
-
-        Ok((output, script_source, diagnostics, rule_reports, library_reports, capability_events))
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!("Task execution failed: {}", e))??;
-
-    let (output, script_source, diagnostics, rule_reports, library_reports, capability_events) =
-        result;
-
-    let report = crate::report::NseRunReport::new(&config.target, &config.script)
-        .with_profile(&report_profile)
-        .with_script_source(&script_source)
-        .with_resolver_diagnostics(&diagnostics)
-        .with_libraries(library_reports)
-        .with_rules(rule_reports)
-        .with_capability_events(capability_events)
-        .with_output(&output)
-        .compute_compatibility();
-    let evidence = crate::report::extract_evidence(
-        &report.target,
-        &report.script_name,
-        &report.capability_events,
-        &report.compatibility,
-        &report.rules,
-        &report.output,
-    );
-    let report = report.with_evidence(evidence);
+    let report = tokio::task::spawn_blocking(move || crate::run::execute_nse_run(request))
+        .await
+        .map_err(|e| anyhow::anyhow!("Task execution failed: {}", e))?
+        .map_err(|e| {
+            // Preserve the historical output contract: resolution failures
+            // (including profile file denials) render a failure report in
+            // JSON mode before bailing; execution failures bail directly.
+            if json && e.kind == crate::run::NseRunErrorKind::Resolution {
+                match serde_json::to_string_pretty(&e.failure_report()) {
+                    Ok(rendered) => println!("{}", rendered),
+                    Err(render_err) => {
+                        tracing::warn!("Failed to render NSE failure report: {}", render_err);
+                    }
+                }
+            }
+            anyhow::anyhow!("{}", e)
+        })?;
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -516,50 +433,8 @@ pub async fn run_cli_with_profile(
 }
 
 #[cfg(feature = "nse")]
-fn build_failure_report(
-    target: &str,
-    script: &str,
-    script_source: &crate::resolver::NseScriptSource,
-    profile: &ResolvedNseExecutionProfile,
-    error: &str,
-) -> crate::report::NseRunReport {
-    crate::report::NseRunReport::new(target, script)
-        .with_profile(profile)
-        .with_script_source(script_source)
-        .with_error(error)
-        .compute_compatibility()
-}
-
-#[cfg(feature = "nse")]
 fn print_human_report(report: &crate::report::NseRunReport) {
     print!("{}", crate::format::format_human_report(report));
-}
-
-#[cfg(feature = "nse")]
-static STATIC_REQUIRE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?m)\brequire\s*(?:\(\s*)?['"]([^'"]+)['"]\s*\)?"#)
-        .expect("static require regex must compile")
-});
-
-#[cfg(feature = "nse")]
-fn extract_static_requires(script_content: &str) -> Vec<String> {
-    let mut seen = FxHashSet::default();
-    let mut names = Vec::new();
-
-    for capture in STATIC_REQUIRE_RE.captures_iter(script_content) {
-        let Some(name) = capture.get(1).map(|m| m.as_str().trim()) else {
-            continue;
-        };
-        if name.is_empty() {
-            continue;
-        }
-        let name = name.to_string();
-        if seen.insert(name.clone()) {
-            names.push(name);
-        }
-    }
-
-    names
 }
 
 #[cfg(not(feature = "nse"))]
