@@ -57,8 +57,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          useradd --create-home --shell /bin/bash nse-ci
-          echo 'nse-ci:nse-ci-temporary-password' | chpasswd
+          sudo useradd --create-home --shell /bin/bash nse-ci
+          echo 'nse-ci:nse-ci-temporary-password' | sudo chpasswd
           port=22222
           sudo mkdir -p /run/sshd
           sudo /usr/sbin/sshd -p "$port" -o ListenAddress=127.0.0.1 -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=no -o PermitRootLogin=no -o UsePAM=no -o PidFile=/tmp/nse-sshd.pid
