@@ -70,7 +70,8 @@ fn run_banner_builtin() -> NseRunReport {
                         .set_read_timeout(Some(Duration::from_secs(5)))
                         .expect("bound fixture read");
                     let mut request = [0u8; 1024];
-                    stream.read(&mut request).expect("read banner request");
+                    let request_bytes = stream.read(&mut request).expect("read banner request");
+                    assert!(request_bytes > 0, "banner probe sent an empty request");
                     stream
                         .write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 4\r\n\r\nPONG")
                         .expect("respond to banner probe");
