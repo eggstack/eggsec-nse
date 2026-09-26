@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/check-boundaries.sh
+      - run: cargo fmt --all --check
+      - run: cargo metadata --no-deps
+      - run: cargo check --no-default-features
+      - run: cargo check --features nse
+      - run: cargo check --features nse-ssh2
+      - run: cargo check --features nse,sandbox
+      - run: cargo test --features nse
+      - run: cargo clippy --all-targets --features nse
+      - run: cargo package --list
+      - run: cargo package
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --no-default-features
+      - run: cargo check --locked --features nse
+
+  ssh-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Install local SSH server
+        run: sudo apt-get update && sudo apt-get install -y openssh-server
+      - name: Configure disposable loopback SSH account
+        id: ssh
+        shell: bash
+        run: |
+          set -euo pipefail
+          useradd --create-home --shell /bin/bash nse-ci
+          echo 'nse-ci:nse-ci-temporary-password' | chpasswd
+          port=22222
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -p "$port" -o ListenAddress=127.0.0.1 -o PasswordAuthentication=yes -o KbdInteractiveAuthentication=no -o PermitRootLogin=no -o UsePAM=no -o PidFile=/tmp/nse-sshd.pid
+          echo "port=$port" >> "$GITHUB_OUTPUT"
+          for attempt in $(seq 1 30); do
+            if bash -c "</dev/tcp/127.0.0.1/$port"; then exit 0; fi
+            sleep 1
+          done
+          echo 'sshd did not become ready' >&2
+          exit 1
+      - name: Exercise SSH2-backed runtime authentication
+        env:
+          NSE_SSH_TEST_PORT: ${{ steps.ssh.outputs.port }}
+        run: cargo test --locked --features nse-ssh2 --test ssh_runtime_tests -- --nocapture
+      - name: Stop SSH server and remove disposable account
+        if: always()
+        run: |
+          sudo kill "$(cat /tmp/nse-sshd.pid)" 2>/dev/null || true
+          sudo userdel --remove nse-ci 2>/dev/null || true
