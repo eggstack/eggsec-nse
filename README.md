@@ -8,7 +8,7 @@ This project targets practical compatibility for supported script categories. It
 
 ```toml
 [dependencies]
-eggsec-nse = { git = "https://github.com/eggstack/eggsec-nse", rev = "<immutable-commit>", features = ["nse"] }
+eggsec-nse = { version = "0.1", features = ["nse"] }
 ```
 
 ```rust,no_run

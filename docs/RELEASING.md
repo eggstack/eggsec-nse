@@ -58,6 +58,19 @@ publication from a maintainer workstation:
   verification before `cargo publish`.
 - Do not publish another version merely to exercise automation.
 
+### Trusted Publishing status
+
+- Repository side: `.github/workflows/release.yml` is Trusted
+  Publishing-ready (tag-only trigger `vX.Y.Z`, `release` environment,
+  official `rust-lang/crates-io-auth-action`, tag==`Cargo.toml` version
+  gate, clean-tree gate, full qualification before `cargo publish`).
+- Registry side: **pending**. The Trusted Publisher entry must be added
+  in the crate's settings on the crates.io website by a crate owner;
+  there is no API-only path available during this milestone. Until that
+  website-side step completes, the workflow fails closed at
+  authentication and releases use the manual-token recovery path above.
+  This is a low/operational residual, not a release blocker.
+
 ## Release verification
 
 Run against the exact release-candidate commit:
