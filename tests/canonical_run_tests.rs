@@ -18,6 +18,9 @@ use eggsec_nse::run::{
     NseRunRequest,
 };
 use eggsec_nse::{NseContextSource, NseHostContext, NsePortContext};
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::time::{Duration, Instant};
 
 /// Deterministic local fixture: portrule matches the injected synthetic
 /// port context; action returns a constant. No network, filesystem, or
@@ -49,6 +52,54 @@ fn parity_request(profile: ResolvedNseExecutionProfile) -> NseRunRequest {
         service: None,
         source: NseContextSource::Synthetic,
     })
+}
+
+/// Run the built-in banner probe against a disposable loopback HTTP server.
+fn run_banner_builtin() -> NseRunReport {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback fixture");
+    let port = listener.local_addr().expect("fixture address").port();
+    let server = std::thread::spawn(move || {
+        listener
+            .set_nonblocking(true)
+            .expect("configure fixture listener");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .expect("bound fixture read");
+                    let mut request = [0u8; 1024];
+                    stream.read(&mut request).expect("read banner request");
+                    stream
+                        .write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 4\r\n\r\nPONG")
+                        .expect("respond to banner probe");
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "banner probe timed out after 15s"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("loopback fixture accept failed: {error}"),
+            }
+        }
+    });
+
+    let profile = ResolvedNseExecutionProfile::manual_permissive(Some("127.0.0.1"));
+    let request = NseRunRequest::new(
+        "127.0.0.1",
+        NseScriptSource::Builtin {
+            name: "banner".to_string(),
+        },
+        profile,
+    )
+    .with_script_args(&format!("port={port}"));
+    let report = execute_nse_run(request).expect("builtin banner run succeeds");
+    server.join().expect("fixture thread completes");
+    report
 }
 
 #[test]
@@ -87,15 +138,7 @@ fn canonical_run_produces_complete_report() {
 
 #[test]
 fn canonical_run_builtin_source_reports_builtin_kind() {
-    let profile = ResolvedNseExecutionProfile::manual_permissive(Some("127.0.0.1"));
-    let request = NseRunRequest::new(
-        "127.0.0.1",
-        NseScriptSource::Builtin {
-            name: "banner".to_string(),
-        },
-        profile,
-    );
-    let report = execute_nse_run(request).expect("builtin run succeeds");
+    let report = run_banner_builtin();
     assert_eq!(report.script_name, "banner");
     assert_eq!(report.script_source.kind, "builtin");
     assert_eq!(report.resolver.resolved_count, 1);
@@ -362,15 +405,7 @@ fn script_name_derivation_matches_report_summary() {
 
 #[test]
 fn serialized_canonical_report_roundtrips_with_builtin_kind() {
-    let profile = ResolvedNseExecutionProfile::manual_permissive(Some("127.0.0.1"));
-    let request = NseRunRequest::new(
-        "127.0.0.1",
-        NseScriptSource::Builtin {
-            name: "banner".to_string(),
-        },
-        profile,
-    );
-    let report: NseRunReport = execute_nse_run(request).expect("builtin run succeeds");
+    let report = run_banner_builtin();
     let json = serde_json::to_string(&report).expect("report serializes");
     let value: serde_json::Value = serde_json::from_str(&json).expect("report deserializes");
     assert_eq!(value["script_source"]["kind"], "builtin");

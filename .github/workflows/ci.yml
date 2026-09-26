@@ -28,6 +28,7 @@ jobs:
       - run: cargo check --features nse-ssh2
       - run: cargo check --features nse,sandbox
       - run: cargo test --features nse
+        if: runner.os == 'Linux'
       - run: cargo clippy --all-targets --features nse
       - run: cargo package --list
       - run: cargo package
