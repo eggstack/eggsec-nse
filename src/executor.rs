@@ -138,6 +138,49 @@ impl NseExecutor {
         })
     }
 
+    /// Create an executor with explicit policy plus per-run host services.
+    ///
+    /// Additive M005A injection; existing callers keep native defaults via
+    /// [`Self::with_full_policy`].
+    pub fn with_full_policy_and_services(
+        sandbox: crate::SandboxConfig,
+        limits: NseExecutionLimits,
+        cancellation: NseCancellationToken,
+        script_policy: NseScriptPolicy,
+        module_policy: NseModulePolicy,
+        profile_kind: NseExecutionProfileKind,
+        network_policy: NseNetworkPolicy,
+        host_services: crate::providers::NseHostServices,
+    ) -> LuaResult<Self> {
+        Ok(Self {
+            core: ExecutorCore::with_full_policy_and_services(
+                sandbox,
+                limits,
+                cancellation,
+                script_policy,
+                module_policy,
+                profile_kind,
+                network_policy,
+                host_services,
+            )?,
+        })
+    }
+
+    /// Create an executor from a resolved profile plus host services.
+    pub fn with_profile_and_services(
+        profile: &crate::profile::ResolvedNseExecutionProfile,
+        host_services: crate::providers::NseHostServices,
+    ) -> LuaResult<Self> {
+        Ok(Self {
+            core: ExecutorCore::with_profile_and_services(profile, host_services)?,
+        })
+    }
+
+    /// Borrow the per-run host services.
+    pub fn host_services(&self) -> &crate::providers::NseHostServices {
+        self.core.host_services()
+    }
+
     // Delegate core accessors
     pub fn lua(&self) -> &Lua {
         self.core.lua()
@@ -153,6 +196,13 @@ impl NseExecutor {
     }
     pub fn add_default_scripts_path(&self) {
         self.core.add_default_scripts_path();
+    }
+    /// Provider-aware default script-path lookup.
+    pub fn add_default_scripts_path_with_services(
+        &self,
+        services: &crate::providers::NseHostServices,
+    ) {
+        self.core.add_default_scripts_path_with_services(services);
     }
     pub fn set_script_args(&mut self, args: &str) -> Result<(), String> {
         self.core.set_script_args(args)

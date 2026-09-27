@@ -273,6 +273,8 @@ pub mod limits;
 pub mod output;
 pub mod profile;
 #[cfg(feature = "nse")]
+pub mod providers;
+#[cfg(feature = "nse")]
 pub mod public_api;
 #[cfg(feature = "nse")]
 pub mod report;
@@ -334,6 +336,14 @@ pub use report::{
 
 #[cfg(feature = "nse")]
 pub use context::{NseContextSource, NseHostContext, NsePortContext, NseServiceContext};
+#[cfg(feature = "nse")]
+pub use providers::{
+    broker_env_var, broker_random_f64, broker_random_fill, broker_random_u32, broker_temp_dir,
+    broker_unix_timestamp, CountingClockProvider, CountingEnvironmentProvider,
+    CountingRandomProvider, DeterministicRandomProvider, FixedClockProvider,
+    MapEnvironmentProvider, NativeClockProvider, NativeEnvironmentProvider, NativeRandomProvider,
+    NseClockProvider, NseEnvironmentProvider, NseHostServices, NseProviderError, NseRandomProvider,
+};
 #[cfg(feature = "nse")]
 pub use run::{
     execute_nse_run, extract_static_requires, script_name_for_source, NseRunError, NseRunErrorKind,

@@ -156,6 +156,56 @@ impl AsyncNseExecutor {
         })
     }
 
+    /// Create an async executor with explicit policy plus host services.
+    pub fn with_full_policy_and_services(
+        sandbox: crate::SandboxConfig,
+        limits: NseExecutionLimits,
+        cancellation: NseCancellationToken,
+        script_policy: NseScriptPolicy,
+        module_policy: NseModulePolicy,
+        profile_kind: NseExecutionProfileKind,
+        network_policy: NseNetworkPolicy,
+        host_services: crate::providers::NseHostServices,
+    ) -> LuaResult<Self> {
+        let runtime = Runtime::new().map_err(|e| {
+            mlua::Error::RuntimeError(format!("Failed to create tokio runtime: {}", e))
+        })?;
+        Ok(Self {
+            core: ExecutorCore::with_full_policy_and_services(
+                sandbox,
+                limits,
+                cancellation,
+                script_policy,
+                module_policy,
+                profile_kind,
+                network_policy,
+                host_services,
+            )?,
+            runtime: Some(runtime),
+            owns_runtime: true,
+        })
+    }
+
+    /// Create an async executor from a resolved profile plus host services.
+    pub fn with_profile_and_services(
+        profile: &crate::profile::ResolvedNseExecutionProfile,
+        host_services: crate::providers::NseHostServices,
+    ) -> LuaResult<Self> {
+        let runtime = Runtime::new().map_err(|e| {
+            mlua::Error::RuntimeError(format!("Failed to create tokio runtime: {}", e))
+        })?;
+        Ok(Self {
+            core: ExecutorCore::with_profile_and_services(profile, host_services)?,
+            runtime: Some(runtime),
+            owns_runtime: true,
+        })
+    }
+
+    /// Borrow the per-run host services.
+    pub fn host_services(&self) -> &crate::providers::NseHostServices {
+        self.core.host_services()
+    }
+
     /// Create async executor with policy on an externally-managed runtime.
     ///
     /// # Manual-only capability context

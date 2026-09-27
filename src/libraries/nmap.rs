@@ -119,9 +119,28 @@ fn reconnect_stream(
 }
 
 pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+    register_nmap_library_with_services(
+        lua,
+        capability_ctx,
+        &crate::providers::NseHostServices::native(),
+    )
+}
+
+/// Provider-backed nmap registration.
+///
+/// Lua-visible time/random helpers (`current_time`, `get_random_bytes`,
+/// `get_random`, `clock`, `clock_ms`) go through the broker. Internal
+/// connection-registry timestamps and other non-Lua mechanics remain native
+/// and are inventoried as residual direct calls.
+pub fn register_nmap_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &crate::providers::NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     // Clone for use in closures (NseCapabilityContext is Clone)
     let capability_ctx = capability_ctx.clone();
+    let provider_services = services.clone();
 
     let nmap = lua.create_table()?;
 
@@ -759,30 +778,54 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         })?,
     )?;
 
-    nmap.set(
-        "current_time",
-        lua.create_function(|_lua, _: ()| Ok(chrono::Utc::now().timestamp()))?,
-    )?;
+    {
+        let cap_ctx = capability_ctx.clone();
+        let svc = provider_services.clone();
+        nmap.set(
+            "current_time",
+            lua.create_function(move |_lua, _: ()| {
+                let ts =
+                    crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "nmap.current_time")
+                        .unwrap_or_else(|_| chrono::Utc::now().timestamp());
+                Ok(ts)
+            })?,
+        )?;
+    }
 
-    nmap.set(
-        "get_random_bytes",
-        lua.create_function(|_lua, count: i32| {
-            let bytes: Vec<u8> = (0..count.max(0) as usize)
-                .map(|_| rand::random::<u8>())
-                .collect();
-            Ok(bytes)
-        })?,
-    )?;
+    {
+        let cap_ctx = capability_ctx.clone();
+        let svc = provider_services.clone();
+        nmap.set(
+            "get_random_bytes",
+            lua.create_function(move |_lua, count: i32| {
+                let mut bytes = vec![0u8; count.max(0) as usize];
+                crate::providers::broker_random_fill(
+                    &cap_ctx,
+                    &svc,
+                    &mut bytes,
+                    "nmap.get_random_bytes",
+                )
+                .map_err(|e| mlua::Error::RuntimeError(format!("Randomness denied: {e}")))?;
+                Ok(bytes)
+            })?,
+        )?;
+    }
 
-    nmap.set(
-        "get_random",
-        lua.create_function(|_lua, (min, max): (i32, i32)| {
-            if min >= max {
-                return Ok(min);
-            }
-            Ok(rand::random::<i32>() % (max - min + 1) + min)
-        })?,
-    )?;
+    {
+        let cap_ctx = capability_ctx.clone();
+        let svc = provider_services.clone();
+        nmap.set(
+            "get_random",
+            lua.create_function(move |_lua, (min, max): (i32, i32)| {
+                if min >= max {
+                    return Ok(min);
+                }
+                let r = crate::providers::broker_random_u32(&cap_ctx, &svc, "nmap.get_random")
+                    .map_err(|e| mlua::Error::RuntimeError(format!("Randomness denied: {e}")))?;
+                Ok((r as i32) % (max - min + 1) + min)
+            })?,
+        )?;
+    };
 
     nmap.set(
         "version",
@@ -1170,27 +1213,31 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         })?,
     )?;
 
-    nmap.set(
-        "clock_ms",
-        lua.create_function(|_lua, _: ()| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis();
-            Ok(now as f64)
-        })?,
-    )?;
+    {
+        let cap_ctx = capability_ctx.clone();
+        let svc = provider_services.clone();
+        nmap.set(
+            "clock_ms",
+            lua.create_function(move |_lua, _: ()| {
+                let ts = crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "nmap.clock_ms")
+                    .unwrap_or_else(|_| chrono::Utc::now().timestamp());
+                Ok((ts as f64) * 1000.0)
+            })?,
+        )?;
+    }
 
-    nmap.set(
-        "clock",
-        lua.create_function(|_lua, _: ()| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as f64;
-            Ok(now)
-        })?,
-    )?;
+    {
+        let cap_ctx = capability_ctx.clone();
+        let svc = provider_services.clone();
+        nmap.set(
+            "clock",
+            lua.create_function(move |_lua, _: ()| {
+                let ts = crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "nmap.clock")
+                    .unwrap_or_else(|_| chrono::Utc::now().timestamp());
+                Ok(ts as f64)
+            })?,
+        )?;
+    }
 
     nmap.set(
         "bind",
@@ -1532,38 +1579,45 @@ pub fn register_nmap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         })?,
     )?;
 
-    nmap.set(
-        "clock",
-        lua.create_function(|_lua, ()| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as f64;
-            Ok(now)
-        })?,
-    )?;
+    {
+        let cap_ctx = capability_ctx.clone();
+        let svc = provider_services.clone();
+        nmap.set(
+            "clock",
+            lua.create_function(move |_lua, ()| {
+                let ts = crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "nmap.clock")
+                    .unwrap_or_else(|_| chrono::Utc::now().timestamp());
+                Ok(ts as f64)
+            })?,
+        )?;
+    }
 
-    nmap.set(
-        "clock_ms",
-        lua.create_function(|_lua, ()| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as f64;
-            Ok(now)
-        })?,
-    )?;
+    {
+        let cap_ctx = capability_ctx.clone();
+        let svc = provider_services.clone();
+        nmap.set(
+            "clock_ms",
+            lua.create_function(move |_lua, ()| {
+                let ts = crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "nmap.clock_ms")
+                    .unwrap_or_else(|_| chrono::Utc::now().timestamp());
+                Ok((ts as f64) * 1000.0)
+            })?,
+        )?;
+    }
 
-    nmap.set(
-        "current_time",
-        lua.create_function(|_lua, ()| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as f64;
-            Ok(now)
-        })?,
-    )?;
+    {
+        let cap_ctx = capability_ctx.clone();
+        let svc = provider_services.clone();
+        nmap.set(
+            "current_time",
+            lua.create_function(move |_lua, ()| {
+                let ts =
+                    crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "nmap.current_time")
+                        .unwrap_or_else(|_| chrono::Utc::now().timestamp());
+                Ok(ts as f64)
+            })?,
+        )?;
+    }
 
     nmap.set(
         "list_interfaces",

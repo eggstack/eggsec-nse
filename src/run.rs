@@ -24,6 +24,7 @@ use crate::context::{NseHostContext, NsePortContext};
 use crate::executor::NseExecutor;
 use crate::limits::{NseCancellationToken, NseExecutionLimits};
 use crate::profile::ResolvedNseExecutionProfile;
+use crate::providers::NseHostServices;
 use crate::report::{extract_evidence, library_use_reports_from_static_requires, NseRunReport};
 use crate::resolver::{NseLoadDiagnostic, NseLoadError, NseScriptSource, ScriptResolver};
 
@@ -52,6 +53,9 @@ pub struct NseRunRequest {
     /// Optional per-run cancellation token. A fresh token is created when
     /// absent.
     pub cancellation: Option<NseCancellationToken>,
+    /// Optional per-run host services. Native providers are used when absent,
+    /// preserving existing caller construction.
+    pub host_services: Option<NseHostServices>,
 }
 
 impl NseRunRequest {
@@ -70,6 +74,7 @@ impl NseRunRequest {
             port_context: None,
             limits_override: None,
             cancellation: None,
+            host_services: None,
         }
     }
 
@@ -101,6 +106,20 @@ impl NseRunRequest {
     pub fn with_cancellation(mut self, token: NseCancellationToken) -> Self {
         self.cancellation = Some(token);
         self
+    }
+
+    /// Inject per-run host services (additive; native defaults otherwise).
+    ///
+    /// Existing `NseRunRequest::new(...)` callers continue to receive native
+    /// clock/random/environment behavior unchanged.
+    pub fn with_host_services(mut self, services: NseHostServices) -> Self {
+        self.host_services = Some(services);
+        self
+    }
+
+    /// Effective host services: injected bundle or native defaults.
+    pub fn effective_host_services(&self) -> NseHostServices {
+        self.host_services.clone().unwrap_or_default()
     }
 
     /// Effective limits: explicit override wins over profile limits.
@@ -367,7 +386,11 @@ pub fn execute_nse_run(request: NseRunRequest) -> Result<NseRunReport, NseRunErr
     };
 
     // 2. Executor with the effective profile (never a manual-only default).
-    let mut executor = match NseExecutor::with_full_policy(
+    // Per-run host services are threaded at construction so library
+    // registration observes the injected bundle; absent injection uses native
+    // defaults (existing callers unchanged).
+    let host_services = request.effective_host_services();
+    let mut executor = match NseExecutor::with_full_policy_and_services(
         effective_profile.sandbox.clone(),
         effective_profile.limits.clone(),
         cancellation.clone(),
@@ -375,6 +398,7 @@ pub fn execute_nse_run(request: NseRunRequest) -> Result<NseRunReport, NseRunErr
         effective_profile.module_policy.clone(),
         effective_profile.kind,
         effective_profile.network_policy.clone(),
+        host_services,
     ) {
         Ok(executor) => executor,
         Err(e) => {

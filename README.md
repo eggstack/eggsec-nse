@@ -46,6 +46,25 @@ Profiles and capability checks constrain NSE runtime operations; they are **not 
 
 The resolver applies source policy, canonical path containment, symlink-escape rejection, extension and size limits, and validated module names. Network, filesystem, and process helpers use runtime capability checks. Those controls do not replace operating-system isolation when executing untrusted scripts.
 
+## Host providers and deterministic testing
+
+Clock, randomness, and environment reads execute through narrow per-run
+providers (`NseHostServices`, native by default) behind capability-aware broker
+functions. Inject deterministic doubles without changing caller construction:
+
+```rust,no_run
+use eggsec_nse::{FixedClockProvider, NseHostServices};
+use std::sync::Arc;
+
+let services = NseHostServices::native()
+    .with_clock(Arc::new(FixedClockProvider::new(1_700_000_000)));
+let request = request.with_host_services(services);
+```
+
+Provider mechanics never authorize operations; capability policy stays in
+`NseCapabilityContext`. See [`docs/PROVIDERS.md`](docs/PROVIDERS.md) for the
+contract, residual inventory, and guards.
+
 ## Compatibility fixtures and provenance
 
 The local-only compatibility corpus is clean-room, representative test material under `tests/fixtures/nse_corpus/`. Its inventory and source notes are tracked in `docs/PROVENANCE.md` and `manifest.toml`. Do not copy upstream Nmap scripts or nselib files into this repository. Additions must be independently authored and include a manifest provenance entry.

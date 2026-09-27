@@ -8,6 +8,24 @@ use super::helpers::{fallback_lua_table, or_fallback_table, parse_hex_pairs};
 use crate::capabilities::NseCapabilityContext;
 
 pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+    register_stdlib_with_services(
+        lua,
+        capability_ctx,
+        &crate::providers::NseHostServices::native(),
+    )
+}
+
+/// Provider-backed stdnse registration.
+///
+/// Representative time/random paths (`clock`, `get_time`, `clock_ms`,
+/// `clock_us`, `time`, `random_string`, `urandom`) go through the
+/// capability-aware broker; `sleep`/`usleep` remain native chunked sleeps
+/// (cancellation-preserving) pending a dedicated sleeper design.
+pub fn register_stdlib_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &crate::providers::NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
 
     let stdnse = lua.create_table()?;
@@ -191,12 +209,24 @@ pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaR
     })?;
     stdnse.set("sleep", sleep_fn)?;
 
-    let clock_fn = lua.create_function(|_lua, _: ()| Ok(chrono::Utc::now().timestamp() as f64))?;
+    let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
+    let clock_fn = lua.create_function(move |_lua, _: ()| {
+        let ts = crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "stdnse.clock")
+            .unwrap_or_else(|_| chrono::Utc::now().timestamp());
+        Ok(ts as f64)
+    })?;
     stdnse.set("clock", clock_fn)?;
 
-    let get_time_fn = lua.create_function(|_lua, _: ()| {
-        let now = chrono::Utc::now();
-        Ok(now.format("%Y-%m-%d %H:%M:%S").to_string())
+    let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
+    let get_time_fn = lua.create_function(move |_lua, _: ()| {
+        let ts = crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "stdnse.get_time")
+            .unwrap_or_else(|_| chrono::Utc::now().timestamp());
+        let dt = chrono::DateTime::from_timestamp(ts, 0)
+            .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+            .unwrap_or_default();
+        Ok(dt)
     })?;
     stdnse.set("get_time", get_time_fn)?;
 
@@ -287,14 +317,18 @@ pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaR
     })?;
     stdnse.set("fromhex", fromhex_fn)?;
 
-    let random_string_fn = lua.create_function(|_lua, length: usize| {
-        use rand::Rng;
+    let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
+    let random_string_fn = lua.create_function(move |_lua, length: usize| {
         let charset: Vec<char> = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
             .chars()
             .collect();
-        let mut rng = rand::thread_rng();
-        let result: String = (0..length)
-            .map(|_| charset[rng.gen_range(0..charset.len())])
+        let mut bytes = vec![0u8; length];
+        crate::providers::broker_random_fill(&cap_ctx, &svc, &mut bytes, "stdnse.random_string")
+            .map_err(|e| mlua::Error::RuntimeError(format!("Randomness denied: {e}")))?;
+        let result: String = bytes
+            .iter()
+            .map(|b| charset[(*b as usize) % charset.len()])
             .collect();
         Ok(result)
     })?;
@@ -626,21 +660,21 @@ pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaR
     )?;
     stdnse.set("get_timeout", get_timeout_fn)?;
 
-    let clock_ms_fn = lua.create_function(|_lua, _: ()| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        Ok(now as f64)
+    let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
+    let clock_ms_fn = lua.create_function(move |_lua, _: ()| {
+        let ts = crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "stdnse.clock_ms")
+            .unwrap_or_else(|_| chrono::Utc::now().timestamp());
+        Ok((ts as f64) * 1000.0)
     })?;
     stdnse.set("clock_ms", clock_ms_fn)?;
 
-    let clock_us_fn = lua.create_function(|_lua, _: ()| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros();
-        Ok(now as f64)
+    let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
+    let clock_us_fn = lua.create_function(move |_lua, _: ()| {
+        let ts = crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "stdnse.clock_us")
+            .unwrap_or_else(|_| chrono::Utc::now().timestamp());
+        Ok((ts as f64) * 1_000_000.0)
     })?;
     stdnse.set("clock_us", clock_us_fn)?;
 
@@ -1006,7 +1040,13 @@ pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaR
     stdnse.set("get_script_interfaces", get_script_interfaces_fn)?;
 
     // Additional utility functions
-    let time_fn = lua.create_function(|_lua, _: ()| Ok(chrono::Utc::now().timestamp() as f64))?;
+    let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
+    let time_fn = lua.create_function(move |_lua, _: ()| {
+        let ts = crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "stdnse.time")
+            .unwrap_or_else(|_| chrono::Utc::now().timestamp());
+        Ok(ts as f64)
+    })?;
     stdnse.set("time", time_fn)?;
 
     let bind_fn = lua.create_function(|lua, (port, proto): (u16, Option<String>)| {
@@ -1018,10 +1058,12 @@ pub fn register_stdlib(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaR
     })?;
     stdnse.set("bind", bind_fn)?;
 
-    let urandom_fn = lua.create_function(|_lua, length: usize| {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let bytes: Vec<u8> = (0..length).map(|_| rng.r#gen()).collect();
+    let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
+    let urandom_fn = lua.create_function(move |_lua, length: usize| {
+        let mut bytes = vec![0u8; length];
+        crate::providers::broker_random_fill(&cap_ctx, &svc, &mut bytes, "stdnse.urandom")
+            .map_err(|e| mlua::Error::RuntimeError(format!("Randomness denied: {e}")))?;
         Ok(String::from_utf8_lossy(&bytes).to_string())
     })?;
     stdnse.set("urandom", urandom_fn)?;

@@ -100,17 +100,46 @@ pub fn register_os_library(
     sandbox: &SandboxConfig,
     capability_ctx: &NseCapabilityContext,
 ) -> LuaResult<()> {
+    register_os_library_with_services(
+        lua,
+        sandbox,
+        capability_ctx,
+        &crate::providers::NseHostServices::native(),
+    )
+}
+
+/// Provider-backed OS registration.
+///
+/// `getenv` real-environment reads go through
+/// [`crate::providers::broker_env_var`] (capability-gated, denial returns
+/// `""` fail-closed without touching the provider). `NSE_ENV` setenv state
+/// is preserved as an override. Clock/date/time reads go through the broker
+/// clock; `tmpdir` uses the environment provider directly to preserve the
+/// infallible string contract.
+pub fn register_os_library_with_services(
+    lua: &Lua,
+    sandbox: &SandboxConfig,
+    capability_ctx: &NseCapabilityContext,
+    services: &crate::providers::NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let nse_os = lua.create_table()?;
 
     let sandbox_enabled = sandbox.enabled;
 
+    let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let getenv_fn = lua.create_function(move |_lua, name: String| {
+        // NSE_ENV override first (setenv state, never a host read).
+        if let Some(local) = NSE_ENV.with(|e| e.borrow().get(&name).cloned()) {
+            return Ok(local);
+        }
         if sandbox_enabled {
-            NSE_ENV.with(|e| Ok(e.borrow().get(&name).cloned().unwrap_or_default()))
-        } else {
-            let local = NSE_ENV.with(|e| e.borrow().get(&name).cloned());
-            Ok(local.unwrap_or_else(|| std::env::var(&name).unwrap_or_default()))
+            return Ok(String::new());
+        }
+        match crate::providers::broker_env_var(&cap_ctx, &svc, &name, "os.getenv") {
+            Ok(value) => Ok(value.unwrap_or_default()),
+            Err(_) => Ok(String::new()),
         }
     })?;
     nse_os.set("getenv", getenv_fn)?;
@@ -274,14 +303,20 @@ pub fn register_os_library(
     })?;
     nse_os.set("chdir", chdir_fn)?;
 
-    let clock_fn = lua.create_function(|_lua, _: ()| {
-        let now = get_current_timestamp() as f64;
-        Ok(now)
+    let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
+    let clock_fn = lua.create_function(move |_lua, _: ()| {
+        let now = crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "os.clock")
+            .unwrap_or_else(|_| get_current_timestamp() as i64);
+        Ok(now as f64)
     })?;
     nse_os.set("clock", clock_fn)?;
 
-    let date_fn = lua.create_function(|lua, format: Option<String>| {
-        let ts = get_current_timestamp() as i64;
+    let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
+    let date_fn = lua.create_function(move |lua, format: Option<String>| {
+        let ts = crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "os.date")
+            .unwrap_or_else(|_| get_current_timestamp() as i64);
         let (year, month, day, hour, min, sec, wday) = timestamp_to_tm(ts);
 
         if format.as_deref() == Some("*t") {
@@ -334,8 +369,11 @@ pub fn register_os_library(
     })?;
     nse_os.set("date", date_fn)?;
 
-    let time_fn = lua.create_function(|_lua, _table: Option<Table>| {
-        let now = get_current_timestamp() as i64;
+    let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
+    let time_fn = lua.create_function(move |_lua, _table: Option<Table>| {
+        let now = crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "os.time")
+            .unwrap_or_else(|_| get_current_timestamp() as i64);
         Ok(now)
     })?;
     nse_os.set("time", time_fn)?;
@@ -350,8 +388,16 @@ pub fn register_os_library(
     })?;
     nse_os.set("exit", exit_fn)?;
 
-    let tmpdir_fn =
-        lua.create_function(|_lua, _: ()| Ok(env::temp_dir().to_string_lossy().to_string()))?;
+    let svc = services.clone();
+    let tmpdir_fn = lua.create_function(move |_lua, _: ()| {
+        // Env-derived lookup via provider; preserves the infallible string
+        // contract by falling back to std on provider failure.
+        let dir = svc
+            .environment()
+            .temp_dir()
+            .unwrap_or_else(|_| env::temp_dir());
+        Ok(dir.to_string_lossy().to_string())
+    })?;
     nse_os.set("tmpdir", tmpdir_fn)?;
 
     let hostname_fn = lua.create_function(|_lua, _: ()| {

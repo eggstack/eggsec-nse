@@ -6,11 +6,27 @@
 use mlua::{Lua, Result as LuaResult};
 
 use crate::capabilities::NseCapabilityContext;
-use crate::wrappers;
 
 pub fn register_datetime_library(
     lua: &Lua,
     capability_ctx: &NseCapabilityContext,
+) -> LuaResult<()> {
+    register_datetime_library_with_services(
+        lua,
+        capability_ctx,
+        &crate::providers::NseHostServices::native(),
+    )
+}
+
+/// Provider-backed datetime registration.
+///
+/// Clock reads go through [`crate::providers::broker_unix_timestamp`] so
+/// injected fixed clocks drive NSE scripts deterministically while
+/// capability/cancellation/accounting semantics stay centralized.
+pub fn register_datetime_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &crate::providers::NseHostServices,
 ) -> LuaResult<()> {
     let globals = lua.globals();
 
@@ -19,53 +35,39 @@ pub fn register_datetime_library(
     })?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     datetime.set(
         "now",
         lua.create_function(move |_lua, _: ()| {
-            let decision = wrappers::check_time_clock(&cap_ctx, "datetime.now");
-            if decision.is_denied() {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "Time clock access denied: {}",
-                    decision.deny_reason().unwrap_or("policy violation")
-                )));
-            }
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            Ok(now)
+            crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "datetime.now")
+                .map_err(|e| mlua::Error::RuntimeError(format!("Time clock access denied: {e}")))
         })?,
     )?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     datetime.set(
         "current_time",
         lua.create_function(move |_lua, _: ()| {
-            let decision = wrappers::check_time_clock(&cap_ctx, "datetime.current_time");
-            if decision.is_denied() {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "Time clock access denied: {}",
-                    decision.deny_reason().unwrap_or("policy violation")
-                )));
-            }
-            let now = chrono::Utc::now();
-            Ok(now.format("%Y-%m-%d %H:%M:%S").to_string())
+            let ts =
+                crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "datetime.current_time")
+                    .map_err(|e| {
+                        mlua::Error::RuntimeError(format!("Time clock access denied: {e}"))
+                    })?;
+            let dt = chrono::DateTime::from_timestamp(ts, 0)
+                .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_default();
+            Ok(dt)
         })?,
     )?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     datetime.set(
         "timestamp",
         lua.create_function(move |_lua, _: ()| {
-            let decision = wrappers::check_time_clock(&cap_ctx, "datetime.timestamp");
-            if decision.is_denied() {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "Time clock access denied: {}",
-                    decision.deny_reason().unwrap_or("policy violation")
-                )));
-            }
-            let now = chrono::Utc::now().timestamp();
-            Ok(now)
+            crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "datetime.timestamp")
+                .map_err(|e| mlua::Error::RuntimeError(format!("Time clock access denied: {e}")))
         })?,
     )?;
 
@@ -115,20 +117,17 @@ pub fn register_datetime_library(
     )?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     datetime.set(
         "isotime",
         lua.create_function(move |_lua, timestamp: Option<i64>| {
             let ts = if let Some(ts) = timestamp {
                 ts
             } else {
-                let decision = wrappers::check_time_clock(&cap_ctx, "datetime.isotime");
-                if decision.is_denied() {
-                    return Err(mlua::Error::RuntimeError(format!(
-                        "Time clock access denied: {}",
-                        decision.deny_reason().unwrap_or("policy violation")
-                    )));
-                }
-                chrono::Utc::now().timestamp()
+                crate::providers::broker_unix_timestamp(&cap_ctx, &svc, "datetime.isotime")
+                    .map_err(|e| {
+                        mlua::Error::RuntimeError(format!("Time clock access denied: {e}"))
+                    })?
             };
             use chrono::{TimeZone, Utc};
             let dt = Utc.timestamp_opt(ts, 0).single();

@@ -54,6 +54,7 @@ pub struct ExecutorCore {
     pub(crate) profile_kind: NseExecutionProfileKind,
     pub(crate) network_policy: NseNetworkPolicy,
     pub(crate) capability_context: NseCapabilityContext,
+    pub(crate) host_services: crate::providers::NseHostServices,
 }
 
 impl ExecutorCore {
@@ -124,6 +125,34 @@ impl ExecutorCore {
         profile_kind: NseExecutionProfileKind,
         network_policy: NseNetworkPolicy,
     ) -> LuaResult<Self> {
+        Self::with_full_policy_and_services(
+            sandbox,
+            limits,
+            cancellation,
+            script_policy,
+            module_policy,
+            profile_kind,
+            network_policy,
+            crate::providers::NseHostServices::native(),
+        )
+    }
+
+    /// Create an executor core with explicit policy plus per-run host services.
+    ///
+    /// Additive injection for M005A: existing callers keep native defaults via
+    /// [`Self::with_full_policy`]; new callers (canonical `execute_nse_run`)
+    /// pass the request's effective services so migrated libraries observe
+    /// injected clock/random/environment behavior.
+    pub fn with_full_policy_and_services(
+        sandbox: crate::SandboxConfig,
+        limits: NseExecutionLimits,
+        cancellation: NseCancellationToken,
+        script_policy: NseScriptPolicy,
+        module_policy: NseModulePolicy,
+        profile_kind: NseExecutionProfileKind,
+        network_policy: NseNetworkPolicy,
+        host_services: crate::providers::NseHostServices,
+    ) -> LuaResult<Self> {
         let lua = Lua::new();
         let scripts_path = Arc::new(Mutex::new(vec![]));
         let output = Mutex::new(vec![]);
@@ -160,6 +189,7 @@ impl ExecutorCore {
             profile_kind,
             network_policy,
             capability_context,
+            host_services,
         };
 
         core.setup_globals()?;
@@ -185,6 +215,29 @@ impl ExecutorCore {
             profile.kind,
             profile.network_policy.clone(),
         )
+    }
+
+    /// Create an executor core from a resolved profile plus host services.
+    pub fn with_profile_and_services(
+        profile: &crate::profile::ResolvedNseExecutionProfile,
+        host_services: crate::providers::NseHostServices,
+    ) -> LuaResult<Self> {
+        crate::install_tls_provider();
+        Self::with_full_policy_and_services(
+            profile.sandbox.clone(),
+            profile.limits.clone(),
+            NseCancellationToken::new(),
+            profile.script_policy.clone(),
+            profile.module_policy.clone(),
+            profile.kind,
+            profile.network_policy.clone(),
+            host_services,
+        )
+    }
+
+    /// Borrow the per-run host services.
+    pub fn host_services(&self) -> &crate::providers::NseHostServices {
+        &self.host_services
     }
 
     /// Get a reference to the capability context.
@@ -217,7 +270,19 @@ impl ExecutorCore {
     }
 
     pub fn add_default_scripts_path(&self) {
-        if let Ok(home) = std::env::var("HOME") {
+        self.add_default_scripts_path_with_services(&crate::providers::NseHostServices::native());
+    }
+
+    /// Provider-aware default script-path lookup.
+    ///
+    /// `HOME`/`ProgramFiles` reads go through the environment provider so
+    /// deterministic tests can inject values. Behavior is otherwise identical
+    /// to [`Self::add_default_scripts_path`].
+    pub fn add_default_scripts_path_with_services(
+        &self,
+        services: &crate::providers::NseHostServices,
+    ) {
+        if let Ok(Some(home)) = services.environment().var("HOME") {
             self.add_scripts_path(PathBuf::from(home).join(".nmap").join("nselib"));
         }
         #[cfg(unix)]
@@ -227,7 +292,7 @@ impl ExecutorCore {
         }
         #[cfg(windows)]
         {
-            if let Ok(pf) = std::env::var("ProgramFiles") {
+            if let Ok(Some(pf)) = services.environment().var("ProgramFiles") {
                 self.add_scripts_path(PathBuf::from(pf).join("Nmap").join("nselib"));
             }
         }
@@ -903,8 +968,16 @@ impl ExecutorCore {
     }
 
     fn register_libraries(&self) -> LuaResult<()> {
-        crate::libraries::stdnse::register_stdlib(&self.lua, &self.capability_context)?;
-        crate::libraries::nmap::register_nmap_library(&self.lua, &self.capability_context)?;
+        crate::libraries::stdnse::register_stdlib_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::nmap::register_nmap_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::http::register_http_library(&self.lua, &self.capability_context)?;
         crate::libraries::comm::register_comm_library(&self.lua, &self.capability_context)?;
         crate::libraries::sslcert::register_sslcert_library(&self.lua, &self.capability_context)?;
@@ -962,8 +1035,16 @@ impl ExecutorCore {
         )?;
         crate::libraries::base64::register_base64_library(&self.lua)?;
         crate::libraries::base32::register_base32_library(&self.lua)?;
-        crate::libraries::datetime::register_datetime_library(&self.lua, &self.capability_context)?;
-        crate::libraries::rand::register_rand_library(&self.lua, &self.capability_context)?;
+        crate::libraries::datetime::register_datetime_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::rand::register_rand_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::url::register_url_library(&self.lua)?;
         crate::libraries::creds::register_creds_library(&self.lua, &self.capability_context)?;
         crate::libraries::openssl::register_openssl_library(&self.lua, &self.capability_context)?;
@@ -973,10 +1054,11 @@ impl ExecutorCore {
             &self.sandbox,
             &self.capability_context,
         )?;
-        crate::libraries::os::register_os_library(
+        crate::libraries::os::register_os_library_with_services(
             &self.lua,
             &self.sandbox,
             &self.capability_context,
+            &self.host_services,
         )?;
         crate::libraries::unittest::register_unittest_library(&self.lua)?;
         crate::libraries::target::register_target_library(&self.lua)?;
