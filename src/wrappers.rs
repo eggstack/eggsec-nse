@@ -7,10 +7,12 @@
 //! executing wrappers (check + perform) for filesystem, process, network,
 //! DNS, and other side-effecting operations.
 
-use std::net::ToSocketAddrs;
-
 use crate::capabilities::{
     NseCapabilityContext, NseCapabilityDecision, NseCapabilityKind, NseCapabilityRequest,
+};
+use crate::providers::{
+    broker_dns_lookup, broker_resolve_and_select, NativeTcpSocketProvider, NativeUdpSocketProvider,
+    NseDnsRecordType, NseHostServices, NseTransportProtocol,
 };
 
 /// Check a time/clock capability and return the decision.
@@ -608,9 +610,15 @@ pub fn nse_network_tcp_connect(
 ) -> Result<std::net::TcpStream, String> {
     let op = "wrapper.network_tcp_connect";
     ctx.check_cancelled(op)?;
+    // Compatibility shim over native services: resolve + policy-select the
+    // concrete endpoint via the broker, then connect exactly it (no second
+    // resolution). The signature is unchanged; no direct connects remain.
+    let services = NseHostServices::native();
+    let endpoint =
+        broker_resolve_and_select(ctx, &services, host, port, NseTransportProtocol::Tcp, op)?;
     let request = build_request(
         NseCapabilityKind::NetworkTcp,
-        Some(host.to_string()),
+        Some(endpoint.address.to_string()),
         None,
         op,
     );
@@ -624,12 +632,7 @@ pub fn nse_network_tcp_connect(
     ctx.before_blocking_operation(&request)?;
 
     let timeout = timeout.unwrap_or(std::time::Duration::from_secs(10));
-    let addr = format!("{}:{}", host, port);
-    let socket_addr: std::net::SocketAddr = addr
-        .parse()
-        .map_err(|e| format!("Invalid socket address '{}': {}", addr, e))?;
-
-    match std::net::TcpStream::connect_timeout(&socket_addr, timeout) {
+    match NativeTcpSocketProvider.connect_std(&endpoint, timeout) {
         Ok(stream) => {
             ctx.after_blocking_operation(&request, None);
             Ok(stream)
@@ -649,9 +652,15 @@ pub fn nse_network_tcp_send(
 ) -> Result<usize, String> {
     let op = "wrapper.network_tcp_send";
     ctx.check_cancelled(op)?;
+    // Authority: account against the concrete peer identity, not the label.
+    // The handle already exists (no new connection is made here).
+    let peer = stream
+        .peer_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| host.to_string());
     let request = build_request(
         NseCapabilityKind::NetworkTcp,
-        Some(host.to_string()),
+        Some(peer),
         Some(data.len() as u64),
         op,
     );
@@ -688,9 +697,14 @@ pub fn nse_network_tcp_receive(
 ) -> Result<Vec<u8>, String> {
     let op = "wrapper.network_tcp_receive";
     ctx.check_cancelled(op)?;
+    // Authority: account against the concrete peer identity, not the label.
+    let peer = stream
+        .peer_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| host.to_string());
     let request = build_request(
         NseCapabilityKind::NetworkTcp,
-        Some(host.to_string()),
+        Some(peer),
         Some(max_bytes as u64),
         op,
     );
@@ -726,9 +740,14 @@ pub fn nse_network_udp_send(
 ) -> Result<usize, String> {
     let op = "wrapper.network_udp_send";
     ctx.check_cancelled(op)?;
+    // Compatibility shim over native services: resolve + policy-select the
+    // concrete endpoint, bind an ephemeral socket, connect exactly it.
+    let services = NseHostServices::native();
+    let endpoint =
+        broker_resolve_and_select(ctx, &services, host, port, NseTransportProtocol::Udp, op)?;
     let request = build_request(
         NseCapabilityKind::NetworkUdp,
-        Some(host.to_string()),
+        Some(endpoint.address.to_string()),
         Some(data.len() as u64),
         op,
     );
@@ -741,15 +760,11 @@ pub fn nse_network_udp_send(
     }
     ctx.before_blocking_operation(&request)?;
 
-    let addr = format!("{}:{}", host, port);
-    let socket_addr: std::net::SocketAddr = addr
-        .parse()
-        .map_err(|e| format!("Invalid socket address '{}': {}", addr, e))?;
+    let socket = NativeUdpSocketProvider
+        .connect_std(&endpoint, std::time::Duration::from_secs(5))
+        .map_err(|e| format!("Failed to bind UDP socket: {e}"))?;
 
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0")
-        .map_err(|e| format!("Failed to bind UDP socket: {}", e))?;
-
-    match socket.send_to(data, socket_addr) {
+    match socket.send(data) {
         Ok(n) => {
             ctx.after_blocking_operation(&request, None);
             ctx.counters
@@ -771,9 +786,14 @@ pub fn nse_network_udp_receive(
 ) -> Result<(Vec<u8>, std::net::SocketAddr), String> {
     let op = "wrapper.network_udp_receive";
     ctx.check_cancelled(op)?;
+    // Compatibility shim: authority is evaluated against the resolved
+    // concrete endpoint (port is unused by the single-shot receive).
+    let services = NseHostServices::native();
+    let endpoint =
+        broker_resolve_and_select(ctx, &services, host, 0, NseTransportProtocol::Udp, op)?;
     let request = build_request(
         NseCapabilityKind::NetworkUdp,
-        Some(host.to_string()),
+        Some(endpoint.address.to_string()),
         Some(max_bytes as u64),
         op,
     );
@@ -786,20 +806,17 @@ pub fn nse_network_udp_receive(
     }
     ctx.before_blocking_operation(&request)?;
 
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0")
-        .map_err(|e| format!("Failed to bind UDP socket: {}", e))?;
-    socket
-        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
-        .map_err(|e| format!("Failed to set UDP read timeout: {}", e))?;
-
-    let mut buffer = vec![0u8; max_bytes];
-    match socket.recv_from(&mut buffer) {
-        Ok((n, from)) => {
-            buffer.truncate(n);
+    match NativeUdpSocketProvider.recv_once_native(
+        &endpoint,
+        max_bytes,
+        std::time::Duration::from_secs(5),
+    ) {
+        Ok((buffer, from)) => {
+            let n = buffer.len();
             ctx.after_blocking_operation(&request, Some(n as u64));
             Ok((buffer, from))
         }
-        Err(e) => Err(format!("UDP receive failed: {}", e)),
+        Err(e) => Err(format!("UDP receive failed: {e}")),
     }
 }
 
@@ -807,9 +824,8 @@ pub fn nse_network_udp_receive(
 ///
 /// Returns the resolved addresses or a denial/error string.
 ///
-/// `record_type` is currently informational: resolution uses the system
-/// resolver (`ToSocketAddrs`, A/AAAA only); callers pass the requested type
-/// for forward-compatibility with a record-aware resolver.
+/// `record_type` is currently informational (an `A` query is issued);
+/// callers pass the requested type for forward-compatibility.
 pub fn nse_dns_lookup(
     ctx: &NseCapabilityContext,
     name: &str,
@@ -817,31 +833,18 @@ pub fn nse_dns_lookup(
 ) -> Result<Vec<String>, String> {
     let op = "wrapper.dns_lookup";
     ctx.check_cancelled(op)?;
-    let request = build_request(
-        NseCapabilityKind::DnsResolution,
-        Some(name.to_string()),
-        None,
-        op,
-    );
-    let decision = ctx.check_capability(&request);
-    if !decision.is_allowed() {
-        return Err(decision
-            .deny_reason()
-            .unwrap_or("DNS resolution denied")
-            .to_string());
-    }
-    ctx.before_blocking_operation(&request)?;
-
-    // Use std::net::ToSocketAddrs for basic resolution (system resolver)
-    let addr = format!("{}:0", name);
-    match addr.to_socket_addrs() {
-        Ok(addrs) => {
-            let results: Vec<String> = addrs.map(|a| a.ip().to_string()).collect();
-            ctx.after_blocking_operation(&request, None);
-            Ok(results)
-        }
-        Err(e) => Err(format!("DNS lookup for '{}' failed: {}", name, e)),
-    }
+    // Compatibility shim over native services: capability, preflight,
+    // provider lookup, and accounting all live in the broker.
+    let services = NseHostServices::native();
+    broker_dns_lookup(ctx, &services, name, NseDnsRecordType::A, op)
+        .map(|answer| answer.displays())
+        .map_err(|e| {
+            if e.contains("denied") || e.contains("not allowed") || e.contains("cancelled") {
+                e
+            } else {
+                format!("DNS lookup for '{name}' failed: {e}")
+            }
+        })
 }
 
 /// Execute a process after checking process-exec capability.
@@ -1562,18 +1565,12 @@ mod tests {
     #[test]
     fn test_network_tcp_send_denied_in_ci_safe() {
         let ctx = make_ctx(NseExecutionProfileKind::CiSafe);
-        // Use cancellation to avoid needing a real stream - the wrapper checks cancellation first
+        // Cancellation-first: no real stream needed. Live-socket coverage
+        // lives in tests/network_provider_tests.rs (M005B guard forbids
+        // direct connects in this module, including its unit tests).
         ctx.cancellation.cancel();
-        let mut stream = std::net::TcpStream::connect("127.0.0.1:1").ok();
-        if let Some(ref mut s) = stream {
-            let result = nse_network_tcp_send(&ctx, "127.0.0.1", s, b"test");
-            assert!(result.is_err());
-            assert!(result.unwrap_err().contains("cancelled"));
-        } else {
-            // No server available - verify denial via the check function directly
-            let decision = check_network_tcp(&ctx, "127.0.0.1", "test");
-            assert!(decision.is_denied());
-        }
+        let decision = check_network_tcp(&ctx, "127.0.0.1", "test");
+        assert!(decision.is_denied());
     }
 
     #[test]
@@ -1691,8 +1688,9 @@ mod tests {
         let ctx = make_ctx(NseExecutionProfileKind::ManualPermissive);
         let ops_before = ctx.counters.network_operations.load(Ordering::Relaxed);
 
-        // TCP connect to a non-existent host will fail, but the counter
-        // should still be updated after the capability check passes
+        // TCP connect to a non-existent host fails at the provider; the
+        // broker records after_blocking only on success, so the operation
+        // counter must not move for a failed connect.
         let connect_result = nse_network_tcp_connect(
             &ctx,
             "192.0.2.1",
@@ -1700,12 +1698,8 @@ mod tests {
             Some(std::time::Duration::from_millis(10)),
         );
 
-        // The counter may or may not increment depending on whether the
-        // connect_timeout fails before after_blocking_operation is called.
-        // At minimum, the capability check should have passed.
         let ops_after = ctx.counters.network_operations.load(Ordering::Relaxed);
-        // Connect may fail at the OS level, but the check passed
-        assert!(ops_after >= ops_before);
+        assert_eq!(ops_after, ops_before);
         // 192.0.2.1 is TEST-NET-1: the connect itself must fail.
         assert!(connect_result.is_err(), "connect to TEST-NET-1 must fail");
     }

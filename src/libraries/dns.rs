@@ -1,131 +1,82 @@
 //! NSE dns library wrapper
 //!
 //! Provides DNS query functionality compatible with NSE scripts.
+//!
+//! M005B: all resolution goes through the injected [`NseDnsProvider`] via
+//! the capability-aware [`broker_dns_lookup`] broker. The process-global
+//! Hickory resolver is gone; the native provider owns one resolver per
+//! instance. Literal-IP fast paths stay local (no provider call) and Lua
+//! result shapes are unchanged.
 
-use hickory_resolver::config::{ResolverConfig, ResolverOpts};
-use hickory_resolver::proto::rr::RecordType;
-use hickory_resolver::TokioResolver;
 use mlua::{Lua, Result as LuaResult};
-use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::OnceLock;
 
 use crate::capabilities::NseCapabilityContext;
-use crate::wrappers;
-
-static RESOLVER: OnceLock<TokioResolver> = OnceLock::new();
-
-fn get_resolver() -> Result<&'static TokioResolver, String> {
-    if let Some(resolver) = RESOLVER.get() {
-        return Ok(resolver);
-    }
-    let resolver = TokioResolver::builder_with_config(
-        ResolverConfig::default(),
-        hickory_resolver::net::runtime::TokioRuntimeProvider::default(),
-    )
-    .with_options({
-        let mut opts = ResolverOpts::default();
-        opts.timeout = std::time::Duration::from_secs(5);
-        opts.attempts = 2;
-        opts
-    })
-    .build()
-    .map_err(|e| {
-        tracing::warn!("failed to initialize DNS resolver: {}", e);
-        e.to_string()
-    })?;
-    // If another thread won the init race, drop ours and use theirs.
-    // First-wins: a failed `set` means the resolver is already initialized.
-    if RESOLVER.set(resolver).is_err() {
-        tracing::debug!("DNS resolver already initialized; keeping existing instance");
-    }
-    RESOLVER
-        .get()
-        .ok_or_else(|| "DNS resolver unavailable after init".to_string())
-}
+use crate::providers::{broker_dns_lookup, NseDnsRecordType, NseHostServices, NseIpAddress};
 
 pub fn register_dns_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+    register_dns_library_with_services(lua, capability_ctx, &NseHostServices::native())
+}
+
+/// Provider-backed DNS registration.
+///
+/// `services.dns()` backs every `resolve`/`query`/`forward`/`ptr` call;
+/// deterministic tests inject [`MapDnsProvider`](crate::providers::MapDnsProvider).
+pub fn register_dns_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let dns = lua.create_table()?;
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     dns.set(
         "resolve",
         lua.create_function(
             move |lua, (hostname, query_type): (String, Option<String>)| {
                 let qtype = query_type.unwrap_or_else(|| "A".to_string());
 
-                if hostname.parse::<Ipv4Addr>().is_ok() || hostname.parse::<Ipv6Addr>().is_ok() {
+                if NseIpAddress::parse(&hostname).is_some() {
                     let result = lua.create_table()?;
                     result.set("type", qtype.as_str())?;
                     result.set("address", hostname.clone())?;
                     return Ok(result);
                 }
 
-                let runtime = tokio::runtime::Handle::current();
-                let hostname_clone = hostname.clone();
-                let qtype_clone = qtype.clone();
+                match broker_dns_lookup(
+                    &cap_ctx,
+                    &svc,
+                    &hostname,
+                    NseDnsRecordType::parse(&qtype),
+                    "dns.resolve",
+                ) {
+                    Ok(answer) => {
+                        let result = lua.create_table()?;
+                        result.set("type", qtype.as_str())?;
 
-                let decision = wrappers::check_dns(&cap_ctx, &hostname_clone, "dns.resolve");
-                if decision.is_denied() {
-                    let result = lua.create_table()?;
-                    result.set("type", qtype_clone.as_str())?;
-                    result.set(
-                        "error",
-                        format!(
-                            "DNS resolution denied: {}",
-                            decision.deny_reason().unwrap_or("policy violation")
-                        ),
-                    )?;
-                    return Ok(result);
-                }
-
-                runtime.block_on(async {
-                    let record_type = match qtype_clone.to_uppercase().as_str() {
-                        "A" => RecordType::A,
-                        "AAAA" => RecordType::AAAA,
-                        "MX" => RecordType::MX,
-                        "TXT" => RecordType::TXT,
-                        "NS" => RecordType::NS,
-                        "SOA" => RecordType::SOA,
-                        "PTR" => RecordType::PTR,
-                        "CNAME" => RecordType::CNAME,
-                        "ANY" => RecordType::ANY,
-                        _ => RecordType::A,
-                    };
-
-                    let resolver = match get_resolver() {
-                        Ok(r) => r,
-                        Err(e) => {
-                            let result = lua.create_table()?;
-                            result.set("type", qtype_clone.as_str())?;
-                            result.set("error", format!("DNS resolver unavailable: {}", e))?;
-                            return Ok(result);
+                        let answers = lua.create_table()?;
+                        for (i, display) in answer.displays().iter().enumerate() {
+                            answers.set(i + 1, display.clone())?;
                         }
-                    };
-                    match resolver.lookup(hostname_clone.clone(), record_type).await {
-                        Ok(lookup) => {
-                            let result = lua.create_table()?;
-                            result.set("type", qtype_clone.as_str())?;
+                        result.set("answers", answers)?;
 
-                            let answers = lua.create_table()?;
-                            for (i, record) in lookup.answers().iter().enumerate() {
-                                answers.set(i + 1, record.data.to_string())?;
-                            }
-                            result.set("answers", answers)?;
-
-                            if !lookup.answers().is_empty() {
-                                result.set("address", lookup.answers()[0].data.to_string())?;
-                            }
-
-                            Ok(result)
+                        if let Some(first) = answer.displays().first() {
+                            result.set("address", first.clone())?;
                         }
-                        Err(e) => {
-                            let result = lua.create_table()?;
-                            result.set("type", qtype_clone.as_str())?;
-                            result.set("error", format!("DNS lookup failed: {}", e))?;
-                            Ok(result)
-                        }
+
+                        Ok(result)
                     }
-                })
+                    Err(e) => {
+                        let result = lua.create_table()?;
+                        result.set("type", qtype.as_str())?;
+                        if e.contains("denied") || e.contains("not allowed") {
+                            result.set("error", format!("DNS resolution denied: {e}"))?;
+                        } else {
+                            result.set("error", format!("DNS lookup failed: {e}"))?;
+                        }
+                        Ok(result)
+                    }
+                }
             },
         )?,
     )?;
@@ -135,24 +86,8 @@ pub fn register_dns_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
         lua.create_function(|lua, ip: String| {
             let result = lua.create_table()?;
 
-            if let Ok(ipv4) = ip.parse::<Ipv4Addr>() {
-                let octets = ipv4.octets();
-                let reversed = format!(
-                    "{}.{}.{}.{}.in-addr.arpa",
-                    octets[3], octets[2], octets[1], octets[0]
-                );
-                result.set("name", reversed)?;
-                result.set("status", "ok")?;
-            } else if let Ok(ipv6) = ip.parse::<Ipv6Addr>() {
-                let segments: Vec<String> = ipv6
-                    .segments()
-                    .iter()
-                    .flat_map(|s| format!("{:04x}", s).chars().collect::<Vec<_>>())
-                    .rev()
-                    .map(|c| c.to_string())
-                    .collect::<Vec<_>>();
-                let reversed = format!("{}.ip6.arpa", segments.join("."));
-                result.set("name", reversed)?;
+            if let Some(addr) = NseIpAddress::parse(&ip) {
+                result.set("name", addr.reverse_dns_name())?;
                 result.set("status", "ok")?;
             } else {
                 result.set("status", "error")?;
@@ -164,72 +99,38 @@ pub fn register_dns_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     )?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     dns.set(
         "query",
         lua.create_function(move |lua, (name, qtype): (String, Option<String>)| {
             let qt = qtype.unwrap_or_else(|| "A".to_string());
-            let runtime = tokio::runtime::Handle::current();
-            let name_clone = name.clone();
-            let qt_clone = qt.clone();
 
-            let decision = wrappers::check_dns(&cap_ctx, &name_clone, "dns.query");
-            if decision.is_denied() {
-                let result = lua.create_table()?;
-                result.set("name", name_clone.as_str())?;
-                result.set("type", qt_clone.as_str())?;
-                result.set(
-                    "error",
-                    format!(
-                        "DNS resolution denied: {}",
-                        decision.deny_reason().unwrap_or("policy violation")
-                    ),
-                )?;
-                return Ok(result);
+            let result = lua.create_table()?;
+            result.set("name", name.as_str())?;
+            result.set("type", qt.as_str())?;
+
+            match broker_dns_lookup(
+                &cap_ctx,
+                &svc,
+                &name,
+                NseDnsRecordType::parse(&qt),
+                "dns.query",
+            ) {
+                Ok(answer) => {
+                    result.set("status", "ok")?;
+                    let answers = lua.create_table()?;
+                    for (i, display) in answer.displays().iter().enumerate() {
+                        answers.set(i + 1, display.clone())?;
+                    }
+                    result.set("answers", answers)?;
+                }
+                Err(e) => {
+                    result.set("status", "error")?;
+                    result.set("error", e)?;
+                }
             }
 
-            runtime.block_on(async {
-                let record_type = match qt_clone.to_uppercase().as_str() {
-                    "A" => RecordType::A,
-                    "AAAA" => RecordType::AAAA,
-                    "MX" => RecordType::MX,
-                    "TXT" => RecordType::TXT,
-                    "NS" => RecordType::NS,
-                    "SOA" => RecordType::SOA,
-                    "PTR" => RecordType::PTR,
-                    "CNAME" => RecordType::CNAME,
-                    "ANY" => RecordType::ANY,
-                    _ => RecordType::A,
-                };
-
-                let result = lua.create_table()?;
-                result.set("name", name_clone.as_str())?;
-                result.set("type", qt_clone.as_str())?;
-
-                let resolver = match get_resolver() {
-                    Ok(r) => r,
-                    Err(e) => {
-                        result.set("status", "error")?;
-                        result.set("error", format!("DNS resolver unavailable: {}", e))?;
-                        return Ok(result);
-                    }
-                };
-                match resolver.lookup(name_clone.clone(), record_type).await {
-                    Ok(lookup) => {
-                        result.set("status", "ok")?;
-                        let answers = lua.create_table()?;
-                        for (i, record) in lookup.answers().iter().enumerate() {
-                            answers.set(i + 1, record.data.to_string())?;
-                        }
-                        result.set("answers", answers)?;
-                    }
-                    Err(e) => {
-                        result.set("status", "error")?;
-                        result.set("error", e.to_string())?;
-                    }
-                }
-
-                Ok(result)
-            })
+            Ok(result)
         })?,
     )?;
 
@@ -265,116 +166,78 @@ pub fn register_dns_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     )?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     dns.set(
         "forward",
         lua.create_function(move |lua, (hostname, _server): (String, Option<String>)| {
             let result = lua.create_table()?;
 
-            let runtime = tokio::runtime::Handle::current();
-            let hostname_clone = hostname.clone();
-
-            let decision = wrappers::check_dns(&cap_ctx, &hostname_clone, "dns.forward");
-            if decision.is_denied() {
-                result.set(
-                    "error",
-                    format!(
-                        "DNS resolution denied: {}",
-                        decision.deny_reason().unwrap_or("policy violation")
-                    ),
-                )?;
-                return Ok(result);
-            }
-
-            runtime.block_on(async {
-                let resolver = match get_resolver() {
-                    Ok(r) => r,
-                    Err(e) => {
-                        result.set("status", "error")?;
-                        result.set("error", format!("DNS resolver unavailable: {}", e))?;
-                        return Ok(result);
+            match broker_dns_lookup(
+                &cap_ctx,
+                &svc,
+                &hostname,
+                NseDnsRecordType::A,
+                "dns.forward",
+            ) {
+                Ok(answer) => {
+                    result.set("status", "ok")?;
+                    let addresses = lua.create_table()?;
+                    for (i, display) in answer.displays().iter().enumerate() {
+                        addresses.set(i + 1, display.clone())?;
                     }
-                };
-                match resolver.lookup(hostname_clone.clone(), RecordType::A).await {
-                    Ok(lookup) => {
-                        result.set("status", "ok")?;
-                        let addresses = lua.create_table()?;
-                        for (i, record) in lookup.answers().iter().enumerate() {
-                            addresses.set(i + 1, record.data.to_string())?;
-                        }
-                        result.set("addresses", addresses)?;
-                    }
-                    Err(e) => {
-                        result.set("status", "error")?;
-                        result.set("error", e.to_string())?;
-                    }
+                    result.set("addresses", addresses)?;
                 }
-                Ok(result)
-            })
+                Err(e) => {
+                    result.set("status", "error")?;
+                    result.set("error", e)?;
+                }
+            }
+            Ok(result)
         })?,
     )?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     dns.set(
         "ptr",
         lua.create_function(move |lua, ip: String| {
             let dns_reverse = lua.create_table()?;
 
-            if let Ok(ipv4) = ip.parse::<Ipv4Addr>() {
-                let octets = ipv4.octets();
-                let reversed = format!(
-                    "{}.{}.{}.{}.in-addr.arpa",
-                    octets[3], octets[2], octets[1], octets[0]
-                );
+            let Some(addr) = NseIpAddress::parse(&ip) else {
+                dns_reverse.set("status", "error")?;
+                dns_reverse.set("error", "Invalid IP address")?;
+                return Ok(dns_reverse);
+            };
 
-                let runtime = tokio::runtime::Handle::current();
-                let reversed_clone = reversed.clone();
-
-                let decision = wrappers::check_dns(&cap_ctx, &reversed_clone, "dns.ptr");
-                if decision.is_denied() {
-                    dns_reverse.set(
-                        "error",
-                        format!(
-                            "DNS resolution denied: {}",
-                            decision.deny_reason().unwrap_or("policy violation")
-                        ),
-                    )?;
-                    return Ok(dns_reverse);
-                }
-
-                return runtime.block_on(async {
+            match broker_dns_lookup(
+                &cap_ctx,
+                &svc,
+                &addr.reverse_dns_name(),
+                NseDnsRecordType::Ptr,
+                "dns.ptr",
+            ) {
+                Ok(answer) => {
                     let result = lua.create_table()?;
-
-                    let resolver = match get_resolver() {
-                        Ok(r) => r,
-                        Err(e) => {
-                            result.set("status", "error")?;
-                            result.set("error", format!("DNS resolver unavailable: {}", e))?;
-                            return Ok(result);
-                        }
-                    };
-                    match resolver
-                        .lookup(reversed_clone.clone(), RecordType::PTR)
-                        .await
-                    {
-                        Ok(lookup) => {
-                            result.set("status", "ok")?;
-                            if let Some(record) = lookup.answers().first() {
-                                result.set("name", record.data.to_string())?;
-                            }
-                        }
-                        Err(e) => {
-                            result.set("status", "error")?;
-                            result.set("error", e.to_string())?;
-                        }
+                    result.set("status", "ok")?;
+                    if let Some(first) = answer.displays().first() {
+                        result.set("name", first.clone())?;
                     }
-
                     Ok(result)
-                });
+                }
+                Err(e) => {
+                    // Preserve the legacy shapes: denial sets a bare `error`
+                    // key; lookup failures set `status = "error"` + `error`.
+                    if e.contains("denied") || e.contains("not allowed") {
+                        dns_reverse.set("error", e)?;
+                    } else {
+                        let result = lua.create_table()?;
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                    Ok(dns_reverse)
+                }
             }
-
-            dns_reverse.set("status", "error")?;
-            dns_reverse.set("error", "Invalid IP address")?;
-            Ok(dns_reverse)
         })?,
     )?;
 

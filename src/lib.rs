@@ -338,11 +338,20 @@ pub use report::{
 pub use context::{NseContextSource, NseHostContext, NsePortContext, NseServiceContext};
 #[cfg(feature = "nse")]
 pub use providers::{
-    broker_env_var, broker_random_f64, broker_random_fill, broker_random_u32, broker_temp_dir,
-    broker_unix_timestamp, CountingClockProvider, CountingEnvironmentProvider,
-    CountingRandomProvider, DeterministicRandomProvider, FixedClockProvider,
-    MapEnvironmentProvider, NativeClockProvider, NativeEnvironmentProvider, NativeRandomProvider,
-    NseClockProvider, NseEnvironmentProvider, NseHostServices, NseProviderError, NseRandomProvider,
+    broker_dns_lookup, broker_env_var, broker_random_f64, broker_random_fill, broker_random_u32,
+    broker_resolve_and_select, broker_tcp_connect, broker_tcp_connect_endpoint, broker_tcp_receive,
+    broker_tcp_send, broker_temp_dir, broker_udp_connect, broker_udp_connect_endpoint,
+    broker_udp_receive, broker_udp_send, broker_unix_timestamp, CountingClockProvider,
+    CountingDnsProvider, CountingEnvironmentProvider, CountingRandomProvider,
+    CountingTcpSocketProvider, CountingUdpSocketProvider, DeterministicRandomProvider,
+    FixedClockProvider, MapDnsProvider, MapEnvironmentProvider, MemoryTcpConnection,
+    MemoryTcpSocketProvider, MemoryUdpSocket, MemoryUdpSocketProvider, NativeClockProvider,
+    NativeDnsProvider, NativeEnvironmentProvider, NativeRandomProvider, NativeTcpConnection,
+    NativeTcpSocketProvider, NativeUdpSocket, NativeUdpSocketProvider, NseClockProvider,
+    NseDnsAnswer, NseDnsProvider, NseDnsQuery, NseDnsRecord, NseDnsRecordType,
+    NseEnvironmentProvider, NseHostServices, NseIpAddress, NseProviderError, NseRandomProvider,
+    NseResolvedEndpoint, NseTcpConnection, NseTcpSocketProvider, NseTransportProtocol,
+    NseUdpSocket, NseUdpSocketProvider, ScriptedDnsProvider,
 };
 #[cfg(feature = "nse")]
 pub use run::{

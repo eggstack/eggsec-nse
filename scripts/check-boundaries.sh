@@ -84,4 +84,53 @@ for f in src/libraries/datetime.rs src/libraries/rand.rs src/libraries/os.rs src
   fi
 done
 
+# M005B authority-preserving network/DNS: migrated core paths must go
+# through the provider broker. Native implementations (src/providers.rs) are
+# the single allow-listed direct-network zone; narrowly documented
+# compatibility shims are the only other direct sites.
+#
+# - socket.rs / dns.rs: zero direct network calls (opaque handles and
+#   provider-backed resolution only; Nse* contract names are allowed).
+# - comm.rs: no direct socket/DNS calls; reqwest stays only in tryssl, which
+#   is inventoried as the 005C residual.
+# - nmap.rs: no connection creation or resolution; native socket types appear
+#   only in the add_connection/get_connection compatibility-shim signatures
+#   and their doc comments.
+# - wrappers.rs: no connection creation or resolution; native handle types
+#   remain in compatibility-shim signatures/plumbing only.
+if rg -n -e 'std::net::TcpStream' -e 'std::net::UdpSocket' -e 'ToSocketAddrs' -e 'tokio' -e 'hickory' -e 'OnceLock' -e 'connect_timeout' -e 'lookup_host' -e 'SocketAddr' src/libraries/socket.rs src/libraries/dns.rs; then
+  echo "M005B violation: direct network call in socket.rs or dns.rs (use network providers broker)" >&2
+  exit 1
+fi
+
+if rg -n -e 'std::net::TcpStream' -e 'std::net::UdpSocket' -e 'ToSocketAddrs' -e 'tokio' -e 'hickory' -e 'connect_timeout' -e 'lookup_host' -e 'UdpSocket::bind' src/libraries/comm.rs; then
+  echo "M005B violation: direct socket call in comm.rs (use network providers broker; tryssl stays on reqwest until 005C)" >&2
+  exit 1
+fi
+
+if rg -n -e 'TcpStream::' -e 'connect_timeout' -e 'tokio::net' -e 'ToSocketAddrs' -e 'lookup_host' -e 'hickory' src/libraries/nmap.rs; then
+  echo "M005B violation: direct network call in nmap.rs (use network providers broker)" >&2
+  exit 1
+fi
+
+# nmap.rs keeps native socket types only in the compatibility-shim
+# signatures (add_connection/get_connection) and doc comments.
+if rg -n -e 'TcpStream' src/libraries/nmap.rs | rg -v 'add_connection|get_connection|//'; then
+  echo "M005B violation: TcpStream outside compatibility shims in nmap.rs" >&2
+  exit 1
+fi
+
+if rg -n -e 'TcpStream::connect' -e 'connect_timeout' -e 'UdpSocket::bind' -e 'ToSocketAddrs' -e 'lookup_host' -e 'hickory' src/wrappers.rs; then
+  echo "M005B violation: direct network call in wrappers.rs (use network providers broker)" >&2
+  exit 1
+fi
+
+# Broker presence (network): migrated modules must reference the broker.
+for f in src/libraries/socket.rs src/libraries/comm.rs src/libraries/dns.rs src/wrappers.rs; do
+  if ! rg -q 'broker_' "$f"; then
+    echo "M005B violation: $f contains no broker_ call (migrated modules must use network providers broker)" >&2
+    exit 1
+  fi
+done
+
 echo "standalone boundary and provenance checks passed"

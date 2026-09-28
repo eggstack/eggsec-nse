@@ -979,14 +979,19 @@ impl ExecutorCore {
             &self.host_services,
         )?;
         crate::libraries::http::register_http_library(&self.lua, &self.capability_context)?;
-        crate::libraries::comm::register_comm_library(&self.lua, &self.capability_context)?;
+        crate::libraries::comm::register_comm_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::sslcert::register_sslcert_library(&self.lua, &self.capability_context)?;
         crate::libraries::tls::register_tls_library(&self.lua, &self.capability_context)?;
         crate::libraries::shortport::register_shortport_library(&self.lua)?;
-        crate::libraries::socket::register_socket_library(
+        crate::libraries::socket::register_socket_library_with_services(
             &self.lua,
             &self.sandbox,
             &self.capability_context,
+            &self.host_services,
         )?;
         crate::libraries::ssh2::register_ssh2_library(&self.lua)?;
         crate::libraries::ftp::register_ftp_library(&self.lua, &self.capability_context)?;
@@ -1076,7 +1081,11 @@ impl ExecutorCore {
         )?;
         crate::libraries::json::register_json_library(&self.lua)?;
         crate::libraries::ssh::register_ssh_library(&self.lua, &self.capability_context)?;
-        crate::libraries::dns::register_dns_library(&self.lua, &self.capability_context)?;
+        crate::libraries::dns::register_dns_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::http2::register_http2_library(&self.lua)?;
         crate::libraries::httppipeline::register_httppipeline_library(
             &self.lua,

@@ -1,22 +1,33 @@
 //! NSE comm library wrapper
 //!
 //! Provides low-level socket communication for banner grabbing and data exchange.
+//!
+//! M005B: `get_banner`/`exchange` (and their async-named variants) go through
+//! the authority-preserving provider broker. `tryssl` performs HTTPS via
+//! `reqwest` and is explicitly deferred to the 005C HTTP provider.
 
 use crate::capabilities::NseCapabilityContext;
-use crate::libraries::runtime_bridge::block_on_async;
+use crate::providers::{broker_tcp_connect, broker_tcp_receive, broker_tcp_send, NseHostServices};
 use crate::wrappers;
 use mlua::{Lua, Result as LuaResult, Table};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream as AsyncTcpStream;
-use tokio::time::timeout;
 
 pub fn register_comm_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+    register_comm_library_with_services(lua, capability_ctx, &NseHostServices::native())
+}
+
+/// Provider-backed comm registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_comm_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
 
     let capability_ctx = capability_ctx.clone();
+    let services = services.clone();
 
     let comm = lua.create_table()?;
 
@@ -24,54 +35,38 @@ pub fn register_comm_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "get_banner",
         lua.create_function({
             let capability_ctx = capability_ctx.clone();
+            let services = services.clone();
             move |lua, (host, port, _options): (String, u16, Option<Table>)| {
-                let decision =
-                    wrappers::check_network_tcp(&capability_ctx, &host, "comm.get_banner");
-                if decision.is_denied() {
-                    let result = lua.create_table()?;
-                    result.set("data", "")?;
-                    return Ok(result);
-                }
-
+                let result = lua.create_table()?;
                 let timeout = Duration::from_secs(5);
-                let addr = format!("{}:{}", host, port);
 
-                match addr.parse() {
-                    Ok(socket_addr) => match TcpStream::connect_timeout(&socket_addr, timeout) {
-                        Ok(mut stream) => {
-                            if stream.set_read_timeout(Some(timeout)).is_err() {
-                                tracing::warn!("Failed to set read timeout on comm stream");
-                            }
-
-                            std::thread::sleep(Duration::from_millis(500));
-
-                            let mut buf = vec![0u8; 4096];
-                            match stream.read(&mut buf) {
-                                Ok(n) => {
-                                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                                    let result = lua.create_table()?;
-                                    result.set("data", data)?;
-                                    Ok(result)
-                                }
-                                Err(_) => {
-                                    let result = lua.create_table()?;
-                                    result.set("data", "")?;
-                                    Ok(result)
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            let result = lua.create_table()?;
-                            result.set("data", "")?;
-                            Ok(result)
-                        }
-                    },
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &capability_ctx,
+                    &services,
+                    &host,
+                    port,
+                    timeout,
+                    "comm.get_banner",
+                ) {
+                    Ok(pair) => pair,
                     Err(_) => {
-                        let result = lua.create_table()?;
                         result.set("data", "")?;
-                        Ok(result)
+                        return Ok(result);
+                    }
+                };
+
+                std::thread::sleep(Duration::from_millis(500));
+
+                match broker_tcp_receive(&capability_ctx, handle.as_mut(), 4096, "comm.get_banner")
+                {
+                    Ok(data) => {
+                        result.set("data", String::from_utf8_lossy(&data).to_string())?;
+                    }
+                    Err(_) => {
+                        result.set("data", "")?;
                     }
                 }
+                Ok(result)
             }
         })?,
     )?;
@@ -80,62 +75,49 @@ pub fn register_comm_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "exchange",
         lua.create_function({
             let capability_ctx = capability_ctx.clone();
+            let services = services.clone();
             move |lua, (host, port, data, _options): (String, u16, String, Option<Table>)| {
-                let decision = wrappers::check_network_tcp(&capability_ctx, &host, "comm.exchange");
-                if decision.is_denied() {
-                    let result = lua.create_table()?;
+                let result = lua.create_table()?;
+                let timeout = Duration::from_secs(5);
+
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &capability_ctx,
+                    &services,
+                    &host,
+                    port,
+                    timeout,
+                    "comm.exchange",
+                ) {
+                    Ok(pair) => pair,
+                    Err(_) => {
+                        result.set("data", "")?;
+                        return Ok(result);
+                    }
+                };
+
+                if broker_tcp_send(
+                    &capability_ctx,
+                    handle.as_mut(),
+                    data.as_bytes(),
+                    "comm.exchange",
+                )
+                .is_err()
+                {
                     result.set("data", "")?;
                     return Ok(result);
                 }
 
-                let timeout = Duration::from_secs(5);
-                let addr = format!("{}:{}", host, port);
+                std::thread::sleep(Duration::from_millis(500));
 
-                match addr.parse() {
-                    Ok(socket_addr) => match TcpStream::connect_timeout(&socket_addr, timeout) {
-                        Ok(mut stream) => {
-                            if stream.set_read_timeout(Some(timeout)).is_err() {
-                                tracing::warn!("Failed to set read timeout on comm stream");
-                            }
-                            if stream.set_write_timeout(Some(timeout)).is_err() {
-                                tracing::warn!("Failed to set write timeout on comm stream");
-                            }
-
-                            if stream.write_all(data.as_bytes()).is_err() {
-                                let result = lua.create_table()?;
-                                result.set("data", "")?;
-                                return Ok(result);
-                            }
-
-                            std::thread::sleep(Duration::from_millis(500));
-
-                            let mut buf = vec![0u8; 4096];
-                            match stream.read(&mut buf) {
-                                Ok(n) => {
-                                    let response = String::from_utf8_lossy(&buf[..n]).to_string();
-                                    let result = lua.create_table()?;
-                                    result.set("data", response)?;
-                                    Ok(result)
-                                }
-                                Err(_) => {
-                                    let result = lua.create_table()?;
-                                    result.set("data", "")?;
-                                    Ok(result)
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            let result = lua.create_table()?;
-                            result.set("data", "")?;
-                            Ok(result)
-                        }
-                    },
+                match broker_tcp_receive(&capability_ctx, handle.as_mut(), 4096, "comm.exchange") {
+                    Ok(response) => {
+                        result.set("data", String::from_utf8_lossy(&response).to_string())?;
+                    }
                     Err(_) => {
-                        let result = lua.create_table()?;
                         result.set("data", "")?;
-                        Ok(result)
                     }
                 }
+                Ok(result)
             }
         })?,
     )?;
@@ -156,6 +138,8 @@ pub fn register_comm_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 let url = format!("https://{}:{}", host, port);
                 let insecure_tls = capability_ctx.allows_insecure_tls();
 
+                // M005B residual: HTTPS probing stays on reqwest until the
+                // 005C HTTP provider lands (see docs/PROVIDERS.md inventory).
                 let client = reqwest::blocking::Client::builder()
                     .timeout(Duration::from_secs(10))
                     .danger_accept_invalid_certs(insecure_tls)
@@ -207,48 +191,42 @@ pub fn register_comm_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "get_banner_async",
         lua.create_function({
             let capability_ctx = capability_ctx.clone();
+            let services = services.clone();
             move |lua, (host, port, _options): (String, u16, Option<Table>)| {
-                let decision =
-                    wrappers::check_network_tcp(&capability_ctx, &host, "comm.get_banner_async");
-                if decision.is_denied() {
-                    let result = lua.create_table()?;
-                    result.set("data", "")?;
-                    return Ok(result);
-                }
+                let result = lua.create_table()?;
+                let timeout = Duration::from_secs(5);
 
-                let host_clone = host.clone();
-
-                block_on_async(async {
-                    let result = lua.create_table()?;
-                    let connect_result = timeout(
-                        Duration::from_secs(5),
-                        AsyncTcpStream::connect(format!("{}:{}", host_clone, port)),
-                    )
-                    .await;
-
-                    match connect_result {
-                        Ok(Ok(mut stream)) => {
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-                            let mut buf = vec![0u8; 4096];
-                            match stream.read(&mut buf).await {
-                                Ok(n) => {
-                                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                                    result.set("data", data)?;
-                                }
-                                Err(_) => {
-                                    result.set("data", "")?;
-                                }
-                            }
-                        }
-                        Ok(Err(_)) => {
-                            result.set("data", "")?;
-                        }
-                        Err(_) => {
-                            result.set("data", "")?;
-                        }
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &capability_ctx,
+                    &services,
+                    &host,
+                    port,
+                    timeout,
+                    "comm.get_banner_async",
+                ) {
+                    Ok(pair) => pair,
+                    Err(_) => {
+                        result.set("data", "")?;
+                        return Ok(result);
                     }
-                    Ok(result)
-                })
+                };
+
+                std::thread::sleep(Duration::from_millis(500));
+
+                match broker_tcp_receive(
+                    &capability_ctx,
+                    handle.as_mut(),
+                    4096,
+                    "comm.get_banner_async",
+                ) {
+                    Ok(data) => {
+                        result.set("data", String::from_utf8_lossy(&data).to_string())?;
+                    }
+                    Err(_) => {
+                        result.set("data", "")?;
+                    }
+                }
+                Ok(result)
             }
         })?,
     )?;
@@ -257,54 +235,54 @@ pub fn register_comm_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         "exchange_async",
         lua.create_function({
             let capability_ctx = capability_ctx.clone();
+            let services = services.clone();
             move |lua, (host, port, data, _options): (String, u16, String, Option<Table>)| {
-                let decision =
-                    wrappers::check_network_tcp(&capability_ctx, &host, "comm.exchange_async");
-                if decision.is_denied() {
-                    let result = lua.create_table()?;
+                let result = lua.create_table()?;
+                let timeout = Duration::from_secs(5);
+
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &capability_ctx,
+                    &services,
+                    &host,
+                    port,
+                    timeout,
+                    "comm.exchange_async",
+                ) {
+                    Ok(pair) => pair,
+                    Err(_) => {
+                        result.set("data", "")?;
+                        return Ok(result);
+                    }
+                };
+
+                if broker_tcp_send(
+                    &capability_ctx,
+                    handle.as_mut(),
+                    data.as_bytes(),
+                    "comm.exchange_async",
+                )
+                .is_err()
+                {
                     result.set("data", "")?;
                     return Ok(result);
                 }
 
-                let host_clone = host.clone();
+                std::thread::sleep(Duration::from_millis(500));
 
-                block_on_async(async {
-                    let result = lua.create_table()?;
-                    let connect_result = timeout(
-                        Duration::from_secs(5),
-                        AsyncTcpStream::connect(format!("{}:{}", host_clone, port)),
-                    )
-                    .await;
-
-                    match connect_result {
-                        Ok(Ok(mut stream)) => {
-                            if stream.write_all(data.as_bytes()).await.is_err() {
-                                result.set("data", "")?;
-                                return Ok(result);
-                            }
-
-                            tokio::time::sleep(Duration::from_millis(500)).await;
-
-                            let mut buf = vec![0u8; 4096];
-                            match stream.read(&mut buf).await {
-                                Ok(n) => {
-                                    let response = String::from_utf8_lossy(&buf[..n]).to_string();
-                                    result.set("data", response)?;
-                                }
-                                Err(_) => {
-                                    result.set("data", "")?;
-                                }
-                            }
-                        }
-                        Ok(Err(_)) => {
-                            result.set("data", "")?;
-                        }
-                        Err(_) => {
-                            result.set("data", "")?;
-                        }
+                match broker_tcp_receive(
+                    &capability_ctx,
+                    handle.as_mut(),
+                    4096,
+                    "comm.exchange_async",
+                ) {
+                    Ok(response) => {
+                        result.set("data", String::from_utf8_lossy(&response).to_string())?;
                     }
-                    Ok(result)
-                })
+                    Err(_) => {
+                        result.set("data", "")?;
+                    }
+                }
+                Ok(result)
             }
         })?,
     )?;
