@@ -1,24 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
-
 # Prerequisite: every guard below uses `rg` for regex matching. Fail fast with
 # one actionable diagnostic instead of dozens of `rg: command not found`
 # lines if the host runner did not provision ripgrep. CONTRIBUTING.md lists
 # ripgrep as a build requirement; .github/workflows/ci.yml installs it on
 # Linux/macOS jobs that invoke this script.
+#
+# This check runs before any external utility (including `dirname` for the
+# `cd` below) and emits its diagnostic with the `printf` builtin only, so the
+# fail-fast path works in a hermetic no-PATH environment where no external
+# binary — including `rg` itself — is resolvable.
 if ! command -v rg >/dev/null 2>&1; then
-  cat >&2 <<'EOF'
-check-boundaries.sh: required tool 'rg' (ripgrep) is not installed.
-
-Install ripgrep (https://github.com/BurntSushi/ripgrep) before running this
-script. On Debian/Ubuntu runners: `apt-get install -y ripgrep`. On macOS
-runners: `brew install ripgrep` or rely on the bundled action. This script
-also fails fast in CI for the same reason; see .github/workflows/ci.yml.
-EOF
+  printf '%s\n' \
+    "check-boundaries.sh: required tool 'rg' (ripgrep) is not installed." \
+    '' \
+    'Install ripgrep (https://github.com/BurntSushi/ripgrep) before running this' \
+    'script. On Debian/Ubuntu runners: `apt-get install -y ripgrep`. On macOS' \
+    'runners: `brew install ripgrep` or rely on the bundled action. This script' \
+    'also fails fast in CI for the same reason; see .github/workflows/ci.yml.' >&2
   exit 127
 fi
+
+cd "$(dirname "$0")/.."
 
 if rg -n 'eggsec-(core|report-model|transport|policy|tool-core|runtime|daemon|output|agent|db-lab|web-proxy|mobile-lab|nse)\s*=' Cargo.toml \
   || rg -n '^\s*(use|extern crate)\s+eggsec_(core|report_model|transport|policy|tool_core|runtime|daemon|output|agent|db_lab|web_proxy|mobile_lab)\b' src tests; then
