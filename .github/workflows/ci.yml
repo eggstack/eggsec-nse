@@ -18,6 +18,21 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install ripgrep (required by scripts/check-boundaries.sh)
+        if: runner.os != 'Windows'
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y ripgrep
+            elif command -v brew >/dev/null 2>&1; then
+              brew install ripgrep
+            else
+              echo "no supported package manager found to install ripgrep" >&2
+              exit 1
+            fi
+          fi
+          rg --version
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
