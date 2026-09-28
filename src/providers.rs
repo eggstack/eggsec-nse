@@ -148,11 +148,11 @@ impl NseEnvironmentProvider for NativeEnvironmentProvider {
 
 /// Lightweight per-run host-service bundle.
 ///
-/// Carries the M005A domains, the M005B network/DNS domains, and the M005D
-/// filesystem/process domains; later M005 slices extend this struct with
-/// additional provider fields. Cloning shares the underlying providers
-/// (cheap `Arc` clones) so concurrent runs can hold different bundles
-/// without process-global state.
+/// Carries the M005A domains, the M005B network/DNS domains, the M005D
+/// filesystem/process domains, and the M005C HTTP domain; later work
+/// extends this struct with additional provider fields. Cloning shares the
+/// underlying providers (cheap `Arc` clones) so concurrent runs can hold
+/// different bundles without process-global state.
 #[derive(Clone)]
 pub struct NseHostServices {
     clock: Arc<dyn NseClockProvider>,
@@ -163,6 +163,7 @@ pub struct NseHostServices {
     udp: Arc<dyn NseUdpSocketProvider>,
     fs: Arc<dyn NseFilesystemProvider>,
     process: Arc<dyn NseProcessProvider>,
+    http: Arc<dyn NseHttpProvider>,
 }
 
 impl std::fmt::Debug for NseHostServices {
@@ -176,6 +177,7 @@ impl std::fmt::Debug for NseHostServices {
             .field("has_udp", &true)
             .field("has_fs", &true)
             .field("has_process", &true)
+            .field("has_http", &true)
             .finish()
     }
 }
@@ -198,14 +200,15 @@ impl NseHostServices {
             udp: Arc::new(NativeUdpSocketProvider),
             fs: Arc::new(NativeFilesystemProvider::new()),
             process: Arc::new(NativeProcessProvider),
+            http: Arc::new(NativeHttpProvider::new()),
         }
     }
 
     /// Build from explicit providers.
     ///
-    /// The M005A three-domain form is preserved for compatibility; network
-    /// and filesystem/process domains default to native. Use the `with_*`
-    /// builders to override them.
+    /// The M005A three-domain form is preserved for compatibility; network,
+    /// filesystem/process, and HTTP domains default to native. Use the
+    /// `with_*` builders to override them.
     pub fn new(
         clock: Arc<dyn NseClockProvider>,
         random: Arc<dyn NseRandomProvider>,
@@ -220,6 +223,7 @@ impl NseHostServices {
             udp: Arc::new(NativeUdpSocketProvider),
             fs: Arc::new(NativeFilesystemProvider::new()),
             process: Arc::new(NativeProcessProvider),
+            http: Arc::new(NativeHttpProvider::new()),
         }
     }
 
@@ -241,6 +245,7 @@ impl NseHostServices {
             udp,
             fs: Arc::new(NativeFilesystemProvider::new()),
             process: Arc::new(NativeProcessProvider),
+            http: Arc::new(NativeHttpProvider::new()),
         }
     }
 
@@ -292,6 +297,12 @@ impl NseHostServices {
         self
     }
 
+    /// Replace the HTTP provider.
+    pub fn with_http(mut self, provider: Arc<dyn NseHttpProvider>) -> Self {
+        self.http = provider;
+        self
+    }
+
     /// Borrow the clock provider.
     pub fn clock(&self) -> &Arc<dyn NseClockProvider> {
         &self.clock
@@ -330,6 +341,11 @@ impl NseHostServices {
     /// Borrow the process provider.
     pub fn process(&self) -> &Arc<dyn NseProcessProvider> {
         &self.process
+    }
+
+    /// Borrow the HTTP provider.
+    pub fn http(&self) -> &Arc<dyn NseHttpProvider> {
+        &self.http
     }
 }
 
@@ -754,6 +770,7 @@ mod tests {
         assert!(Arc::ptr_eq(services.udp(), cloned.udp()));
         assert!(Arc::ptr_eq(services.fs(), cloned.fs()));
         assert!(Arc::ptr_eq(services.process(), cloned.process()));
+        assert!(Arc::ptr_eq(services.http(), cloned.http()));
     }
 
     #[test]
@@ -4293,4 +4310,433 @@ fn parse_ipconfig_output(output: &str) -> Vec<NseNetworkInterface> {
         ));
     }
     interfaces
+}
+
+// ---------------------------------------------------------------------------
+// M005C: HTTP provider (runtime-neutral contract + native reqwest backend).
+//
+// ADR-0003 boundary: a narrow HTTP trait joins the per-run
+// [`NseHostServices`] bundle; the capability-aware broker owns the runtime
+// capability check -> cancellation/budget preflight -> provider request ->
+// accounting/event sequence. DTOs are runtime-owned (no reqwest/Eggsec
+// types in the contract); the native provider uses reqwest internally in
+// this allow-listed module. TLS intent (`insecure_tls`) is set by the
+// calling library from the capability profile — scripts cannot escalate it.
+// ---------------------------------------------------------------------------
+
+/// HTTP method covered by the NSE parity matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NseHttpMethod {
+    /// GET.
+    Get,
+    /// POST.
+    Post,
+    /// PUT.
+    Put,
+    /// DELETE.
+    Delete,
+    /// PATCH.
+    Patch,
+    /// HEAD.
+    Head,
+    /// OPTIONS.
+    Options,
+    /// TRACE.
+    Trace,
+}
+
+impl NseHttpMethod {
+    /// Parse a method name (case-insensitive). Unknown names fail closed:
+    /// callers needing legacy leniency map to `Get` before the broker.
+    pub fn parse(name: &str) -> Result<Self, NseProviderError> {
+        match name.trim().to_ascii_uppercase().as_str() {
+            "GET" => Ok(Self::Get),
+            "POST" => Ok(Self::Post),
+            "PUT" => Ok(Self::Put),
+            "DELETE" => Ok(Self::Delete),
+            "PATCH" => Ok(Self::Patch),
+            "HEAD" => Ok(Self::Head),
+            "OPTIONS" => Ok(Self::Options),
+            "TRACE" => Ok(Self::Trace),
+            other => Err(NseProviderError::new(
+                "http",
+                format!("unsupported NSE HTTP method '{other}'"),
+            )),
+        }
+    }
+
+    /// Canonical method token.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Get => "GET",
+            Self::Post => "POST",
+            Self::Put => "PUT",
+            Self::Delete => "DELETE",
+            Self::Patch => "PATCH",
+            Self::Head => "HEAD",
+            Self::Options => "OPTIONS",
+            Self::Trace => "TRACE",
+        }
+    }
+}
+
+/// Runtime-owned HTTP request DTO.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NseHttpRequest {
+    /// Request method.
+    pub method: NseHttpMethod,
+    /// Canonical URL (built by the calling library).
+    pub url: String,
+    /// Host identity for capability evaluation (set by the library that
+    /// built the URL, so the broker never parses authority from strings).
+    pub host: String,
+    /// Request headers (overwrite semantics).
+    pub headers: Vec<(String, String)>,
+    /// Replayable body bytes (empty = no body).
+    pub body: Vec<u8>,
+    /// Per-request timeout.
+    pub timeout: std::time::Duration,
+    /// Connect timeout.
+    pub connect_timeout: std::time::Duration,
+    /// TLS verification bypass intent. Set by the calling library from the
+    /// capability profile (`allows_insecure_tls`); scripts cannot escalate.
+    pub insecure_tls: bool,
+}
+
+impl NseHttpRequest {
+    /// Build a GET request with default timeouts (30s/10s, verified TLS).
+    pub fn get(url: impl Into<String>, host: impl Into<String>) -> Self {
+        Self {
+            method: NseHttpMethod::Get,
+            url: url.into(),
+            host: host.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            timeout: std::time::Duration::from_secs(30),
+            connect_timeout: std::time::Duration::from_secs(10),
+            insecure_tls: false,
+        }
+    }
+}
+
+/// Runtime-owned HTTP response DTO.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NseHttpResponse {
+    /// HTTP status code (`0` is never produced by providers; transport
+    /// failures surface as [`NseHttpError`]).
+    pub status: u16,
+    /// Response headers in received order.
+    pub headers: Vec<(String, String)>,
+    /// Response body bytes.
+    pub body: Vec<u8>,
+    /// Final URL after redirects.
+    pub final_url: String,
+    /// Protocol version label (e.g. `"HTTP/1.1"`).
+    pub version: String,
+}
+
+impl NseHttpResponse {
+    /// First header value for `name` (case-insensitive), if present.
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    /// Body as lossy text.
+    pub fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).to_string()
+    }
+}
+
+/// Typed HTTP provider failure (preserves the legacy timeout/connection/
+/// request classification for Lua `reason` mapping).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NseHttpError {
+    /// Capability/sandbox denial (provider not called).
+    Denied(String),
+    /// Cancellation (provider not called, or await abandoned).
+    Cancelled(String),
+    /// Bounded timeout exceeded.
+    Timeout,
+    /// Connection-level failure.
+    Connection(String),
+    /// Any other request failure.
+    Request(String),
+}
+
+impl NseHttpError {
+    /// Short machine-readable reason (matches the legacy Lua `reason`
+    /// values: `denied`, `cancelled`, `timeout`, `connection`, `request`).
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::Denied(_) => "denied",
+            Self::Cancelled(_) => "cancelled",
+            Self::Timeout => "timeout",
+            Self::Connection(_) => "connection",
+            Self::Request(_) => "request",
+        }
+    }
+
+    /// Human-readable detail (no secrets).
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Denied(m) | Self::Cancelled(m) | Self::Connection(m) | Self::Request(m) => {
+                m.clone()
+            }
+            Self::Timeout => "HTTP request timed out".to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for NseHttpError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.detail())
+    }
+}
+
+impl std::error::Error for NseHttpError {}
+
+/// HTTP request execution.
+///
+/// Synchronous (blocking) contract usable from sync Lua closures; async
+/// library variants call the broker inline with bounded timeouts (no
+/// detached tasks).
+pub trait NseHttpProvider: Send + Sync {
+    /// Execute one request.
+    fn request(&self, req: &NseHttpRequest) -> Result<NseHttpResponse, NseHttpError>;
+}
+
+// ---------------------------------------------------------------------------
+// Native implementations (default behavior for existing callers).
+// ---------------------------------------------------------------------------
+
+/// Native HTTP backed by reqwest (single allow-listed native zone).
+///
+/// Clients are cached per instance keyed by (insecure-TLS, timeout,
+/// connect-timeout), so one bundle reuses pooled connections without any
+/// process-global client or TLS-flag state.
+pub struct NativeHttpProvider {
+    clients: Mutex<HashMap<(bool, u64, u64), reqwest::blocking::Client>>,
+}
+
+impl NativeHttpProvider {
+    /// Build a native HTTP provider.
+    pub fn new() -> Self {
+        Self {
+            clients: Mutex::new(HashMap::new()),
+        }
+    }
+
+    fn client_for(&self, req: &NseHttpRequest) -> Result<reqwest::blocking::Client, NseHttpError> {
+        let key = (
+            req.insecure_tls,
+            req.timeout.as_secs(),
+            req.connect_timeout.as_secs(),
+        );
+        let mut clients = self
+            .clients
+            .lock()
+            .map_err(|e| NseHttpError::Request(format!("HTTP client cache lock failed: {e}")))?;
+        if let Some(client) = clients.get(&key) {
+            return Ok(client.clone());
+        }
+        crate::install_tls_provider();
+        let mut builder = reqwest::blocking::Client::builder()
+            .timeout(req.timeout.max(std::time::Duration::from_secs(1)))
+            .connect_timeout(req.connect_timeout)
+            .pool_max_idle_per_host(10)
+            .pool_idle_timeout(std::time::Duration::from_secs(30));
+        if req.insecure_tls {
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        let client = builder
+            .build()
+            .map_err(|e| NseHttpError::Request(format!("HTTP client build failed: {e}")))?;
+        clients.insert(key, client.clone());
+        Ok(client)
+    }
+}
+
+impl Default for NativeHttpProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn native_http_method(method: NseHttpMethod) -> reqwest::Method {
+    match method {
+        NseHttpMethod::Get => reqwest::Method::GET,
+        NseHttpMethod::Post => reqwest::Method::POST,
+        NseHttpMethod::Put => reqwest::Method::PUT,
+        NseHttpMethod::Delete => reqwest::Method::DELETE,
+        NseHttpMethod::Patch => reqwest::Method::PATCH,
+        NseHttpMethod::Head => reqwest::Method::HEAD,
+        NseHttpMethod::Options => reqwest::Method::OPTIONS,
+        NseHttpMethod::Trace => reqwest::Method::TRACE,
+    }
+}
+
+fn native_http_error(e: reqwest::Error) -> NseHttpError {
+    if e.is_timeout() {
+        NseHttpError::Timeout
+    } else if e.is_connect() {
+        NseHttpError::Connection(e.to_string())
+    } else {
+        NseHttpError::Request(e.to_string())
+    }
+}
+
+impl NseHttpProvider for NativeHttpProvider {
+    fn request(&self, req: &NseHttpRequest) -> Result<NseHttpResponse, NseHttpError> {
+        let client = self.client_for(req)?;
+        let mut builder = client.request(native_http_method(req.method), &req.url);
+        for (name, value) in &req.headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+        if !req.body.is_empty() {
+            builder = builder.body(req.body.clone());
+        }
+        let resp = builder.send().map_err(native_http_error)?;
+        let status = resp.status().as_u16();
+        let version = format!("{:?}", resp.version());
+        let final_url = resp.url().to_string();
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let body = resp.bytes().map(|b| b.to_vec()).unwrap_or_default();
+        Ok(NseHttpResponse {
+            status,
+            headers,
+            body,
+            final_url,
+            version,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic test providers (public so downstream harnesses can reuse).
+// ---------------------------------------------------------------------------
+
+/// Scripted HTTP provider: pops one programmed outcome per call and logs
+/// every request identity it receives.
+pub struct MockHttpProvider {
+    script: Mutex<VecDeque<Result<NseHttpResponse, NseHttpError>>>,
+    requests: Mutex<Vec<NseHttpRequest>>,
+}
+
+impl MockHttpProvider {
+    /// Build from a per-call outcome script.
+    pub fn new(script: Vec<Result<NseHttpResponse, NseHttpError>>) -> Self {
+        Self {
+            script: Mutex::new(script.into()),
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Request identities received, in order.
+    pub fn requests(&self) -> Vec<NseHttpRequest> {
+        self.requests.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+}
+
+impl NseHttpProvider for MockHttpProvider {
+    fn request(&self, req: &NseHttpRequest) -> Result<NseHttpResponse, NseHttpError> {
+        self.requests
+            .lock()
+            .map(|mut g| g.push(req.clone()))
+            .unwrap_or(());
+        self.script
+            .lock()
+            .map_err(|e| NseHttpError::Request(format!("mock HTTP lock failed: {e}")))
+            .and_then(|mut script| {
+                script.pop_front().unwrap_or(Err(NseHttpError::Request(
+                    "mock HTTP script exhausted".to_string(),
+                )))
+            })
+    }
+}
+
+/// Counting HTTP wrapper proving denial prevents provider invocation.
+pub struct CountingHttpProvider {
+    inner: MockHttpProvider,
+    calls: AtomicU64,
+}
+
+impl CountingHttpProvider {
+    /// Build a counting wrapper around a scripted outcome list.
+    pub fn new(script: Vec<Result<NseHttpResponse, NseHttpError>>) -> Self {
+        Self {
+            inner: MockHttpProvider::new(script),
+            calls: AtomicU64::new(0),
+        }
+    }
+
+    /// Number of provider invocations observed.
+    pub fn calls(&self) -> u64 {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    /// Request identities received, in order.
+    pub fn requests(&self) -> Vec<NseHttpRequest> {
+        self.inner.requests()
+    }
+}
+
+impl NseHttpProvider for CountingHttpProvider {
+    fn request(&self, req: &NseHttpRequest) -> Result<NseHttpResponse, NseHttpError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.inner.request(req)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Capability-aware broker function (HTTP, M005C).
+//
+// Sequence (ADR-0003): runtime capability check on the library-supplied
+// host identity -> cancellation/budget preflight -> provider request ->
+// accounting/event result. Denial or cancellation never reaches the
+// provider. TLS intent travels inside the request DTO (set by the library
+// from the profile, never by scripts).
+// ---------------------------------------------------------------------------
+
+/// Brokered HTTP request.
+pub fn broker_http_request(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    request: &NseHttpRequest,
+    operation: &'static str,
+) -> Result<NseHttpResponse, NseHttpError> {
+    if let Err(e) = ctx.check_cancelled(operation) {
+        return Err(NseHttpError::Cancelled(e));
+    }
+    let broker_request = broker_request(
+        NseCapabilityKind::NetworkTcp,
+        Some(request.host.clone()),
+        Some(request.body.len() as u64),
+        operation,
+    );
+    let decision = ctx.check_capability(&broker_request);
+    if !decision.is_allowed() {
+        return Err(NseHttpError::Denied(deny_message(
+            &decision,
+            "network HTTP request denied",
+        )));
+    }
+    if let Err(e) = ctx.before_blocking_operation(&broker_request) {
+        if e.contains("cancelled") {
+            return Err(NseHttpError::Cancelled(e));
+        }
+        return Err(NseHttpError::Request(e));
+    }
+    let response = services.http().request(request)?;
+    ctx.after_blocking_operation(
+        &broker_request,
+        Some((request.body.len() + response.body.len()) as u64),
+    );
+    Ok(response)
 }

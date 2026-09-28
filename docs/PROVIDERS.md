@@ -1,8 +1,10 @@
-# NSE Host Providers (M005A broker foundation + M005B network/DNS + M005D filesystem/process)
+# NSE Host Providers (M005A broker foundation + M005B network/DNS + M005D filesystem/process + M005C HTTP)
 
 Status: M005A implementation (clock, randomness, environment reads), M005B
-implementation (authority-preserving DNS/TCP/UDP), and M005D implementation
-(filesystem/process providers, per-run virtual CWD, platform localization).
+implementation (authority-preserving DNS/TCP/UDP), M005D implementation
+(filesystem/process providers, per-run virtual CWD, platform localization),
+and M005C implementation (runtime-neutral HTTP contract + native backend +
+Eggsec scoped-transport adapter).
 
 ADR-0003 boundary: narrow per-domain provider traits, a per-run `NseHostServices`
 composition bundle, native defaults, additive `NseRunRequest::with_host_services`
@@ -214,6 +216,11 @@ delegated wrapper fns call no `std::fs` directly (metadata/read-dir/
 symlink-metadata/process-exec shims keep native bodies for their leaking
 signatures); `broker_` presence in `io`/`lfs`/`os`/`nmap`.
 
+The M005C section additionally enforces: no `reqwest` in the migrated
+HTTP-family libraries (`http`, `httppipeline`, `comm`, `brute`, `vulns`,
+`upnp`); natives isolated in `providers.rs`; `broker_` presence in every
+migrated HTTP module.
+
 ## M005D — filesystem/process providers and per-run isolation
 
 Broker sequence for every filesystem/process operation (plan §6):
@@ -319,3 +326,91 @@ Regeneration: `rg -n -e 'std::fs::' -e 'std::process::' -e 'std::env::' -e
 'std::os::' src/libraries/io.rs src/libraries/lfs.rs src/libraries/os.rs
 src/libraries/nmap.rs src/wrappers.rs` (only allow-listed residuals may
 remain; guards enforce the rest).
+
+## M005C — HTTP provider and Eggsec scoped-transport adapter
+
+Broker sequence for every HTTP request (plan §6):
+
+```text
+runtime capability check (on the library-supplied host identity)
+-> cancellation/budget preflight
+-> provider request
+-> accounting/event result
+```
+
+The Eggsec adapter maps the runtime DTO to `ScopedHttpRequest` and
+dispatches through `HttpTransport::execute` with the injected authority
+(same-host redirects only, direct proxy posture, profile TLS).
+
+### Domains in this slice
+
+| Domain | Trait | Native | Broker | Migrated paths |
+|---|---|---|---|---|
+| HTTP | `NseHttpProvider::request` | `NativeHttpProvider` (reqwest blocking; per-instance pooled clients keyed by TLS/timeouts) | `broker_http_request` (typed `NseHttpError`: denied/cancelled/timeout/connection/request) | `http` (all methods + async variants, shapes preserved), `httppipeline` (go/queue), `comm.tryssl`, `brute.http_auth`, `vulns` NVD lookups, `upnp.get_devices` |
+
+DTOs: `NseHttpMethod` (8 parity verbs, fail-closed parse), `NseHttpRequest`
+(method/url/host/headers/body/timeouts/TLS intent), `NseHttpResponse`
+(status/headers/body/final URL/version). No reqwest/Eggsec types cross the
+contract. Deterministic story: `MockHttpProvider` (scripted outcomes +
+request log), `CountingHttpProvider` (zero-call denial proofs).
+
+### TLS intent alignment (intended behavior change)
+
+Legacy standalone requests were effectively always verified (global accept
+flags defaulted false with no callers). Migrated libraries now set
+`insecure_tls` from `ctx.allows_insecure_tls()`, matching the documented
+Eggsec profile posture (Manual/CompatibilityLab bypass; all other profiles
+verified; scripts cannot escalate — the flag is library-set, and the
+Eggsec adapter structurally ignores the DTO flag in favor of its
+construction-time decision). Locked by tests on both sides.
+
+### Semantic notes (behavior deltas, all intentional)
+
+- Process-global reqwest clients and TLS flags are gone; pooling lives in
+  the per-bundle native provider (keyed by TLS/timeout triple).
+- `set_accept_invalid_certs/hostnames` are deprecated no-op shims (no
+  callers existed).
+- `http.get/post/put` keep legacy option handling (timeout only; headers
+  ignored); `delete/head/options` ignore options; `request`/`post_host`/
+  `put_data` pass body/headers/authorization/useragent as before.
+- Async-named HTTP fns call the synchronous broker inline (bounded);
+  concurrency characteristics differ from the old true-async client,
+  completion/error shapes do not.
+- `httppipeline` keeps per-request timeout/header/body support (a superset
+  of legacy, which ignored them); `queue`'s 30s bound preserved.
+- `upnp.get_devices` gains the 30s default bound (legacy `blocking::get`
+  was unbounded).
+- `vulns` NVD lookups are now capability-gated (were unchecked external
+  access); verified TLS preserved.
+- `brute.http_auth` builds the Basic header in-library (same credentials).
+- `nmap.list_interfaces` shape normalization is a 005D change, reused here.
+- HTTP gains byte/operation accounting (previously uncounted).
+- `nmap`/`brute`-TCP/SSDP-socket code is untouched (deferred protocol
+  surface, inventoried for 005E).
+
+### Eggsec adapter (engine-owned)
+
+`crates/eggsec/src/nse_http_provider.rs`: `NseHttpTransportProvider`
+implements the runtime trait over `HttpTransport` + injected
+`NetworkAuthority`, reusing `nse_http_capability` mapping (refactored to
+an explicit-TLS core; no policy duplication). Out-of-scope/cross-host
+fail closed in transport with no native fallback; `reqwest` never appears
+(adapter source-scan test). Production dispatch is NOT rewired: current
+NSE dispatch holds no `Scope`/`ApprovedExecution`, so manual dispatch
+keeps the native provider until the NSE enforcement prerequisite exists
+(see closure disposition). The adapter is staged on a feature branch and
+activates with the runtime release/adoption step.
+
+### Remaining direct HTTP inventory (explicit, not hidden)
+
+- Migrated set (guard-enforced reqwest-free): `http`, `httppipeline`,
+  `comm` (tryssl now brokered; no reqwest remains), `brute` (HTTP-auth
+  only; TCP helpers deferred), `vulns` (NVD only; local DB unaffected),
+  `upnp` (description fetch only; SSDP sockets specialized).
+- Deferred protocol HTTP (not shared/core, per plan scope): anything
+  outside the migrated set keeps capability-checked native paths;
+  covered by the 005E source audit.
+- Regeneration: `rg -n -e 'reqwest' src/libraries/http.rs
+  src/libraries/httppipeline.rs src/libraries/comm.rs
+  src/libraries/brute.rs src/libraries/vulns.rs src/libraries/upnp.rs`
+  (must be empty; guards enforce).

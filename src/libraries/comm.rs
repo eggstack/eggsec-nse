@@ -3,12 +3,14 @@
 //! Provides low-level socket communication for banner grabbing and data exchange.
 //!
 //! M005B: `get_banner`/`exchange` (and their async-named variants) go through
-//! the authority-preserving provider broker. `tryssl` performs HTTPS via
-//! `reqwest` and is explicitly deferred to the 005C HTTP provider.
+//! the authority-preserving provider broker.
+//! M005C: `tryssl` probes HTTPS through the HTTP provider broker.
 
 use crate::capabilities::NseCapabilityContext;
-use crate::providers::{broker_tcp_connect, broker_tcp_receive, broker_tcp_send, NseHostServices};
-use crate::wrappers;
+use crate::providers::{
+    broker_http_request, broker_tcp_connect, broker_tcp_receive, broker_tcp_send, NseHostServices,
+    NseHttpMethod, NseHttpRequest,
+};
 use mlua::{Lua, Result as LuaResult, Table};
 use std::time::Duration;
 
@@ -126,58 +128,37 @@ pub fn register_comm_library_with_services(
         "tryssl",
         lua.create_function({
             let capability_ctx = capability_ctx.clone();
+            let services = services.clone();
             move |lua, (host, port, _data, _options): (String, u16, String, Option<Table>)| {
-                let decision = wrappers::check_dns(&capability_ctx, &host, "comm.tryssl");
-                if decision.is_denied() {
-                    let result = lua.create_table()?;
-                    result.set("status", 0i32)?;
-                    result.set("data", "DNS resolution denied by capability policy")?;
-                    return Ok(result);
-                }
-
                 let url = format!("https://{}:{}", host, port);
-                let insecure_tls = capability_ctx.allows_insecure_tls();
-
-                // M005B residual: HTTPS probing stays on reqwest until the
-                // 005C HTTP provider lands (see docs/PROVIDERS.md inventory).
-                let client = reqwest::blocking::Client::builder()
-                    .timeout(Duration::from_secs(10))
-                    .danger_accept_invalid_certs(insecure_tls)
-                    .build();
-
-                match client {
-                    Ok(c) => match c.get(&url).send() {
-                        Ok(resp) => {
-                            let status = resp.status().as_u16();
-                            let result = lua.create_table()?;
-                            result.set("status", status as i32)?;
-                            match resp.text() {
-                                Ok(body) => {
-                                    result.set("data", body)?;
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "comm.tryssl body read failed for {}: {}",
-                                        url,
-                                        e
-                                    );
-                                    result.set("data", "")?;
-                                    result.set("error", format!("body read failed: {}", e))?;
-                                }
-                            }
-                            Ok(result)
-                        }
-                        Err(e) => {
+                let req = NseHttpRequest {
+                    method: NseHttpMethod::Get,
+                    url,
+                    host: host.clone(),
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                    timeout: Duration::from_secs(10),
+                    connect_timeout: Duration::from_secs(10),
+                    insecure_tls: capability_ctx.allows_insecure_tls(),
+                };
+                match broker_http_request(&capability_ctx, &services, &req, "comm.tryssl") {
+                    Ok(resp) => {
+                        let result = lua.create_table()?;
+                        result.set("status", resp.status as i32)?;
+                        result.set("data", resp.body_text())?;
+                        Ok(result)
+                    }
+                    Err(e) => {
+                        // Preserve the legacy failure shape (status 0 + data).
+                        if matches!(e, crate::providers::NseHttpError::Denied(_)) {
                             let result = lua.create_table()?;
                             result.set("status", 0i32)?;
-                            result.set("data", e.to_string())?;
-                            Ok(result)
+                            result.set("data", "DNS resolution denied by capability policy")?;
+                            return Ok(result);
                         }
-                    },
-                    Err(e) => {
                         let result = lua.create_table()?;
                         result.set("status", 0i32)?;
-                        result.set("data", e.to_string())?;
+                        result.set("data", e.detail())?;
                         Ok(result)
                     }
                 }

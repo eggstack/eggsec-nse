@@ -260,7 +260,27 @@ fn get_cve_db() -> &'static FxHashMap<&'static str, Vec<(&'static str, &'static 
     })
 }
 
-pub fn register_vulns_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_vulns_library(
+    lua: &Lua,
+    capability_ctx: &crate::capabilities::NseCapabilityContext,
+) -> LuaResult<()> {
+    register_vulns_library_with_services(
+        lua,
+        capability_ctx,
+        &crate::providers::NseHostServices::native(),
+    )
+}
+
+/// Provider-backed vulns registration.
+///
+/// The NVD lookup helpers execute through the HTTP provider broker (gaining
+/// capability gating for external access); the local CVE database is
+/// unaffected.
+pub fn register_vulns_library_with_services(
+    lua: &Lua,
+    capability_ctx: &crate::capabilities::NseCapabilityContext,
+    services: &crate::providers::NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let vulns = lua.create_table()?;
 
@@ -406,10 +426,15 @@ pub fn register_vulns_library(lua: &Lua) -> LuaResult<()> {
     )?;
 
     // vulns.lookup_cve(cve_id) - Look up CVE from NVD API
-    // Returns detailed CVE information from the National Vulnerability Database
+    // Returns detailed CVE information from the National Vulnerability Database.
+    //
+    // M005C: external access is brokered (capability-gated; verified TLS).
+    // Denied/failed lookups return the legacy empty table.
+    let cap_for_lookup = capability_ctx.clone();
+    let svc_for_lookup = services.clone();
     vulns.set(
         "lookup_cve",
-        lua.create_function(|lua, (cve_id, timeout): (String, Option<u64>)| {
+        lua.create_function(move |lua, (cve_id, timeout): (String, Option<u64>)| {
             let timeout_secs = timeout.unwrap_or(10).max(1);
 
             let url = format!(
@@ -417,78 +442,75 @@ pub fn register_vulns_library(lua: &Lua) -> LuaResult<()> {
                 cve_id
             );
 
-            let client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .build();
-
-            let client = match client {
-                Ok(c) => c,
-                Err(_) => {
+            let req = crate::providers::NseHttpRequest {
+                method: crate::providers::NseHttpMethod::Get,
+                url,
+                host: "services.nvd.nist.gov".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+                timeout: std::time::Duration::from_secs(timeout_secs),
+                connect_timeout: std::time::Duration::from_secs(10),
+                insecure_tls: false,
+            };
+            let body = match crate::providers::broker_http_request(
+                &cap_for_lookup,
+                &svc_for_lookup,
+                &req,
+                "vulns.lookup_cve",
+            ) {
+                Ok(resp) if (200..300).contains(&resp.status) => resp.body,
+                _ => {
                     let empty = lua.create_table()?;
                     return Ok(empty);
                 }
             };
 
-            let response = match client.get(&url).send() {
-                Ok(resp) => resp,
-                Err(_) => {
-                    let empty = lua.create_table()?;
-                    return Ok(empty);
-                }
-            };
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) {
+                let result = lua.create_table()?;
 
-            if response.status().is_success() {
-                if let Ok(json) = response.json::<serde_json::Value>() {
-                    let result = lua.create_table()?;
-
-                    if let Some(vulnerabilities) = json.get("vulnerabilities") {
-                        if let Some(cves) = vulnerabilities.as_array() {
-                            if let Some(first) = cves.first() {
-                                if let Some(cve) = first.get("cve") {
-                                    if let Some(id) = cve.get("id") {
-                                        result.set("id", id.as_str().unwrap_or(&cve_id))?;
-                                    }
-                                    if let Some(descriptions) = cve.get("descriptions") {
-                                        if let Some(desc_arr) = descriptions.as_array() {
-                                            for desc in desc_arr {
-                                                if let Some(lang) = desc.get("lang") {
-                                                    if lang == "en" {
-                                                        if let Some(text) = desc.get("value") {
-                                                            result.set(
-                                                                "description",
-                                                                text.as_str().unwrap_or(""),
-                                                            )?;
-                                                        }
+                if let Some(vulnerabilities) = json.get("vulnerabilities") {
+                    if let Some(cves) = vulnerabilities.as_array() {
+                        if let Some(first) = cves.first() {
+                            if let Some(cve) = first.get("cve") {
+                                if let Some(id) = cve.get("id") {
+                                    result.set("id", id.as_str().unwrap_or(&cve_id))?;
+                                }
+                                if let Some(descriptions) = cve.get("descriptions") {
+                                    if let Some(desc_arr) = descriptions.as_array() {
+                                        for desc in desc_arr {
+                                            if let Some(lang) = desc.get("lang") {
+                                                if lang == "en" {
+                                                    if let Some(text) = desc.get("value") {
+                                                        result.set(
+                                                            "description",
+                                                            text.as_str().unwrap_or(""),
+                                                        )?;
                                                     }
                                                 }
                                             }
                                         }
                                     }
-                                    if let Some(metrics) = cve.get("metrics") {
-                                        if let Some(cvss) = metrics.get("cvssMetricV31") {
-                                            if let Some(cvss_arr) = cvss.as_array() {
-                                                if let Some(first_item) = cvss_arr.first() {
-                                                    if let Some(cvss_data) =
-                                                        first_item.get("cvssData")
+                                }
+                                if let Some(metrics) = cve.get("metrics") {
+                                    if let Some(cvss) = metrics.get("cvssMetricV31") {
+                                        if let Some(cvss_arr) = cvss.as_array() {
+                                            if let Some(first_item) = cvss_arr.first() {
+                                                if let Some(cvss_data) = first_item.get("cvssData")
+                                                {
+                                                    if let Some(base_score) =
+                                                        cvss_data.get("baseScore")
                                                     {
-                                                        if let Some(base_score) =
-                                                            cvss_data.get("baseScore")
-                                                        {
-                                                            if let Some(score) = base_score.as_f64()
-                                                            {
-                                                                result.set("cvss_score", score)?;
-                                                            }
+                                                        if let Some(score) = base_score.as_f64() {
+                                                            result.set("cvss_score", score)?;
                                                         }
-                                                        if let Some(severity) =
-                                                            cvss_data.get("baseSeverity")
-                                                        {
-                                                            result.set(
-                                                                "severity",
-                                                                severity
-                                                                    .as_str()
-                                                                    .unwrap_or("UNKNOWN"),
-                                                            )?;
-                                                        }
+                                                    }
+                                                    if let Some(severity) =
+                                                        cvss_data.get("baseSeverity")
+                                                    {
+                                                        result.set(
+                                                            "severity",
+                                                            severity.as_str().unwrap_or("UNKNOWN"),
+                                                        )?;
                                                     }
                                                 }
                                             }
@@ -498,21 +520,27 @@ pub fn register_vulns_library(lua: &Lua) -> LuaResult<()> {
                             }
                         }
                     }
-
-                    return Ok(result);
                 }
+
+                return Ok(result);
             }
 
-            // Return empty table if lookup failed
+            // Return empty table if lookup failed (denied, error, or
+            // unparseable body).
             let empty = lua.create_table()?;
             Ok(empty)
         })?,
     )?;
 
-    // vulns.search_by_keyword(keyword) - Search CVEs by keyword via NVD API
+    // vulns.search_by_keyword(keyword) - Search CVEs by keyword via NVD API.
+    //
+    // M005C: brokered like lookup_cve above; failures return the legacy
+    // (possibly partial) results table.
+    let cap_for_search = capability_ctx.clone();
+    let svc_for_search = services.clone();
     vulns.set(
         "search_cves",
-        lua.create_function(|lua, (keyword, limit): (String, Option<usize>)| {
+        lua.create_function(move |lua, (keyword, limit): (String, Option<usize>)| {
             let max_results = limit.unwrap_or(10).min(20);
             let timeout_secs = 15u64;
 
@@ -521,22 +549,30 @@ pub fn register_vulns_library(lua: &Lua) -> LuaResult<()> {
                 keyword, max_results
             );
 
-            let client = match reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .build() {
-                Ok(c) => c,
-                Err(_) => return lua.create_table()
+            let req = crate::providers::NseHttpRequest {
+                method: crate::providers::NseHttpMethod::Get,
+                url,
+                host: "services.nvd.nist.gov".to_string(),
+                headers: Vec::new(),
+                body: Vec::new(),
+                timeout: std::time::Duration::from_secs(timeout_secs),
+                connect_timeout: std::time::Duration::from_secs(10),
+                insecure_tls: false,
             };
 
             let results = lua.create_table()?;
 
-            let response = match client.get(&url).send() {
-                Ok(resp) => resp,
-                Err(_) => return Ok(results)
+            let body = match crate::providers::broker_http_request(
+                &cap_for_search,
+                &svc_for_search,
+                &req,
+                "vulns.search_cves",
+            ) {
+                Ok(resp) if (200..300).contains(&resp.status) => resp.body,
+                _ => return Ok(results),
             };
 
-            if response.status().is_success() {
-                if let Ok(json) = response.json::<serde_json::Value>() {
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body) {
                     let mut idx = 1;
 
                     if let Some(vulnerabilities) = json.get("vulnerabilities") {
@@ -587,7 +623,6 @@ pub fn register_vulns_library(lua: &Lua) -> LuaResult<()> {
                         }
                     }
                 }
-            }
 
             Ok(results)
         })?,

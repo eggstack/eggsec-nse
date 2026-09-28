@@ -41,6 +41,22 @@ fn maybe_denied_upnp(
 }
 
 pub fn register_upnp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+    register_upnp_library_with_services(
+        lua,
+        capability_ctx,
+        &crate::providers::NseHostServices::native(),
+    )
+}
+
+/// Provider-backed UPnP registration.
+///
+/// Only the HTTP description fetch (`get_devices`) is brokered; SSDP
+/// multicast discovery stays on direct sockets (specialized, inventoried).
+pub fn register_upnp_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &crate::providers::NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let upnp = lua.create_table()?;
 
@@ -157,6 +173,7 @@ pub fn register_upnp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     upnp.set("discover", discover_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let get_devices_fn = lua.create_function(move |lua, location: String| {
         // Extract host from location URL for capability check
         let host = if location.starts_with("http") {
@@ -182,33 +199,41 @@ pub fn register_upnp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
             format!("http://{}/", location)
         };
 
-        match reqwest::blocking::get(&url) {
-            Ok(resp) => match resp.text() {
-                Ok(body) => {
-                    let devices = lua.create_table()?;
-                    let mut i = 1;
+        // M005C: description fetch through the HTTP provider broker
+        // (verified-TLS default preserved via profile gating; the legacy
+        // unbounded `blocking::get` gains the 30s default bound).
+        let req = crate::providers::NseHttpRequest {
+            method: crate::providers::NseHttpMethod::Get,
+            url,
+            host: host.clone(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            timeout: std::time::Duration::from_secs(30),
+            connect_timeout: std::time::Duration::from_secs(10),
+            insecure_tls: cap.allows_insecure_tls(),
+        };
+        match crate::providers::broker_http_request(&cap, &svc, &req, "upnp.get_devices") {
+            Ok(resp) => {
+                let body = resp.body_text();
+                let devices = lua.create_table()?;
+                let mut i = 1;
 
-                    for line in body.lines() {
-                        let line_lower = line.to_lowercase();
-                        if line_lower.contains("service") || line_lower.contains("device") {
-                            let entry = lua.create_table()?;
-                            entry.set("raw", line.trim())?;
-                            devices.set(i, entry)?;
-                            i += 1;
-                        }
+                for line in body.lines() {
+                    let line_lower = line.to_lowercase();
+                    if line_lower.contains("service") || line_lower.contains("device") {
+                        let entry = lua.create_table()?;
+                        entry.set("raw", line.trim())?;
+                        devices.set(i, entry)?;
+                        i += 1;
                     }
+                }
 
-                    result.set("success", true)?;
-                    result.set("devices", devices)?;
-                }
-                _ => {
-                    result.set("success", false)?;
-                    result.set("error", "Failed to parse response")?;
-                }
-            },
+                result.set("success", true)?;
+                result.set("devices", devices)?;
+            }
             Err(e) => {
                 result.set("success", false)?;
-                result.set("error", format!("Request failed: {}", e))?;
+                result.set("error", format!("Request failed: {}", e.detail()))?;
             }
         }
 

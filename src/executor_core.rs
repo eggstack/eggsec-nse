@@ -978,7 +978,11 @@ impl ExecutorCore {
             &self.capability_context,
             &self.host_services,
         )?;
-        crate::libraries::http::register_http_library(&self.lua, &self.capability_context)?;
+        crate::libraries::http::register_http_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::comm::register_comm_library_with_services(
             &self.lua,
             &self.capability_context,
@@ -1020,7 +1024,11 @@ impl ExecutorCore {
         crate::libraries::dhcp6::register_dhcp6_library(&self.lua, &self.capability_context)?;
         crate::libraries::sip::register_sip_library(&self.lua)?;
         crate::libraries::tftp::register_tftp_library(&self.lua)?;
-        crate::libraries::upnp::register_upnp_library(&self.lua, &self.capability_context)?;
+        crate::libraries::upnp::register_upnp_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::tns::register_tns_library(&self.lua)?;
         crate::libraries::afp::register_afp_library(&self.lua)?;
         crate::libraries::amqp::register_amqp_library(&self.lua)?;
@@ -1073,9 +1081,17 @@ impl ExecutorCore {
         crate::libraries::stringaux::register_stringaux_library(&self.lua)?;
         crate::libraries::bin::register_bin_library(&self.lua)?;
         crate::libraries::bit::register_bit_library(&self.lua)?;
-        crate::libraries::vulns::register_vulns_library(&self.lua)?;
+        crate::libraries::vulns::register_vulns_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::unpwdb::register_unpwdb_library(&self.lua, &self.capability_context)?;
-        crate::libraries::brute::register_brute_library(&self.lua, &self.capability_context)?;
+        crate::libraries::brute::register_brute_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::datafiles::register_datafiles_library(
             &self.lua,
             &self.capability_context,
@@ -1088,9 +1104,10 @@ impl ExecutorCore {
             &self.host_services,
         )?;
         crate::libraries::http2::register_http2_library(&self.lua)?;
-        crate::libraries::httppipeline::register_httppipeline_library(
+        crate::libraries::httppipeline::register_httppipeline_library_with_services(
             &self.lua,
             &self.capability_context,
+            &self.host_services,
         )?;
         crate::libraries::geoip::register_geoip_library(&self.lua)?;
         crate::libraries::rpc::register_rpc_library(&self.lua)?;

@@ -1,167 +1,38 @@
 //! NSE http library wrapper
 //!
 //! Provides HTTP client functionality compatible with NSE scripts.
+//!
+//! M005C: all request execution goes through the injected
+//! [`NseHttpProvider`] via the capability-aware [`broker_http_request`]
+//! broker. The process-global HTTP clients and TLS-accept flags are
+//! gone; TLS intent travels per request from the capability profile, and
+//! connection pooling lives in the per-bundle native provider. Lua method
+//! and result shapes are unchanged.
 
 use mlua::{Lua, Result as LuaResult, Table};
-use reqwest::blocking::Client;
-use reqwest::Client as AsyncClient;
-use rustc_hash::FxHashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::LazyLock;
 use std::time::Duration;
 
 use super::helpers::or_fallback_table;
 use crate::capabilities::NseCapabilityContext;
-use crate::libraries::runtime_bridge::block_on_async;
+use crate::providers::{
+    broker_http_request, NseHostServices, NseHttpError, NseHttpMethod, NseHttpRequest,
+    NseHttpResponse,
+};
 use crate::wrappers;
 
-static ACCEPT_INVALID_CERTS: AtomicBool = AtomicBool::new(false);
-static ACCEPT_INVALID_HOSTNAMES: AtomicBool = AtomicBool::new(false);
+// Legacy process-global TLS flags: no callers remain. Retained as
+// deprecated no-op shims so downstream code keeps compiling; per-run TLS
+// intent is profile-gated through the broker request DTO.
+#[deprecated(
+    note = "TLS intent is now per-run and profile-gated; this flag no longer affects execution"
+)]
+pub fn set_accept_invalid_certs(_accept: bool) {}
 
-pub fn set_accept_invalid_certs(accept: bool) {
-    ACCEPT_INVALID_CERTS.store(accept, Ordering::SeqCst);
-}
-
-pub fn set_accept_invalid_hostnames(accept: bool) {
-    ACCEPT_INVALID_HOSTNAMES.store(accept, Ordering::SeqCst);
-}
-
-fn build_client(accept_invalid_certs: bool, accept_invalid_hostnames: bool) -> Client {
-    crate::install_tls_provider();
-    let mut builder = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
-        .pool_max_idle_per_host(10)
-        .pool_idle_timeout(Duration::from_secs(30));
-
-    if accept_invalid_certs {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    if accept_invalid_hostnames {
-        builder = builder.danger_accept_invalid_hostnames(true);
-    }
-
-    builder.build().unwrap_or_else(|_| Client::new())
-}
-
-static HTTP_CLIENT: LazyLock<Client> = LazyLock::new(|| {
-    build_client(
-        ACCEPT_INVALID_CERTS.load(Ordering::SeqCst),
-        ACCEPT_INVALID_HOSTNAMES.load(Ordering::SeqCst),
-    )
-});
-
-static HTTPS_CLIENT: LazyLock<Client> = LazyLock::new(|| {
-    build_client(
-        ACCEPT_INVALID_CERTS.load(Ordering::SeqCst),
-        ACCEPT_INVALID_HOSTNAMES.load(Ordering::SeqCst),
-    )
-});
-
-// Async HTTP client for async functions
-static ASYNC_HTTP_CLIENT: LazyLock<AsyncClient> = LazyLock::new(|| {
-    let accept_invalid_certs = ACCEPT_INVALID_CERTS.load(Ordering::SeqCst);
-    let accept_invalid_hostnames = ACCEPT_INVALID_HOSTNAMES.load(Ordering::SeqCst);
-
-    let mut builder = AsyncClient::builder()
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
-        .pool_max_idle_per_host(10)
-        .pool_idle_timeout(Duration::from_secs(30));
-
-    if accept_invalid_certs {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    if accept_invalid_hostnames {
-        builder = builder.danger_accept_invalid_hostnames(true);
-    }
-
-    builder.build().unwrap_or_else(|_| AsyncClient::new())
-});
-
-static ASYNC_HTTPS_CLIENT: LazyLock<AsyncClient> = LazyLock::new(|| {
-    let accept_invalid_certs = ACCEPT_INVALID_CERTS.load(Ordering::SeqCst);
-    let accept_invalid_hostnames = ACCEPT_INVALID_HOSTNAMES.load(Ordering::SeqCst);
-
-    let mut builder = AsyncClient::builder()
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
-        .pool_max_idle_per_host(10)
-        .pool_idle_timeout(Duration::from_secs(30));
-
-    if accept_invalid_certs {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    if accept_invalid_hostnames {
-        builder = builder.danger_accept_invalid_hostnames(true);
-    }
-
-    builder.build().unwrap_or_else(|_| AsyncClient::new())
-});
-
-fn get_client(url: &str) -> &'static Client {
-    if url.starts_with("https") {
-        &HTTPS_CLIENT
-    } else {
-        &HTTP_CLIENT
-    }
-}
-
-fn get_async_client(url: &str) -> &'static AsyncClient {
-    if url.starts_with("https") {
-        &ASYNC_HTTPS_CLIENT
-    } else {
-        &ASYNC_HTTP_CLIENT
-    }
-}
-
-fn make_client(timeout_secs: u64) -> Client {
-    make_client_with_tls(timeout_secs, None, None)
-}
-
-fn make_client_with_tls(
-    timeout_secs: u64,
-    accept_invalid_certs: Option<bool>,
-    accept_invalid_hostnames: Option<bool>,
-) -> Client {
-    crate::install_tls_provider();
-    let global_accept_certs = ACCEPT_INVALID_CERTS.load(Ordering::SeqCst);
-    let global_accept_hostnames = ACCEPT_INVALID_HOSTNAMES.load(Ordering::SeqCst);
-
-    let use_invalid_certs = accept_invalid_certs.unwrap_or(global_accept_certs);
-    let use_invalid_hostnames = accept_invalid_hostnames.unwrap_or(global_accept_hostnames);
-
-    let mut builder = Client::builder()
-        .timeout(Duration::from_secs(timeout_secs.max(1)))
-        .connect_timeout(Duration::from_secs(10));
-
-    if use_invalid_certs {
-        builder = builder.danger_accept_invalid_certs(true);
-    }
-    if use_invalid_hostnames {
-        builder = builder.danger_accept_invalid_hostnames(true);
-    }
-
-    builder.build().unwrap_or_else(|_| Client::new())
-}
-
-fn parse_options(opts: Option<&Table>) -> (FxHashMap<String, String>, Duration) {
-    let mut headers = FxHashMap::default();
-    let timeout = Duration::from_secs(30);
-
-    if let Some(opts) = opts {
-        if let Ok(timeout_val) = opts.get::<u64>("timeout") {
-            return (headers, Duration::from_secs(timeout_val));
-        }
-        if let Ok(headers_table) = opts.get::<Table>("headers") {
-            for (k, v) in headers_table.pairs::<String, String>().flatten() {
-                headers.insert(k, v);
-            }
-        }
-    }
-
-    (headers, timeout)
-}
+/// See [`set_accept_invalid_certs`].
+#[deprecated(
+    note = "TLS intent is now per-run and profile-gated; this flag no longer affects execution"
+)]
+pub fn set_accept_invalid_hostnames(_accept: bool) {}
 
 fn build_url(host: &str, port: u16, path: &str) -> String {
     if host.starts_with("http") {
@@ -176,104 +47,67 @@ fn build_url(host: &str, port: u16, path: &str) -> String {
     }
 }
 
-fn build_response(lua: &Lua, resp: reqwest::blocking::Response) -> LuaResult<Table> {
+/// Build a provider request from Lua-level inputs.
+///
+/// TLS intent comes from the capability profile (never scripts); unknown
+/// methods fall back to GET at this layer to preserve legacy leniency
+/// (`NseHttpMethod::parse` itself fails closed for direct broker callers).
+fn provider_request(
+    ctx: &NseCapabilityContext,
+    method: NseHttpMethod,
+    url: String,
+    host: &str,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    timeout: Duration,
+) -> NseHttpRequest {
+    NseHttpRequest {
+        method,
+        url,
+        host: host.to_string(),
+        headers,
+        body,
+        timeout: timeout.max(Duration::from_secs(1)),
+        connect_timeout: Duration::from_secs(10),
+        insecure_tls: ctx.allows_insecure_tls(),
+    }
+}
+
+fn build_response(lua: &Lua, resp: &NseHttpResponse) -> LuaResult<Table> {
     let result = lua.create_table()?;
 
-    let status = resp.status().as_u16();
-    result.set("status", status as i32)?;
-
-    let headers: Vec<(String, String)> = resp
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
+    result.set("status", resp.status as i32)?;
 
     let headers_table = lua.create_table()?;
     let headers_map = lua.create_table()?;
-    for (i, (k, v)) in headers.iter().enumerate() {
+    for (i, (k, v)) in resp.headers.iter().enumerate() {
         headers_table.set(i + 1, format!("{}: {}", k, v))?;
         headers_map.set(k.clone(), v.clone())?;
     }
     result.set("headers", headers_table)?;
     result.set("header", headers_map)?;
 
-    let version = resp.version();
-    result.set("version", format!("{:?}", version))?;
+    result.set("version", resp.version.clone())?;
 
-    if (300..400).contains(&status) {
-        if let Some(location) = resp.headers().get("location") {
-            if let Ok(loc) = location.to_str() {
-                result.set("location", loc.to_string())?;
-            }
+    if (300..400).contains(&resp.status) {
+        if let Some(location) = resp.header("location") {
+            result.set("location", location.to_string())?;
         }
     }
 
-    let https = resp.url().scheme() == "https";
-    if let Ok(body) = resp.text() {
-        result.set("body", body)?;
-    }
+    let https = resp.final_url.starts_with("https");
+    result.set("body", resp.body_text())?;
 
     result.set("https", https)?;
 
     Ok(result)
 }
 
-fn build_response_async(lua: &Lua, resp: reqwest::Response) -> LuaResult<Table> {
-    let result = lua.create_table()?;
-
-    let status = resp.status().as_u16();
-    result.set("status", status as i32)?;
-
-    let headers: Vec<(String, String)> = resp
-        .headers()
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-        .collect();
-
-    let headers_table = lua.create_table()?;
-    let headers_map = lua.create_table()?;
-    for (i, (k, v)) in headers.iter().enumerate() {
-        headers_table.set(i + 1, format!("{}: {}", k, v))?;
-        headers_map.set(k.clone(), v.clone())?;
-    }
-    result.set("headers", headers_table)?;
-    result.set("header", headers_map)?;
-
-    let version = resp.version();
-    result.set("version", format!("{:?}", version))?;
-
-    if (300..400).contains(&status) {
-        if let Some(location) = resp.headers().get("location") {
-            if let Ok(loc) = location.to_str() {
-                result.set("location", loc.to_string())?;
-            }
-        }
-    }
-
-    let https = resp.url().scheme() == "https";
-
-    // For async response, we need to use block_on to get body
-    let body = tokio::runtime::Handle::current()
-        .block_on(resp.text())
-        .unwrap_or_default();
-    result.set("body", body)?;
-
-    result.set("https", https)?;
-
-    Ok(result)
-}
-
-fn error_response(lua: &Lua, err: reqwest::Error) -> LuaResult<Table> {
+fn error_response(lua: &Lua, err: &NseHttpError) -> LuaResult<Table> {
     let result = lua.create_table()?;
     result.set("status", 0i32)?;
-    result.set("error", err.to_string())?;
-    if err.is_timeout() {
-        result.set("reason", "timeout")?;
-    } else if err.is_connect() {
-        result.set("reason", "connection")?;
-    } else {
-        result.set("reason", "request")?;
-    }
+    result.set("error", err.detail())?;
+    result.set("reason", err.reason())?;
     Ok(result)
 }
 
@@ -305,11 +139,24 @@ fn maybe_denied_response(
 }
 
 pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+    register_http_library_with_services(lua, capability_ctx, &NseHostServices::native())
+}
+
+/// Provider-backed HTTP registration.
+///
+/// `services.http()` executes every request; deterministic tests inject
+/// [`MockHttpProvider`](crate::providers::MockHttpProvider).
+pub fn register_http_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     crate::install_tls_provider();
     let globals = lua.globals();
     let http = lua.create_table()?;
 
     let ctx = capability_ctx.clone();
+    let svc = services.clone();
     http.set(
         "get",
         lua.create_function(
@@ -319,25 +166,32 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 }
 
                 let url = build_url(&host, port, &path);
+                // Legacy `get` honors only the options timeout.
+                let timeout = options
+                    .as_ref()
+                    .and_then(|o| o.get::<u64>("timeout").ok())
+                    .map(Duration::from_secs)
+                    .unwrap_or(Duration::from_secs(30));
+                let req = provider_request(
+                    &ctx,
+                    NseHttpMethod::Get,
+                    url,
+                    &host,
+                    Vec::new(),
+                    Vec::new(),
+                    timeout,
+                );
 
-                let client = if let Some(opts) = options.as_ref() {
-                    match opts.get::<u64>("timeout") {
-                        Ok(timeout) => make_client_with_tls(timeout, None, None),
-                        _ => get_client(&url).clone(),
-                    }
-                } else {
-                    get_client(&url).clone()
-                };
-
-                match client.get(&url).send() {
-                    Ok(resp) => build_response(lua, resp),
-                    Err(e) => error_response(lua, e),
+                match broker_http_request(&ctx, &svc, &req, "http.get") {
+                    Ok(resp) => build_response(lua, &resp),
+                    Err(e) => error_response(lua, &e),
                 }
             },
         )?,
     )?;
 
     let ctx = capability_ctx.clone();
+    let svc = services.clone();
     http.set(
         "post",
         lua.create_function(
@@ -354,25 +208,31 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 }
 
                 let url = build_url(&host, port, &path);
+                let timeout = options
+                    .as_ref()
+                    .and_then(|o| o.get::<u64>("timeout").ok())
+                    .map(Duration::from_secs)
+                    .unwrap_or(Duration::from_secs(30));
+                let req = provider_request(
+                    &ctx,
+                    NseHttpMethod::Post,
+                    url,
+                    &host,
+                    Vec::new(),
+                    data.into_bytes(),
+                    timeout,
+                );
 
-                let client = if let Some(opts) = options.as_ref() {
-                    match opts.get::<u64>("timeout") {
-                        Ok(timeout) => make_client_with_tls(timeout, None, None),
-                        _ => get_client(&url).clone(),
-                    }
-                } else {
-                    get_client(&url).clone()
-                };
-
-                match client.post(&url).body(data).send() {
-                    Ok(resp) => build_response(lua, resp),
-                    Err(e) => error_response(lua, e),
+                match broker_http_request(&ctx, &svc, &req, "http.post") {
+                    Ok(resp) => build_response(lua, &resp),
+                    Err(e) => error_response(lua, &e),
                 }
             },
         )?,
     )?;
 
     let ctx = capability_ctx.clone();
+    let svc = services.clone();
     http.set(
         "put",
         lua.create_function(
@@ -389,25 +249,31 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 }
 
                 let url = build_url(&host, port, &path);
+                let timeout = options
+                    .as_ref()
+                    .and_then(|o| o.get::<u64>("timeout").ok())
+                    .map(Duration::from_secs)
+                    .unwrap_or(Duration::from_secs(30));
+                let req = provider_request(
+                    &ctx,
+                    NseHttpMethod::Put,
+                    url,
+                    &host,
+                    Vec::new(),
+                    data.into_bytes(),
+                    timeout,
+                );
 
-                let client = if let Some(opts) = options.as_ref() {
-                    match opts.get::<u64>("timeout") {
-                        Ok(timeout) => make_client_with_tls(timeout, None, None),
-                        _ => get_client(&url).clone(),
-                    }
-                } else {
-                    get_client(&url).clone()
-                };
-
-                match client.put(&url).body(data).send() {
-                    Ok(resp) => build_response(lua, resp),
-                    Err(e) => error_response(lua, e),
+                match broker_http_request(&ctx, &svc, &req, "http.put") {
+                    Ok(resp) => build_response(lua, &resp),
+                    Err(e) => error_response(lua, &e),
                 }
             },
         )?,
     )?;
 
     let ctx = capability_ctx.clone();
+    let svc = services.clone();
     http.set(
         "delete",
         lua.create_function(
@@ -417,17 +283,26 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 }
 
                 let url = build_url(&host, port, &path);
-                let client = get_client(&url).clone();
+                let req = provider_request(
+                    &ctx,
+                    NseHttpMethod::Delete,
+                    url,
+                    &host,
+                    Vec::new(),
+                    Vec::new(),
+                    Duration::from_secs(30),
+                );
 
-                match client.delete(&url).send() {
-                    Ok(resp) => build_response(lua, resp),
-                    Err(e) => error_response(lua, e),
+                match broker_http_request(&ctx, &svc, &req, "http.delete") {
+                    Ok(resp) => build_response(lua, &resp),
+                    Err(e) => error_response(lua, &e),
                 }
             },
         )?,
     )?;
 
     let ctx = capability_ctx.clone();
+    let svc = services.clone();
     http.set(
         "head",
         lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
@@ -436,33 +311,37 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
             }
 
             let url = build_url(&host, port, &path);
-            let client = get_client(&url).clone();
+            let req = provider_request(
+                &ctx,
+                NseHttpMethod::Head,
+                url,
+                &host,
+                Vec::new(),
+                Vec::new(),
+                Duration::from_secs(30),
+            );
 
-            match client.head(&url).send() {
+            match broker_http_request(&ctx, &svc, &req, "http.head") {
                 Ok(resp) => {
+                    // Legacy `head` returns status + line headers only.
                     let result = lua.create_table()?;
-                    result.set("status", resp.status().as_u16() as i32)?;
-
-                    let headers: Vec<(String, String)> = resp
-                        .headers()
-                        .iter()
-                        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                        .collect();
+                    result.set("status", resp.status as i32)?;
 
                     let headers_table = lua.create_table()?;
-                    for (i, (k, v)) in headers.iter().enumerate() {
+                    for (i, (k, v)) in resp.headers.iter().enumerate() {
                         headers_table.set(i + 1, format!("{}: {}", k, v))?;
                     }
                     result.set("headers", headers_table)?;
 
                     Ok(result)
                 }
-                Err(e) => error_response(lua, e),
+                Err(e) => error_response(lua, &e),
             }
         })?,
     )?;
 
     let ctx = capability_ctx.clone();
+    let svc = services.clone();
     http.set(
         "options",
         lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
@@ -471,16 +350,25 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
             }
 
             let url = build_url(&host, port, &path);
-            let client = get_client(&url).clone();
+            let req = provider_request(
+                &ctx,
+                NseHttpMethod::Options,
+                url,
+                &host,
+                Vec::new(),
+                Vec::new(),
+                Duration::from_secs(30),
+            );
 
-            match client.request(reqwest::Method::OPTIONS, &url).send() {
-                Ok(resp) => build_response(lua, resp),
-                Err(e) => error_response(lua, e),
+            match broker_http_request(&ctx, &svc, &req, "http.options") {
+                Ok(resp) => build_response(lua, &resp),
+                Err(e) => error_response(lua, &e),
             }
         })?,
     )?;
 
     let ctx = capability_ctx.clone();
+    let svc = services.clone();
     http.set(
         "request",
         lua.create_function(
@@ -497,31 +385,40 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 }
 
                 let url = build_url(&host, port, &path);
+                // Legacy leniency: unknown methods fall back to GET.
+                let parsed = NseHttpMethod::parse(&method).unwrap_or(NseHttpMethod::Get);
 
-                let client = get_client(&url).clone();
-
-                let mut req = client.request(method.parse().unwrap_or(reqwest::Method::GET), &url);
-
+                let mut headers = Vec::new();
+                let mut body = Vec::new();
                 if let Some(opts) = options {
-                    if let Ok(body) = opts.get::<String>("body") {
-                        req = req.body(body);
+                    if let Ok(b) = opts.get::<String>("body") {
+                        body = b.into_bytes();
                     }
-                    if let Ok(headers) = opts.get::<Table>("headers") {
-                        for (k, v) in headers.pairs::<String, String>().flatten() {
-                            req = req.header(&k, &v);
+                    if let Ok(headers_table) = opts.get::<Table>("headers") {
+                        for (k, v) in headers_table.pairs::<String, String>().flatten() {
+                            headers.push((k, v));
                         }
                     }
                     if let Ok(auth) = opts.get::<String>("authorization") {
-                        req = req.header("Authorization", &auth);
+                        headers.push(("Authorization".to_string(), auth));
                     }
                     if let Ok(ua) = opts.get::<String>("useragent") {
-                        req = req.header("User-Agent", &ua);
+                        headers.push(("User-Agent".to_string(), ua));
                     }
                 }
+                let req = provider_request(
+                    &ctx,
+                    parsed,
+                    url,
+                    &host,
+                    headers,
+                    body,
+                    Duration::from_secs(30),
+                );
 
-                match req.send() {
-                    Ok(resp) => build_response(lua, resp),
-                    Err(e) => error_response(lua, e),
+                match broker_http_request(&ctx, &svc, &req, "http.request") {
+                    Ok(resp) => build_response(lua, &resp),
+                    Err(e) => error_response(lua, &e),
                 }
             },
         )?,
@@ -646,6 +543,7 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     )?;
 
     let ctx = capability_ctx.clone();
+    let svc = services.clone();
     http.set(
         "post_host",
         lua.create_function(
@@ -666,29 +564,37 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 let timeout = options
                     .as_ref()
                     .and_then(|o| o.get::<u64>("timeout").ok())
-                    .unwrap_or(30);
+                    .map(Duration::from_secs)
+                    .unwrap_or(Duration::from_secs(30));
 
-                let client = make_client_with_tls(timeout, None, None);
-
-                let mut req = client.post(&url).body(data);
-
+                let mut headers = Vec::new();
                 if let Some(opts) = options {
-                    if let Ok(headers) = opts.get::<Table>("headers") {
-                        for (k, v) in headers.pairs::<String, String>().flatten() {
-                            req = req.header(&k, &v);
+                    if let Ok(headers_table) = opts.get::<Table>("headers") {
+                        for (k, v) in headers_table.pairs::<String, String>().flatten() {
+                            headers.push((k, v));
                         }
                     }
                 }
+                let req = provider_request(
+                    &ctx,
+                    NseHttpMethod::Post,
+                    url,
+                    &host,
+                    headers,
+                    data.into_bytes(),
+                    timeout,
+                );
 
-                match req.send() {
-                    Ok(resp) => build_response(lua, resp),
-                    Err(e) => error_response(lua, e),
+                match broker_http_request(&ctx, &svc, &req, "http.post_host") {
+                    Ok(resp) => build_response(lua, &resp),
+                    Err(e) => error_response(lua, &e),
                 }
             },
         )?,
     )?;
 
     let ctx = capability_ctx.clone();
+    let svc = services.clone();
     http.set(
         "put_data",
         lua.create_function(
@@ -709,23 +615,30 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
                 let timeout = options
                     .as_ref()
                     .and_then(|o| o.get::<u64>("timeout").ok())
-                    .unwrap_or(30);
+                    .map(Duration::from_secs)
+                    .unwrap_or(Duration::from_secs(30));
 
-                let client = make_client_with_tls(timeout, None, None);
-
-                let mut req = client.put(&url).body(data);
-
+                let mut headers = Vec::new();
                 if let Some(opts) = options {
-                    if let Ok(headers) = opts.get::<Table>("headers") {
-                        for (k, v) in headers.pairs::<String, String>().flatten() {
-                            req = req.header(&k, &v);
+                    if let Ok(headers_table) = opts.get::<Table>("headers") {
+                        for (k, v) in headers_table.pairs::<String, String>().flatten() {
+                            headers.push((k, v));
                         }
                     }
                 }
+                let req = provider_request(
+                    &ctx,
+                    NseHttpMethod::Put,
+                    url,
+                    &host,
+                    headers,
+                    data.into_bytes(),
+                    timeout,
+                );
 
-                match req.send() {
-                    Ok(resp) => build_response(lua, resp),
-                    Err(e) => error_response(lua, e),
+                match broker_http_request(&ctx, &svc, &req, "http.put_data") {
+                    Ok(resp) => build_response(lua, &resp),
+                    Err(e) => error_response(lua, &e),
                 }
             },
         )?,
@@ -802,88 +715,94 @@ pub fn register_http_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
         })?,
     )?;
 
-    // Async HTTP functions (for use with async executor)
-    // These use reqwest's async client internally
+    // Async HTTP functions (for use with async executor).
+    //
+    // The provider contract is synchronous; these closures call the broker
+    // inline with bounded timeouts (no detached tasks). Concurrency
+    // characteristics differ from the previous true-async client; the
+    // completion/error shapes are unchanged.
     let ctx = capability_ctx.clone();
+    let svc = services.clone();
     http.set(
         "async_get",
         lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
-            let decision = wrappers::check_network_tcp(&ctx, &host, "http.async_get");
-            if !decision.is_allowed() {
-                return denied_response(
-                    lua,
-                    decision.deny_reason().unwrap_or("network access denied"),
-                );
+            if let Some(resp) = maybe_denied_response(lua, &ctx, &host, "http.async_get")? {
+                return Ok(resp);
             }
 
             let url = build_url(&host, port, &path);
-            let client = get_async_client(&url).clone();
+            let req = provider_request(
+                &ctx,
+                NseHttpMethod::Get,
+                url,
+                &host,
+                Vec::new(),
+                Vec::new(),
+                Duration::from_secs(30),
+            );
 
-            // Run blocking HTTP call in a tokio spawn
-            let result = block_on_async(async {
-                match client.get(&url).send().await {
-                    Ok(resp) => build_response_async(lua, resp),
-                    Err(e) => error_response(lua, e),
-                }
-            });
-
-            result
+            match broker_http_request(&ctx, &svc, &req, "http.async_get") {
+                Ok(resp) => build_response(lua, &resp),
+                Err(e) => error_response(lua, &e),
+            }
         })?,
     )?;
 
     let ctx = capability_ctx.clone();
+    let svc = services.clone();
     http.set(
         "async_post",
         lua.create_function(
             move |lua, (host, port, path, data): (String, u16, String, String)| {
-                let decision = wrappers::check_network_tcp(&ctx, &host, "http.async_post");
-                if !decision.is_allowed() {
-                    return denied_response(
-                        lua,
-                        decision.deny_reason().unwrap_or("network access denied"),
-                    );
+                if let Some(resp) = maybe_denied_response(lua, &ctx, &host, "http.async_post")? {
+                    return Ok(resp);
                 }
 
                 let url = build_url(&host, port, &path);
-                let client = get_async_client(&url).clone();
+                let req = provider_request(
+                    &ctx,
+                    NseHttpMethod::Post,
+                    url,
+                    &host,
+                    Vec::new(),
+                    data.into_bytes(),
+                    Duration::from_secs(30),
+                );
 
-                let result = block_on_async(async {
-                    match client.post(&url).body(data).send().await {
-                        Ok(resp) => build_response_async(lua, resp),
-                        Err(e) => error_response(lua, e),
-                    }
-                });
-
-                result
+                match broker_http_request(&ctx, &svc, &req, "http.async_post") {
+                    Ok(resp) => build_response(lua, &resp),
+                    Err(e) => error_response(lua, &e),
+                }
             },
         )?,
     )?;
 
     let ctx = capability_ctx.clone();
+    let svc = services.clone();
     http.set(
         "async_request",
         lua.create_function(
             move |lua, (method, host, port, path): (String, String, u16, String)| {
-                let decision = wrappers::check_network_tcp(&ctx, &host, "http.async_request");
-                if !decision.is_allowed() {
-                    return denied_response(
-                        lua,
-                        decision.deny_reason().unwrap_or("network access denied"),
-                    );
+                if let Some(resp) = maybe_denied_response(lua, &ctx, &host, "http.async_request")? {
+                    return Ok(resp);
                 }
 
                 let url = build_url(&host, port, &path);
-                let client = get_async_client(&url).clone();
+                let parsed = NseHttpMethod::parse(&method).unwrap_or(NseHttpMethod::Get);
+                let req = provider_request(
+                    &ctx,
+                    parsed,
+                    url,
+                    &host,
+                    Vec::new(),
+                    Vec::new(),
+                    Duration::from_secs(30),
+                );
 
-                let result = block_on_async(async {
-                    let req = client.request(method.parse().unwrap_or(reqwest::Method::GET), &url);
-                    match req.send().await {
-                        Ok(resp) => build_response_async(lua, resp),
-                        Err(e) => error_response(lua, e),
-                    }
-                });
-
-                result
+                match broker_http_request(&ctx, &svc, &req, "http.async_request") {
+                    Ok(resp) => build_response(lua, &resp),
+                    Err(e) => error_response(lua, &e),
+                }
             },
         )?,
     )?;

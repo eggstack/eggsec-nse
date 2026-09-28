@@ -32,6 +32,22 @@ pub fn reset_for_run() {
 }
 
 pub fn register_brute_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+    register_brute_library_with_services(
+        lua,
+        capability_ctx,
+        &crate::providers::NseHostServices::native(),
+    )
+}
+
+/// Provider-backed brute registration.
+///
+/// Only the HTTP-auth probe is brokered; direct TCP helpers stay native
+/// (deferred protocol surface, inventoried).
+pub fn register_brute_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &crate::providers::NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let brute = lua.create_table()?;
 
@@ -299,42 +315,45 @@ pub fn register_brute_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
         "http_auth",
         lua.create_function({
             let cap = capability_ctx.clone();
+            let svc = services.clone();
+            // NOTE: brute.rs keeps its direct TCP helpers (out of scope for
+            // 005C); only the HTTP-auth probe below is provider-backed.
             move |lua, (host, port, uri, username, password): (String, u16, String, String, String)| {
-                let result = lua.create_table()?;
-
-                let client = match reqwest::blocking::Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
-                    .danger_accept_invalid_certs(cap.allows_insecure_tls())
-                    .build()
-                {
-                    Ok(c) => c,
-                    Err(e) => {
-                        result.set("status", "error")?;
-                        result.set("error", format!("Failed to create HTTP client: {}", e))?;
-                        return Ok(result);
-                    }
-                };
+                use base64::Engine;
+                let credentials = format!("{username}:{password}");
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&credentials);
 
                 let url = format!("http://{}:{}{}", host, port, uri);
-                let response = client
-                    .get(&url)
-                    .basic_auth(&username, Some(&password))
-                    .send();
-
-                match response {
+                let req = crate::providers::NseHttpRequest {
+                    method: crate::providers::NseHttpMethod::Get,
+                    url,
+                    host: host.clone(),
+                    headers: vec![(
+                        "Authorization".to_string(),
+                        format!("Basic {encoded}"),
+                    )],
+                    body: Vec::new(),
+                    timeout: std::time::Duration::from_secs(10),
+                    connect_timeout: std::time::Duration::from_secs(10),
+                    insecure_tls: cap.allows_insecure_tls(),
+                };
+                match crate::providers::broker_http_request(&cap, &svc, &req, "brute.http_auth")
+                {
                     Ok(resp) => {
-                        let status = resp.status().as_u16();
+                        let result = lua.create_table()?;
+                        let status = resp.status;
                         result.set("status", if status == 200 { "ok" } else { "fail" })?;
                         result.set("code", status)?;
                         result.set("success", status == 200)?;
+                        Ok(result)
                     }
                     Err(e) => {
+                        let result = lua.create_table()?;
                         result.set("status", "error")?;
-                        result.set("error", e.to_string())?;
+                        result.set("error", e.detail())?;
+                        Ok(result)
                     }
                 }
-
-                Ok(result)
             }
         })?,
     )?;

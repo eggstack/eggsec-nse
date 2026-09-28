@@ -2,17 +2,31 @@
 //!
 //! HTTP pipelining support for sending multiple requests without waiting for each response.
 //! Based on Nmap's httppipeline functionality: https://nmap.org/nsedoc/lib/http.html
+//!
+//! M005C: every pipelined request executes through the injected
+//! [`NseHttpProvider`] via the broker. The shared-client build (with
+//! profile-gated TLS intent) is preserved per request; pooling lives in
+//! the per-bundle native provider.
 
 use mlua::{Lua, Result as LuaResult, Table};
-use reqwest::blocking::Client;
 use std::time::Duration;
 
 use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_http_request, NseHostServices, NseHttpMethod, NseHttpRequest};
 use crate::wrappers;
 
 pub fn register_httppipeline_library(
     lua: &Lua,
     capability_ctx: &NseCapabilityContext,
+) -> LuaResult<()> {
+    register_httppipeline_library_with_services(lua, capability_ctx, &NseHostServices::native())
+}
+
+/// Provider-backed httppipeline registration.
+pub fn register_httppipeline_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
 ) -> LuaResult<()> {
     let globals = lua.globals();
     let httppipeline = lua.create_table()?;
@@ -73,6 +87,7 @@ pub fn register_httppipeline_library(
 
     // httppipeline.go(pipeline) -> responses
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let go_fn = lua.create_function(move |lua, pipeline: Table| {
         let host: String = pipeline.get("host")?;
         let port: u16 = pipeline.get("port")?;
@@ -104,23 +119,7 @@ pub fn register_httppipeline_library(
 
         let scheme = if port == 443 { "https" } else { "http" };
         let base_url = format!("{}://{}:{}", scheme, host, port);
-
-        let client = match Client::builder()
-            .timeout(Duration::from_secs(timeout))
-            .danger_accept_invalid_certs(cap.allows_insecure_tls())
-            .danger_accept_invalid_hostnames(cap.allows_insecure_tls())
-            .build()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                let responses = lua.create_table()?;
-                let err_tbl = lua.create_table()?;
-                err_tbl.set("status", 0)?;
-                err_tbl.set("error", e.to_string())?;
-                responses.set(1, err_tbl)?;
-                return Ok(responses);
-            }
-        };
+        let insecure = cap.allows_insecure_tls();
 
         let responses = lua.create_table()?;
 
@@ -130,21 +129,44 @@ pub fn register_httppipeline_library(
                 let path: String = req.get("path").unwrap_or_else(|_| "/".to_string());
 
                 let full_url = format!("{}{}", base_url, path);
+                // Legacy leniency: unknown methods fall back to GET.
+                let parsed = NseHttpMethod::parse(&method).unwrap_or(NseHttpMethod::Get);
 
-                let resp = client
-                    .request(method.parse().unwrap_or(reqwest::Method::GET), &full_url)
-                    .send();
+                let mut headers = Vec::new();
+                if let Ok(headers_table) = req.get::<Table>("headers") {
+                    for (k, v) in headers_table.pairs::<String, String>().flatten() {
+                        headers.push((k, v));
+                    }
+                }
+                let body = req
+                    .get::<String>("body")
+                    .map(|b| b.into_bytes())
+                    .unwrap_or_default();
+                let req_timeout = req
+                    .get::<u64>("timeout")
+                    .map(Duration::from_secs)
+                    .unwrap_or(Duration::from_secs(timeout));
+                let http_req = NseHttpRequest {
+                    method: parsed,
+                    url: full_url.clone(),
+                    host: host.clone(),
+                    headers,
+                    body,
+                    timeout: req_timeout.max(Duration::from_secs(1)),
+                    connect_timeout: Duration::from_secs(10),
+                    insecure_tls: insecure,
+                };
 
                 let resp_tbl = lua.create_table()?;
 
-                match resp {
+                match broker_http_request(&cap, &svc, &http_req, "httppipeline.go") {
                     Ok(r) => {
-                        resp_tbl.set("status", r.status().as_u16() as i32)?;
+                        resp_tbl.set("status", r.status as i32)?;
                         resp_tbl.set("url", full_url)?;
 
                         let headers = lua.create_table()?;
-                        for (k, v) in r.headers() {
-                            if let Err(e) = headers.set(k.to_string(), v.to_str().unwrap_or("")) {
+                        for (k, v) in &r.headers {
+                            if let Err(e) = headers.set(k.clone(), v.clone()) {
                                 tracing::debug!(
                                     "nse httppipeline: failed to set response header: {}",
                                     e
@@ -153,9 +175,7 @@ pub fn register_httppipeline_library(
                         }
                         resp_tbl.set("headers", headers)?;
 
-                        if let Ok(body) = r.text() {
-                            resp_tbl.set("body", body)?;
-                        }
+                        resp_tbl.set("body", r.body_text())?;
                     }
                     Err(e) => {
                         resp_tbl.set("status", 0)?;
@@ -208,6 +228,7 @@ pub fn register_httppipeline_library(
 
     // httppipeline.queue(host, port, requests) -> responses
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let queue_fn =
         lua.create_function(move |lua, (host, port, requests): (String, u16, Table)| {
             let decision = wrappers::check_network_tcp(&cap, &host, "httppipeline.queue");
@@ -231,23 +252,7 @@ pub fn register_httppipeline_library(
 
             let scheme = if port == 443 { "https" } else { "http" };
             let base_url = format!("{}://{}:{}", scheme, host, port);
-
-            let client = match Client::builder()
-                .timeout(Duration::from_secs(timeout))
-                .danger_accept_invalid_certs(cap.allows_insecure_tls())
-                .danger_accept_invalid_hostnames(cap.allows_insecure_tls())
-                .build()
-            {
-                Ok(c) => c,
-                Err(e) => {
-                    let responses = lua.create_table()?;
-                    let err_tbl = lua.create_table()?;
-                    err_tbl.set("status", 0)?;
-                    err_tbl.set("error", e.to_string())?;
-                    responses.set(1, err_tbl)?;
-                    return Ok(responses);
-                }
-            };
+            let insecure = cap.allows_insecure_tls();
 
             let responses = lua.create_table()?;
             let count = requests.len()? as usize;
@@ -258,23 +263,28 @@ pub fn register_httppipeline_library(
                     let path: String = req.get("path").unwrap_or_else(|_| "/".to_string());
 
                     let full_url = format!("{}{}", base_url, path);
-
-                    let resp = client
-                        .request(method.parse().unwrap_or(reqwest::Method::GET), &full_url)
-                        .send();
+                    let parsed = NseHttpMethod::parse(&method).unwrap_or(NseHttpMethod::Get);
+                    let http_req = NseHttpRequest {
+                        method: parsed,
+                        url: full_url,
+                        host: host.clone(),
+                        headers: Vec::new(),
+                        body: Vec::new(),
+                        timeout: Duration::from_secs(timeout),
+                        connect_timeout: Duration::from_secs(10),
+                        insecure_tls: insecure,
+                    };
 
                     let resp_tbl = lua.create_table()?;
 
-                    match resp {
+                    match broker_http_request(&cap, &svc, &http_req, "httppipeline.queue") {
                         Ok(r) => {
-                            resp_tbl.set("status", r.status().as_u16() as i32)?;
-                            if let Ok(body) = r.text() {
-                                resp_tbl.set("body", body)?;
-                            }
+                            resp_tbl.set("status", r.status as i32)?;
+                            resp_tbl.set("body", r.body_text())?;
                         }
                         Err(e) => {
                             resp_tbl.set("status", 0)?;
-                            resp_tbl.set("error", e.to_string())?;
+                            resp_tbl.set("error", e.detail())?;
                         }
                     }
 

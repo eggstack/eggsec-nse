@@ -103,8 +103,8 @@ if rg -n -e 'std::net::TcpStream' -e 'std::net::UdpSocket' -e 'ToSocketAddrs' -e
   exit 1
 fi
 
-if rg -n -e 'std::net::TcpStream' -e 'std::net::UdpSocket' -e 'ToSocketAddrs' -e 'tokio' -e 'hickory' -e 'connect_timeout' -e 'lookup_host' -e 'UdpSocket::bind' src/libraries/comm.rs; then
-  echo "M005B violation: direct socket call in comm.rs (use network providers broker; tryssl stays on reqwest until 005C)" >&2
+if rg -n -e 'std::net::TcpStream' -e 'std::net::UdpSocket' -e 'ToSocketAddrs' -e 'tokio' -e 'hickory' -e 'connect_timeout\(' -e 'lookup_host' -e 'UdpSocket::bind' src/libraries/comm.rs; then
+  echo "M005B violation: direct socket call in comm.rs (use network providers broker)" >&2
   exit 1
 fi
 
@@ -185,6 +185,23 @@ fi
 for f in src/libraries/io.rs src/libraries/lfs.rs src/libraries/os.rs src/libraries/nmap.rs; do
   if ! rg -q 'broker_' "$f"; then
     echo "M005D violation: $f contains no broker_ call (migrated modules must use filesystem/process providers broker)" >&2
+    exit 1
+  fi
+done
+
+# M005C HTTP provider: migrated HTTP-family libraries must go through the
+# provider broker. Native HTTP lives only in src/providers.rs; the
+# deprecated no-op TLS-flag shims in http.rs are the only allow-listed
+# legacy surface (no behavior, no client).
+if rg -n -e 'reqwest' src/libraries/http.rs src/libraries/httppipeline.rs src/libraries/comm.rs src/libraries/brute.rs src/libraries/vulns.rs src/libraries/upnp.rs; then
+  echo "M005C violation: direct HTTP client use in migrated HTTP-family library (use HTTP provider broker)" >&2
+  exit 1
+fi
+
+# Broker presence (HTTP): migrated modules must reference the broker.
+for f in src/libraries/http.rs src/libraries/httppipeline.rs src/libraries/comm.rs src/libraries/brute.rs src/libraries/vulns.rs src/libraries/upnp.rs; do
+  if ! rg -q 'broker_' "$f"; then
+    echo "M005C violation: $f contains no broker_ call (migrated modules must use HTTP provider broker)" >&2
     exit 1
   fi
 done
