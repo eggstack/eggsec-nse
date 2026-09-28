@@ -485,7 +485,7 @@ pub fn nse_network_tcp_send(
             .unwrap_or("network TCP send denied")
             .to_string());
     }
-    ctx.before_blocking_operation(&request)?;
+    ctx.before_blocking_send(&request)?;
 
     use std::io::Write;
     match stream.write(data) {
@@ -572,7 +572,7 @@ pub fn nse_network_udp_send(
             .unwrap_or("network UDP send denied")
             .to_string());
     }
-    ctx.before_blocking_operation(&request)?;
+    ctx.before_blocking_send(&request)?;
 
     let socket = NativeUdpSocketProvider
         .connect_std(&endpoint, std::time::Duration::from_secs(5))

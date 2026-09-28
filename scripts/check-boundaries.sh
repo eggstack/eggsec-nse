@@ -206,4 +206,91 @@ for f in src/libraries/http.rs src/libraries/httppipeline.rs src/libraries/comm.
   fi
 done
 
+# M005E provider-coverage qualification: the specialized direct-socket
+# inventory is pinned. Protocol libraries intentionally retain direct
+# socket I/O (rewriting them is out of scope); the guard enforces that the
+# set cannot silently expand and that advisory-gated files keep their
+# capability gates. Full classification lives in docs/PROVIDERS.md (M005E
+# audit section); the two lists below are the machine-readable inventory.
+#
+# - nse-specialized-advisory.txt: direct socket use + capability consulted
+#   at Lua entries (no provider injection/accounting; mixed files noted
+#   in docs).
+# - nse-specialized-ungated.txt: direct socket use with no capability
+#   consultation (documented residual; empirically proven; follow-up work
+#   recommended in the 005E closure).
+m005e_production_socket_files() {
+    for f in $(rg -l --no-heading -e 'TcpStream::connect' -e 'UdpSocket::bind' -e 'AsyncTcpStream::connect' src/ | sort); do
+        case "$f" in src/providers.rs) continue ;; esac
+        if grep -q "mod tests" "$f"; then
+            line=$(grep -n "mod tests" "$f" | head -n 1 | cut -d: -f1)
+            if head -n $((line - 1)) "$f" | rg -q -e 'TcpStream::connect' -e 'UdpSocket::bind' -e 'AsyncTcpStream::connect'; then
+                echo "$f"
+            fi
+        else
+            echo "$f"
+        fi
+    done
+}
+
+expected_socket_files=$(sort scripts/nse-specialized-advisory.txt scripts/nse-specialized-ungated.txt | uniq)
+actual_socket_files=$(m005e_production_socket_files)
+if [ "$actual_socket_files" != "$expected_socket_files" ]; then
+    echo "M005E violation: direct-socket file set changed (see docs/PROVIDERS.md M005E audit)." >&2
+    echo "--- expected (pinned) ---" >&2
+    echo "$expected_socket_files" >&2
+    echo "--- actual (source) ---" >&2
+    echo "$actual_socket_files" >&2
+    exit 1
+fi
+
+# Advisory-gated files must keep consulting capability (prevents silent
+# gate removal; per-entry coverage caveats are documented, not enforced).
+while read -r f; do
+    if ! rg -q "capability_ctx|cap_ctx|check_capability|wrappers::|maybe_denied" "$f"; then
+        echo "M005E violation: advisory file $f lost its capability gate" >&2
+        exit 1
+    fi
+done < scripts/nse-specialized-advisory.txt
+
+# reqwest is allow-listed to the native HTTP zone (providers.rs), the
+# public sync API + CVE clients, shared protocol helpers, and
+# reference-only mentions (lib.rs docs, registry metadata). Any new file
+# importing reqwest fails closed.
+expected_reqwest_files=$(sort scripts/nse-reqwest-inventory.txt)
+actual_reqwest_files=$(rg -l --no-heading -e 'reqwest' src/ | sort)
+if [ "$actual_reqwest_files" != "$expected_reqwest_files" ]; then
+    echo "M005E violation: reqwest file set changed (pinned in scripts/nse-reqwest-inventory.txt)" >&2
+    echo "--- expected ---" >&2
+    echo "$expected_reqwest_files" >&2
+    echo "--- actual ---" >&2
+    echo "$actual_reqwest_files" >&2
+    exit 1
+fi
+
+# Portability: platform-specific host modules stay in the native provider
+# zone. Production code (above `mod tests`) outside providers.rs must not
+# reference os::unix/os::windows/nix/libc; cfg-gated fallbacks that carry
+# no os:: path (executor_core script roots, wrappers permission shim,
+# nsedebug estimates) are unaffected.
+m005e_production_code() {
+    if grep -q "mod tests" "$1"; then
+        line=$(grep -n "mod tests" "$1" | head -n 1 | cut -d: -f1)
+        head -n $((line - 1)) "$1"
+    else
+        cat "$1"
+    fi
+}
+platform_violation=""
+for f in $(rg -l --no-heading -e 'os::unix' -e 'os::windows' -e 'nix::' -e 'libc::' src/ | sort); do
+    case "$f" in src/providers.rs) continue ;; esac
+    if m005e_production_code "$f" | rg -q -e 'os::unix' -e 'os::windows' -e 'nix::' -e 'libc::'; then
+        platform_violation="$platform_violation $f"
+    fi
+done
+if [ -n "$platform_violation" ]; then
+    echo "M005E violation: platform host module outside providers.rs:$platform_violation" >&2
+    exit 1
+fi
+
 echo "standalone boundary and provenance checks passed"

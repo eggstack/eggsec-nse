@@ -431,7 +431,8 @@ fn udp_authority_flow_with_accounting() {
         .with_udp(udp.clone());
 
     let ops_before = counters.network_operations.load(Ordering::Relaxed);
-    let bytes_before = counters.network_bytes_read.load(Ordering::Relaxed);
+    let read_before = counters.network_bytes_read.load(Ordering::Relaxed);
+    let written_before = counters.network_bytes_written.load(Ordering::Relaxed);
 
     let (mut handle, endpoint) = broker_udp_connect(
         &ctx,
@@ -451,16 +452,22 @@ fn udp_authority_flow_with_accounting() {
     let received = broker_udp_receive(&ctx, handle.as_mut(), 1024, "test.udp").expect("udp recv");
     assert_eq!(received, b"pong");
 
-    // connect + send + receive each record one network operation; send and
-    // receive bytes both flow through the byte counter (established
-    // accounting parity with the pre-provider wrappers).
+    // connect + send + receive each record one network operation; sent
+    // bytes land in the written bucket and received bytes in the read
+    // bucket (M005E direction-correct accounting).
     assert_eq!(
         counters.network_operations.load(Ordering::Relaxed) - ops_before,
         3
     );
     assert_eq!(
-        counters.network_bytes_read.load(Ordering::Relaxed) - bytes_before,
-        8
+        counters.network_bytes_read.load(Ordering::Relaxed) - read_before,
+        4,
+        "received pong bytes are read"
+    );
+    assert_eq!(
+        counters.network_bytes_written.load(Ordering::Relaxed) - written_before,
+        4,
+        "sent ping bytes are written"
     );
 }
 
@@ -559,7 +566,14 @@ fn native_tcp_echo_roundtrip_through_broker() {
     assert_eq!(sent, 5);
     let echoed = broker_tcp_receive(&ctx, handle.as_mut(), 1024, "test.echo").expect("receive");
     assert_eq!(echoed, b"hello");
-    assert!(counters.network_bytes_read.load(Ordering::Relaxed) >= 10);
+    assert!(
+        counters.network_bytes_read.load(Ordering::Relaxed) >= 5,
+        "echoed bytes are read"
+    );
+    assert!(
+        counters.network_bytes_written.load(Ordering::Relaxed) >= 5,
+        "sent bytes are written (M005E direction-correct accounting)"
+    );
 
     handle.close();
     assert!(!handle.is_alive(), "closed handle must report not alive");

@@ -2219,11 +2219,11 @@ pub fn broker_tcp_send(
     if !decision.is_allowed() {
         return Err(deny_message(&decision, "network TCP send denied"));
     }
-    ctx.before_blocking_operation(&request)?;
+    ctx.before_blocking_send(&request)?;
     let n = handle
         .send(data)
         .map_err(|e| format!("TCP send failed: {e}"))?;
-    ctx.after_blocking_operation(&request, Some(n as u64));
+    ctx.after_blocking_send(&request, Some(n as u64));
     Ok(n)
 }
 
@@ -2323,11 +2323,11 @@ pub fn broker_udp_send(
     if !decision.is_allowed() {
         return Err(deny_message(&decision, "network UDP send denied"));
     }
-    ctx.before_blocking_operation(&request)?;
+    ctx.before_blocking_send(&request)?;
     let n = handle
         .send(data)
         .map_err(|e| format!("UDP send failed: {e}"))?;
-    ctx.after_blocking_operation(&request, Some(n as u64));
+    ctx.after_blocking_send(&request, Some(n as u64));
     Ok(n)
 }
 
@@ -4714,10 +4714,12 @@ pub fn broker_http_request(
     if let Err(e) = ctx.check_cancelled(operation) {
         return Err(NseHttpError::Cancelled(e));
     }
+    // Response size is unknowable before the call, so no byte hint is
+    // preflighted here; request/response bodies are bucketed post-call.
     let broker_request = broker_request(
         NseCapabilityKind::NetworkTcp,
         Some(request.host.clone()),
-        Some(request.body.len() as u64),
+        None,
         operation,
     );
     let decision = ctx.check_capability(&broker_request);
@@ -4734,9 +4736,12 @@ pub fn broker_http_request(
         return Err(NseHttpError::Request(e));
     }
     let response = services.http().request(request)?;
-    ctx.after_blocking_operation(
-        &broker_request,
-        Some((request.body.len() + response.body.len()) as u64),
+    // Direction-correct accounting: response bytes are read, request body
+    // bytes are written (never lumped into the read bucket).
+    ctx.after_blocking_operation(&broker_request, Some(response.body.len() as u64));
+    ctx.counters.network_bytes_written.fetch_add(
+        request.body.len() as u64,
+        std::sync::atomic::Ordering::AcqRel,
     );
     Ok(response)
 }

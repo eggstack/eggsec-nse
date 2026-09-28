@@ -147,12 +147,27 @@ Deferred, still capability-checked per hostname but *not*
 authority-preserving (hostname check + native resolve split retained);
 rewriting them is explicitly out of scope for 005B:
 
-- ~100 protocol-specific libraries (`ftp`, `mongodb`, `ssh`, `http`,
-  `smb`, `irc`, `sip`, `dhcp`, `helpers`, ...) with direct
-  `connect_timeout`/`TcpStream::connect`/`UdpSocket`/`tokio::net` calls
-  (full per-file count table in the 005B closure record). They fail closed
-  on `DenyAll`/CI-safe (capability check first) but keep the legacy
-  check-then-resolve shape under hostname/CIDR policies.
+- Protocol-specific libraries with direct `connect_timeout`/
+  `TcpStream::connect`/`UdpSocket`/`tokio::net` calls. The 005B text
+  claimed these "fail closed on DenyAll/CI-safe (capability check
+  first)"; the M005E source audit falsified that blanket claim. The
+  corrected split (machine-readable pin in
+  `scripts/nse-specialized-{advisory,ungated}.txt`, guard-enforced):
+  - **advisory-gated (25 files)**: Lua entries consult capability
+    before direct I/O (`brute`, `dhcp`, `dhcp6`, `ftp`, `imap`, `ldap`,
+    `libssh2`, `mongodb`, `mssql`, `mysql`, `ntp`, `openssl`,
+    `postgres`, `rdp`, `redis`, `smb`, `smb2`, `smtp`, `snmp`, `ssh`,
+    `sslcert`, `tls`, `upnp`, `vnc`, `xdmcp`). Denials are enforced at entry; provider injection,
+    cancellation, and byte accounting do NOT apply. Mixed files
+    (`brute` TCP helpers, parts of `openssl`/`sslcert`) keep ungated
+    entries alongside gated ones — file-level "advisory" means at
+    least one Lua entry gates, not every entry.
+  - **ungated residual (72 files)**: direct socket I/O with no
+    capability consultation at all (empirically proven: `pop3.connect`
+    reaches a loopback host under CiSafe+DenyAll with zero capability
+    events). Listed in `scripts/nse-specialized-ungated.txt`.
+    Rewriting them is out of scope for M005 (plan §5); the 005E
+    closure records severity and follow-up.
 - `comm.tryssl` (HTTPS via `reqwest`): deferred to the 005C HTTP provider.
 - `SandboxConfig::resolve_host`/`is_host_allowed` (`lib.rs`): legacy
   resolving sandbox helpers with documented rebinding risk; no production
@@ -220,6 +235,15 @@ The M005C section additionally enforces: no `reqwest` in the migrated
 HTTP-family libraries (`http`, `httppipeline`, `comm`, `brute`, `vulns`,
 `upnp`); natives isolated in `providers.rs`; `broker_` presence in every
 migrated HTTP module.
+
+The M005E section additionally enforces: the direct-socket file set
+(production code) exactly matches the pinned advisory + ungated
+inventories (`scripts/nse-specialized-{advisory,ungated}.txt`); every
+advisory file keeps consulting capability; `reqwest` is allow-listed to
+the pinned set (`scripts/nse-reqwest-inventory.txt`); no platform host
+modules (`os::unix`/`os::windows`/`nix`/`libc`) outside `providers.rs`.
+The 005B/005C "capability-checked" blanket claims for deferred protocol
+libraries are corrected by the M005E audit (advisory vs ungated split).
 
 ## M005D — filesystem/process providers and per-run isolation
 
@@ -408,9 +432,65 @@ activates with the runtime release/adoption step.
   only; TCP helpers deferred), `vulns` (NVD only; local DB unaffected),
   `upnp` (description fetch only; SSDP sockets specialized).
 - Deferred protocol HTTP (not shared/core, per plan scope): anything
-  outside the migrated set keeps capability-checked native paths;
-  covered by the 005E source audit.
+  outside the migrated set keeps native paths; the 005B-era
+  "capability-checked" blanket claim is corrected by the M005E audit
+  (advisory-gated vs ungated-residual split above applies to HTTP
+  clients like `elasticsearch`, `httpspider`, `mobileme` as well).
 - Regeneration: `rg -n -e 'reqwest' src/libraries/http.rs
   src/libraries/httppipeline.rs src/libraries/comm.rs
   src/libraries/brute.rs src/libraries/vulns.rs src/libraries/upnp.rs`
   (must be empty; guards enforce).
+
+## M005E — provider coverage qualification
+
+Qualification/integration pass, not a migration: one coherent bundle
+across domains, source-derived inventory, corrected coverage claims,
+and a release disposition. Corrective production change in this slice
+is limited to the send-accounting defect below.
+
+### Source inventory classification (post-005A-D)
+
+| Class | Members | Enforcement |
+|---|---|---|
+| provider-backed (broker sequence) | `socket`, `dns`, `comm` (incl. tryssl), `http`, `httppipeline`, `io`, `lfs`, `os` (getenv/remove/tmpdir/hostname-intent), `datetime`, `rand`, `stdnse`, `nmap` Lua-visible clock/random, `vulns` NVD, `brute.http_auth`, `upnp` description fetch | capability + cancel + provider + accounting; guards |
+| native implementations | `providers.rs` only | single allow-listed zone; guards |
+| compatibility shims (capability-gated native bodies) | `wrappers.rs` leaking-signature shims (`fs_metadata`, `read_dir`, `symlink_metadata`, `process_exec`, `time_now`, `random_bytes`, `env_var`, TCP/UDP send/receive on caller handles); `nmap.add/get_connection` | gate + accounting; no injection (signatures leak std types); public but only tests call the `nse_*` time/random/env/process fns |
+| advisory-gated specialized (25 files) | `scripts/nse-specialized-advisory.txt` | entry denial; no injection/cancel/accounting; gate-presence guarded; mixed files documented (`brute` TCP, parts of `openssl`/`sslcert`) |
+| ungated specialized residual (72 files) | `scripts/nse-specialized-ungated.txt` (incl. `omp2`, whose ctx use is TLS-intent only) | none; set pinned against expansion; empirically proven (CiSafe+DenyAll `pop3.connect` reaches loopback, zero events) |
+| specialized HTTP/TLS/SSH clients | `public_api/api.rs` (public sync API, native), `cve/{nvd,osv,cisa_kev}.rs` (reqwest clients), `helpers.rs` (shared TLS/HTTP builders used by gated callers), `elasticsearch.rs`, `httpspider.rs`, `mobileme.rs`, `tls.rs` (gated `connect_tcp`), `sslcert.rs`/`openssl.rs` (mixed), `ssh.rs`/`libssh2.rs` (gated entries) | allow-listed reqwest set (`scripts/nse-reqwest-inventory.txt`) |
+| loader/lookup reads | `executor_core.rs` script search, `resolver` script/module loads, `datafiles.rs` policy-checked reads, `bjnp.rs`/`ls.rs`/`pppoe.rs` data reads | ScriptResolver/module policy gates the loader paths |
+| diagnostic timestamps | `output.rs` (report timing), `nmap` registry metadata | not Lua-visible; retained |
+| pure parse, no I/O | `capabilities.rs`/`target.rs`/`match_lib.rs` IP/SocketAddr parsing, `datetime` chrono conversions | none needed |
+| stubs (no host effect) | `os.execute` (returns status 1, never spawns) | none needed |
+| runtime plumbing | `lib.rs` `spawn_blocking`, `async_executor` Runtime import, `run.rs` regex statics, `dnsbl` resolver static / `smb` session static / `nmap` connection registry / `openssl` TLS-connector static (specialized state, ungated — same residual class as their libraries) | documented |
+| process/env residuals | `io.rs` `process::id` + `temp_dir` fallback, `os.rs` `temp_dir` fallback + `hostname` lookup + `SystemTime`, `wrappers` env/time shims | inventoried 005D residuals |
+
+Regeneration: the three `scripts/nse-*.txt` pins plus
+`tests/provider_composition_tests.rs` (bundle coherence) are the
+machine-readable inventory; `scripts/check-boundaries.sh` (M005E
+section) diffs source against the pins.
+
+### Send-accounting correction (closure-blocker fix)
+
+`broker_tcp_send`/`broker_udp_send` counted sent bytes in the
+**read** bucket, leaving `network_bytes_written` permanently zero and
+the `max_network_bytes_written` limit dead; HTTP lumped
+request+response bodies into read. Fixed with direction-aware
+accounting (`before_blocking_send`/`after_blocking_send` in
+`capabilities.rs`; written bucket + written-limit preflight for
+TCP/UDP sends; HTTP splits request-written/response-read). Wrapper
+send shims already posted to the written bucket and now preflight it
+too. Proven by `provider_accounting_reflects_actual_execution`,
+`write_byte_limit_preflight_blocks_send`,
+`http_accounting_splits_request_and_response`, and the corrected
+legacy asserts in `network_provider_tests.rs`.
+
+### Composition evidence (M005E)
+
+`tests/provider_composition_tests.rs` (8 tests): one Lua run drives
+clock+env+DNS+TCP+HTTP+fs through a single injected bundle with exact
+per-provider call counts, DNS-selected endpoint identity on the TCP
+connect, and script-supplied host identity on the HTTP request;
+concurrent full runs isolate bundles/filesystem/CWD; cancelled and
+deny-all contexts block all seven brokered domains with zero provider
+contact; denied Lua runs record denials with zero provider contact.

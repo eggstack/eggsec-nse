@@ -317,6 +317,48 @@ impl NseCapabilityContext {
         Ok(())
     }
 
+    /// Pre-send check for network writes.
+    ///
+    /// Direction-aware companion to [`Self::before_blocking_operation`]:
+    /// send byte hints are preflighted against `max_network_bytes_written`
+    /// (not the read budget), so the write-byte limit is enforceable.
+    /// Non-TCP/UDP kinds delegate to the generic preflight unchanged.
+    pub fn before_blocking_send(&self, request: &NseCapabilityRequest) -> Result<(), String> {
+        // Check cancellation
+        self.check_cancelled(request.operation)?;
+
+        match request.kind {
+            NseCapabilityKind::NetworkTcp | NseCapabilityKind::NetworkUdp => {
+                if let Some(max) = self.limits.max_network_operations {
+                    let current = self.counters.network_operations.load(Ordering::Acquire);
+                    if current >= max {
+                        return Err(format!(
+                            "Network operation limit exceeded: {}/{}",
+                            current, max
+                        ));
+                    }
+                }
+                if let Some(bytes) = request.bytes_hint {
+                    if let Some(max) = self.limits.max_network_bytes_written {
+                        let current = self.counters.network_bytes_written.load(Ordering::Acquire);
+                        if current + bytes > max {
+                            return Err(format!(
+                                "Network bytes written limit exceeded: {}/{}",
+                                current + bytes,
+                                max
+                            ));
+                        }
+                    }
+                }
+            }
+            _ => {
+                return self.before_blocking_operation(request);
+            }
+        }
+
+        Ok(())
+    }
+
     /// Post-block update for a blocking operation.
     ///
     /// Updates resource counters after an operation completes.
@@ -353,6 +395,30 @@ impl NseCapabilityContext {
                 // but we track them via events
             }
             _ => {}
+        }
+    }
+
+    /// Post-send update for a network write.
+    ///
+    /// Direction-aware companion to [`Self::after_blocking_operation`]:
+    /// sent bytes land in `network_bytes_written` (not the read bucket),
+    /// so the write-byte limit reflects actual host operations.
+    /// Non-TCP/UDP kinds delegate to the generic post-update unchanged.
+    pub fn after_blocking_send(&self, request: &NseCapabilityRequest, result_bytes: Option<u64>) {
+        match request.kind {
+            NseCapabilityKind::NetworkTcp | NseCapabilityKind::NetworkUdp => {
+                self.counters
+                    .network_operations
+                    .fetch_add(1, Ordering::AcqRel);
+                if let Some(bytes) = result_bytes {
+                    self.counters
+                        .network_bytes_written
+                        .fetch_add(bytes, Ordering::AcqRel);
+                }
+            }
+            _ => {
+                self.after_blocking_operation(request, result_bytes);
+            }
         }
     }
 
