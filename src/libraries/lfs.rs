@@ -3,21 +3,33 @@
 //! File system operations for NSE scripts.
 //! Based on Nmap's lfs library concepts.
 //!
+//! M005D: every operation goes through the injected [`NseFilesystemProvider`]
+//! via capability-aware brokers. Sandbox allow-list/canonicalization and
+//! capability checks apply to the resolved provider path inside the broker;
+//! `chdir`/`currentdir` use the per-run virtual CWD (no process-global
+//! mutation). Lua shapes are unchanged.
+//!
 //! # Security Note - TOCTOU Limitation
-//! All file operations validate the path against the sandbox's `allowed_dir` using
-//! canonicalization (resolving symlinks) before performing the operation. However, a narrow
-//! TOCTOU (Time-of-Check-Time-of-Use) race window exists: between `get_allowed_path()`
-//! returning the canonical path and the actual filesystem call, a symlink could theoretically
-//! be swapped to point outside the sandbox. This requires local filesystem write access to
-//! the sandbox directory and precise timing. On Unix, `O_NOFOLLOW` is used where possible
-//! to mitigate symlink-following during file opens.
+//! File operations validate the resolved path against the sandbox's
+//! `allowed_dir` using canonicalization before the provider operates on the
+//! approved path (no second transformation after approval). The residual
+//! race documented pre-M005D (symlink swap between canonicalization and the
+//! filesystem call inside one brokered step) still requires local write
+//! access plus precise timing; `O_NOFOLLOW`-class hardening remains future
+//! work and is out of scope for 005D.
 
 use mlua::{Lua, Result as LuaResult};
-use std::fs;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::capabilities::NseCapabilityContext;
+use crate::providers::{
+    broker_fs_create_dir_all, broker_fs_exists, broker_fs_hard_link, broker_fs_metadata,
+    broker_fs_read_dir, broker_fs_read_link, broker_fs_remove_dir, broker_fs_remove_file,
+    broker_fs_rename, broker_fs_set_current_dir, broker_fs_set_unix_mode, broker_fs_symlink,
+    broker_fs_symlink_metadata, broker_fs_write, NseHostServices,
+};
 use crate::SandboxConfig;
+
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub static LFS_SANDBOX_VIOLATIONS: AtomicUsize = AtomicUsize::new(0);
 
@@ -25,357 +37,219 @@ pub fn get_lfs_sandbox_metrics() -> usize {
     LFS_SANDBOX_VIOLATIONS.load(Ordering::SeqCst)
 }
 
+/// Map a broker error to the legacy Lua error shape, preserving the
+/// sandbox-blocked wording and violation observability.
+fn lfs_error(path: &str, message: String) -> mlua::Error {
+    if message.contains("blocked by sandbox") {
+        LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+        return mlua::Error::RuntimeError(format!("Path '{}' blocked by sandbox", path));
+    }
+    mlua::Error::RuntimeError(message)
+}
+
 pub fn register_lfs_library(
     lua: &Lua,
-    sandbox: &SandboxConfig,
+    _sandbox: &SandboxConfig,
     capability_ctx: &NseCapabilityContext,
+) -> LuaResult<()> {
+    register_lfs_library_with_services(lua, _sandbox, capability_ctx, &NseHostServices::native())
+}
+
+/// Provider-backed lfs registration.
+///
+/// `services` backs every filesystem path; sandbox policy comes from the
+/// capability context's sandbox config.
+pub fn register_lfs_library_with_services(
+    lua: &Lua,
+    _sandbox: &SandboxConfig,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
 ) -> LuaResult<()> {
     let globals = lua.globals();
     let lfs = lua.create_table()?;
 
-    let sandbox_enabled = sandbox.enabled;
-    let sandbox_for_check = sandbox.clone();
-
-    let check_path = {
-        let sandbox_enabled = sandbox_enabled;
-        move |path: &str| -> Option<std::path::PathBuf> {
-            if !sandbox_enabled {
-                return Some(std::path::PathBuf::from(path));
-            }
-            sandbox_for_check.get_allowed_path(path)
-        }
-    };
-
-    // Helper: check capability context for filesystem operations
-    let check_cap = |ctx: &NseCapabilityContext,
-                     path: &str,
-                     is_write: bool,
-                     op: &'static str|
-     -> Result<(), mlua::Error> {
-        use crate::capabilities::{NseCapabilityKind, NseCapabilityRequest};
-        let kind = if is_write {
-            NseCapabilityKind::FilesystemWrite
-        } else {
-            NseCapabilityKind::FilesystemRead
-        };
-        let decision = ctx.check_capability(&NseCapabilityRequest {
-            kind,
-            target: Some(path.to_string()),
-            bytes_hint: None,
-            operation: op,
-        });
-        if decision.is_denied() {
-            return Err(mlua::Error::RuntimeError(
-                decision
-                    .deny_reason()
-                    .unwrap_or("access denied")
-                    .to_string(),
-            ));
-        }
-        Ok(())
-    };
-
     // lfs.attributes(path) - Get file attributes
-    let check_path_for_closure = check_path.clone();
     let cap_ctx_for_attributes = capability_ctx.clone();
+    let svc_for_attributes = services.clone();
     let attributes_fn = lua.create_function(move |lua, path: String| {
-        let Some(canonical_path) = check_path_for_closure(&path) else {
-            LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-            return Err(mlua::Error::RuntimeError(format!(
-                "Path '{}' blocked by sandbox",
-                path
-            )));
-        };
-        // Capability context check (read)
-        check_cap(&cap_ctx_for_attributes, &path, false, "lfs.attributes")?;
-
-        match fs::metadata(&canonical_path) {
+        match broker_fs_metadata(
+            &cap_ctx_for_attributes,
+            &svc_for_attributes,
+            &path,
+            "lfs.attributes",
+        ) {
             Ok(meta) => {
                 let attrs = lua.create_table()?;
 
-                let modification = meta
-                    .modified()
-                    .map(|t| {
-                        t.duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as f64
-                    })
-                    .unwrap_or(0.0);
-                attrs.set("modification", modification)?;
+                attrs.set("modification", meta.modified_secs.unwrap_or(0) as f64)?;
+                attrs.set("access", meta.accessed_secs.unwrap_or(0) as f64)?;
+                attrs.set("creation", meta.created_secs.unwrap_or(0) as f64)?;
 
-                let access = meta
-                    .accessed()
-                    .map(|t| {
-                        t.duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as f64
-                    })
-                    .unwrap_or(0.0);
-                attrs.set("access", access)?;
-
-                let creation = meta
-                    .created()
-                    .map(|t| {
-                        t.duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as f64
-                    })
-                    .unwrap_or(0.0);
-                attrs.set("creation", creation)?;
-
-                attrs.set("size", meta.len())?;
+                attrs.set("size", meta.len)?;
                 attrs.set(
                     "permissions",
-                    if meta.permissions().readonly() {
+                    if meta.readonly {
                         "r--r--r--"
                     } else {
                         "rw-rw-rw-"
                     },
                 )?;
-                attrs.set("readonly", meta.permissions().readonly())?;
-                attrs.set("is_dir", meta.is_dir())?;
-                attrs.set("is_file", meta.is_file())?;
-                attrs.set("is_link", meta.is_symlink())?;
+                attrs.set("readonly", meta.readonly)?;
+                attrs.set("is_dir", meta.is_dir)?;
+                attrs.set("is_file", meta.is_file)?;
+                attrs.set("is_link", meta.is_symlink)?;
 
                 Ok(attrs)
             }
-            Err(e) => Err(mlua::Error::RuntimeError(format!(
-                "Failed to get attributes: {}",
-                e
-            ))),
+            Err(e) => Err(lfs_error(&path, e)),
         }
     })?;
     lfs.set("attributes", attributes_fn)?;
 
     // lfs.dir(path) - Iterate over directory entries
-    let check_path_dir = check_path.clone();
     let cap_ctx_for_dir = capability_ctx.clone();
+    let svc_for_dir = services.clone();
     let dir_fn = lua.create_function(move |lua, path: String| {
-        let Some(canonical_path) = check_path_dir(&path) else {
-            LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-            return Err(mlua::Error::RuntimeError(format!(
-                "Path '{}' blocked by sandbox",
-                path
-            )));
-        };
-        // Capability context check (read)
-        check_cap(&cap_ctx_for_dir, &path, false, "lfs.dir")?;
-        let entries = lua.create_table()?;
-
-        match fs::read_dir(&canonical_path) {
-            Ok(dir) => {
-                let mut idx = 1;
-                for entry in dir.flatten() {
-                    if let Ok(name) = entry.file_name().into_string() {
-                        entries.set(idx, name)?;
-                        idx += 1;
-                    }
+        match broker_fs_read_dir(&cap_ctx_for_dir, &svc_for_dir, &path, "lfs.dir") {
+            Ok(entries) => {
+                let result = lua.create_table()?;
+                for (idx, entry) in entries.iter().enumerate() {
+                    result.set(idx + 1, entry.name.clone())?;
                 }
-                Ok(entries)
+                Ok(result)
             }
-            Err(e) => Err(mlua::Error::RuntimeError(format!(
-                "Failed to read directory: {}",
-                e
-            ))),
+            Err(e) => Err(lfs_error(&path, e)),
         }
     })?;
     lfs.set("dir", dir_fn)?;
 
     // lfs.mkdir(path) - Create directory
-    let check_path_mkdir = check_path.clone();
     let cap_ctx_for_mkdir = capability_ctx.clone();
-    let mkdir_fn = lua.create_function(move |_lua, path: String| {
-        let Some(canonical_path) = check_path_mkdir(&path) else {
-            LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-            return Err(mlua::Error::RuntimeError(format!(
-                "Path '{}' blocked by sandbox",
-                path
-            )));
-        };
-        // Capability context check (write)
-        check_cap(&cap_ctx_for_mkdir, &path, true, "lfs.mkdir")?;
-        match fs::create_dir_all(&canonical_path) {
-            Ok(()) => Ok(true),
-            Err(e) => Err(mlua::Error::RuntimeError(format!(
-                "Failed to create directory: {}",
-                e
-            ))),
-        }
-    })?;
+    let svc_for_mkdir = services.clone();
+    let mkdir_fn =
+        lua.create_function(move |_lua, path: String| {
+            match broker_fs_create_dir_all(&cap_ctx_for_mkdir, &svc_for_mkdir, &path, "lfs.mkdir") {
+                Ok(()) => Ok(true),
+                Err(e) => Err(lfs_error(&path, e)),
+            }
+        })?;
     lfs.set("mkdir", mkdir_fn)?;
 
     // lfs.rmdir(path) - Remove directory
-    let check_path_rmdir = check_path.clone();
     let cap_ctx_for_rmdir = capability_ctx.clone();
+    let svc_for_rmdir = services.clone();
     let rmdir_fn = lua.create_function(move |_lua, path: String| {
-        let Some(canonical_path) = check_path_rmdir(&path) else {
-            LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-            return Err(mlua::Error::RuntimeError(format!(
-                "Path '{}' blocked by sandbox",
-                path
-            )));
-        };
-        // Capability context check (write)
-        check_cap(&cap_ctx_for_rmdir, &path, true, "lfs.rmdir")?;
-        match fs::remove_dir(&canonical_path) {
+        match broker_fs_remove_dir(&cap_ctx_for_rmdir, &svc_for_rmdir, &path, "lfs.rmdir") {
             Ok(()) => Ok(true),
-            Err(e) => Err(mlua::Error::RuntimeError(format!(
-                "Failed to remove directory: {}",
-                e
-            ))),
+            Err(e) => Err(lfs_error(&path, e)),
         }
     })?;
     lfs.set("rmdir", rmdir_fn)?;
 
     // lfs.remove(path) - Remove file
-    let check_path_remove = check_path.clone();
     let cap_ctx_for_remove = capability_ctx.clone();
+    let svc_for_remove = services.clone();
     let remove_fn = lua.create_function(move |_lua, path: String| {
-        let Some(canonical_path) = check_path_remove(&path) else {
-            LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-            return Err(mlua::Error::RuntimeError(format!(
-                "Path '{}' blocked by sandbox",
-                path
-            )));
-        };
-        // Capability context check (write)
-        check_cap(&cap_ctx_for_remove, &path, true, "lfs.remove")?;
-        match fs::remove_file(&canonical_path) {
+        match broker_fs_remove_file(&cap_ctx_for_remove, &svc_for_remove, &path, "lfs.remove") {
             Ok(()) => Ok(true),
-            Err(e) => Err(mlua::Error::RuntimeError(format!(
-                "Failed to remove file: {}",
-                e
-            ))),
+            Err(e) => Err(lfs_error(&path, e)),
         }
     })?;
     lfs.set("remove", remove_fn)?;
 
     // lfs.rename(old, new) - Rename file/directory
-    let check_path_rename = check_path.clone();
     let cap_ctx_for_rename = capability_ctx.clone();
+    let svc_for_rename = services.clone();
     let rename_fn = lua.create_function(move |_lua, (old_path, new_path): (String, String)| {
-        let Some(canonical_old) = check_path_rename(&old_path) else {
-            LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-            return Err(mlua::Error::RuntimeError(
-                "Rename blocked by sandbox".to_string(),
-            ));
-        };
-        let Some(canonical_new) = check_path_rename(&new_path) else {
-            LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-            return Err(mlua::Error::RuntimeError(
-                "Rename blocked by sandbox".to_string(),
-            ));
-        };
-        // Capability context check (write)
-        check_cap(&cap_ctx_for_rename, &old_path, true, "lfs.rename")?;
-        match fs::rename(&canonical_old, &canonical_new) {
+        match broker_fs_rename(
+            &cap_ctx_for_rename,
+            &svc_for_rename,
+            &old_path,
+            &new_path,
+            "lfs.rename",
+        ) {
             Ok(()) => Ok(true),
-            Err(e) => Err(mlua::Error::RuntimeError(format!(
-                "Failed to rename: {}",
-                e
-            ))),
+            Err(e) => {
+                if e.contains("blocked by sandbox") {
+                    LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+                    return Err(mlua::Error::RuntimeError(
+                        "Rename blocked by sandbox".to_string(),
+                    ));
+                }
+                Err(mlua::Error::RuntimeError(e))
+            }
         }
     })?;
     lfs.set("rename", rename_fn)?;
 
     // lfs.link(source, link, symbolic) - Create link
-    let check_path_link = check_path.clone();
     let cap_ctx_for_link = capability_ctx.clone();
+    let svc_for_link = services.clone();
     let link_fn = lua.create_function(
         move |_lua, (source, link, symbolic): (String, String, bool)| {
-            let Some(canonical_source) = check_path_link(&source) else {
-                LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-                return Err(mlua::Error::RuntimeError(
-                    "Link creation blocked by sandbox".to_string(),
-                ));
-            };
-            let Some(canonical_link) = check_path_link(&link) else {
-                LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-                return Err(mlua::Error::RuntimeError(
-                    "Link creation blocked by sandbox".to_string(),
-                ));
-            };
-            // Capability context check (write)
-            check_cap(&cap_ctx_for_link, &source, true, "lfs.link")?;
-            if symbolic {
-                match std::os::unix::fs::symlink(&canonical_source, &canonical_link) {
-                    Ok(()) => Ok(true),
-                    Err(e) => Err(mlua::Error::RuntimeError(format!(
-                        "Failed to create symlink: {}",
-                        e
-                    ))),
-                }
+            let result = if symbolic {
+                broker_fs_symlink(&cap_ctx_for_link, &svc_for_link, &source, &link, "lfs.link")
             } else {
-                match fs::hard_link(&canonical_source, &canonical_link) {
-                    Ok(()) => Ok(true),
-                    Err(e) => Err(mlua::Error::RuntimeError(format!(
-                        "Failed to create hard link: {}",
-                        e
-                    ))),
+                broker_fs_hard_link(&cap_ctx_for_link, &svc_for_link, &source, &link, "lfs.link")
+            };
+            match result {
+                Ok(()) => Ok(true),
+                Err(e) => {
+                    if e.contains("blocked by sandbox") {
+                        LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+                        return Err(mlua::Error::RuntimeError(
+                            "Link creation blocked by sandbox".to_string(),
+                        ));
+                    }
+                    Err(mlua::Error::RuntimeError(e))
                 }
             }
         },
     )?;
     lfs.set("link", link_fn)?;
 
-    // lfs.currentdir() - Get current directory
-    let currentdir_fn = lua.create_function(|_lua, _: ()| match std::env::current_dir() {
-        Ok(p) => Ok(p.to_string_lossy().to_string()),
-        Err(e) => Err(mlua::Error::RuntimeError(format!(
-            "Failed to get current directory: {}",
-            e
-        ))),
-    })?;
+    // lfs.currentdir() - Get the per-run working directory.
+    //
+    // Direct provider read (no capability gate), preserving the legacy
+    // check-free behavior exactly.
+    let svc_for_currentdir = services.clone();
+    let currentdir_fn =
+        lua.create_function(
+            move |_lua, _: ()| match svc_for_currentdir.fs().current_dir() {
+                Ok(p) => Ok(p.to_string_lossy().to_string()),
+                Err(e) => Err(mlua::Error::RuntimeError(format!(
+                    "Failed to get current directory: {}",
+                    e
+                ))),
+            },
+        )?;
     lfs.set("currentdir", currentdir_fn)?;
 
-    // lfs.chdir(path) - Change directory
-    let check_path_chdir = check_path.clone();
+    // lfs.chdir(path) - Change the per-run working directory (never the
+    // process-global CWD).
     let cap_ctx_for_chdir = capability_ctx.clone();
-    let chdir_fn = lua.create_function(move |_lua, path: String| {
-        let Some(canonical_path) = check_path_chdir(&path) else {
-            LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-            return Err(mlua::Error::RuntimeError(format!(
-                "Path '{}' blocked by sandbox",
-                path
-            )));
-        };
-        // Capability context check (read - chdir reads directory)
-        check_cap(&cap_ctx_for_chdir, &path, false, "lfs.chdir")?;
-        match std::env::set_current_dir(&canonical_path) {
-            Ok(()) => Ok(true),
-            Err(e) => Err(mlua::Error::RuntimeError(format!(
-                "Failed to change directory: {}",
-                e
-            ))),
-        }
-    })?;
+    let svc_for_chdir = services.clone();
+    let chdir_fn =
+        lua.create_function(move |_lua, path: String| {
+            match broker_fs_set_current_dir(&cap_ctx_for_chdir, &svc_for_chdir, &path, "lfs.chdir")
+            {
+                Ok(()) => Ok(true),
+                Err(e) => Err(lfs_error(&path, e)),
+            }
+        })?;
     lfs.set("chdir", chdir_fn)?;
 
     // lfs.touch(path) - Touch file
-    let check_path_touch = check_path.clone();
     let cap_ctx_for_touch = capability_ctx.clone();
+    let svc_for_touch = services.clone();
     let touch_fn = lua.create_function(
         move |_lua, (path, _access_time, _modification_time): (String, Option<u64>, Option<u64>)| {
-            let Some(canonical_path) = check_path_touch(&path) else {
-                LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-                return Err(mlua::Error::RuntimeError(format!(
-                    "Path '{}' blocked by sandbox",
-                    path
-                )));
-            };
-            // Capability context check (write)
-            check_cap(&cap_ctx_for_touch, &path, true, "lfs.touch")?;
-
-            if canonical_path.exists() {
-                Ok(true)
-            } else {
-                match fs::write(&canonical_path, "") {
-                    Ok(()) => Ok(true),
-                    Err(e) => Err(mlua::Error::RuntimeError(format!(
-                        "Failed to touch file: {}",
-                        e
-                    ))),
-                }
+            if broker_fs_exists(&cap_ctx_for_touch, &svc_for_touch, &path, "lfs.touch") {
+                return Ok(true);
+            }
+            match broker_fs_write(&cap_ctx_for_touch, &svc_for_touch, &path, b"", "lfs.touch") {
+                Ok(()) => Ok(true),
+                Err(e) => Err(lfs_error(&path, e)),
             }
         },
     )?;
@@ -392,72 +266,73 @@ pub fn register_lfs_library(
     let unlock_fn = lua.create_function(|_lua, _path: String| Ok(true))?;
     lfs.set("unlock", unlock_fn)?;
 
-    // lfs.set_mode(path, mode) - Set file permissions
-    let check_path_set_mode = check_path.clone();
+    // lfs.set_mode(path, mode) - Set file permissions.
+    //
+    // Unix permission bits are provider-backed on Unix; on other platforms
+    // the operation is explicitly unsupported (previously it did not
+    // compile there at all).
     let cap_ctx_for_set_mode = capability_ctx.clone();
+    let svc_for_set_mode = services.clone();
     let set_mode_fn = lua.create_function(move |_lua, (path, mode): (String, String)| {
-        let Some(canonical_path) = check_path_set_mode(&path) else {
-            LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-            return Err(mlua::Error::RuntimeError(format!(
-                "Path '{}' blocked by sandbox",
-                path
-            )));
+        let Ok(perms) = u32::from_str_radix(&mode, 8) else {
+            return Err(mlua::Error::RuntimeError("Invalid mode".to_string()));
         };
-        // Capability context check (write)
-        check_cap(&cap_ctx_for_set_mode, &path, true, "lfs.set_mode")?;
-        if let Ok(perms) = u32::from_str_radix(&mode, 8) {
-            use std::os::unix::fs::PermissionsExt;
-            let permissions = fs::Permissions::from_mode(perms);
-            match fs::set_permissions(&canonical_path, permissions) {
-                Ok(()) => Ok(true),
-                Err(e) => Err(mlua::Error::RuntimeError(format!(
-                    "Failed to set mode: {}",
-                    e
-                ))),
-            }
-        } else {
-            Err(mlua::Error::RuntimeError("Invalid mode".to_string()))
+        match broker_fs_set_unix_mode(
+            &cap_ctx_for_set_mode,
+            &svc_for_set_mode,
+            &path,
+            perms,
+            "lfs.set_mode",
+        ) {
+            Ok(()) => Ok(true),
+            Err(e) => Err(lfs_error(&path, e)),
         }
     })?;
     lfs.set("set_mode", set_mode_fn)?;
 
     // lfs.symlinkattributes(path) - Get symlink attributes
-    let check_path_symlink = check_path.clone();
     let cap_ctx_for_symlink = capability_ctx.clone();
+    let svc_for_symlink = services.clone();
     let symlinkattributes_fn = lua.create_function(move |lua, path: String| {
-        let Some(canonical_path) = check_path_symlink(&path) else {
-            LFS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-            return Err(mlua::Error::RuntimeError(format!(
-                "Path '{}' blocked by sandbox",
-                path
-            )));
+        let meta = match broker_fs_symlink_metadata(
+            &cap_ctx_for_symlink,
+            &svc_for_symlink,
+            &path,
+            "lfs.symlinkattributes",
+        ) {
+            Ok(meta) => meta,
+            Err(e) => return Err(lfs_error(&path, e)),
         };
-        // Capability context check (read)
-        check_cap(&cap_ctx_for_symlink, &path, false, "lfs.symlinkattributes")?;
+        let attrs = lua.create_table()?;
 
-        match fs::symlink_metadata(&canonical_path) {
-            Ok(meta) => {
-                let attrs = lua.create_table()?;
+        attrs.set("size", meta.len)?;
+        attrs.set("readonly", meta.readonly)?;
+        attrs.set("is_dir", meta.is_dir)?;
+        attrs.set("is_file", meta.is_file)?;
+        attrs.set("is_link", meta.is_symlink)?;
 
-                attrs.set("size", meta.len())?;
-                attrs.set("readonly", meta.permissions().readonly())?;
-                attrs.set("is_dir", meta.is_dir())?;
-                attrs.set("is_file", meta.is_file())?;
-                attrs.set("is_link", meta.is_symlink())?;
-
-                if meta.is_symlink() {
-                    if let Ok(target) = fs::read_link(&canonical_path) {
-                        attrs.set("target", target.to_string_lossy().to_string())?;
-                    }
+        if meta.is_symlink {
+            // The target read is brokered separately so it carries its own
+            // capability/sandbox approval (same path, same decision).
+            match broker_fs_read_link(
+                &cap_ctx_for_symlink,
+                &svc_for_symlink,
+                &path,
+                "lfs.symlinkattributes",
+            ) {
+                Ok(target) => {
+                    attrs.set("target", target.to_string_lossy().to_string())?;
                 }
-
-                Ok(attrs)
+                Err(e) => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "Failed to read link target: {}",
+                        e
+                    )));
+                }
             }
-            Err(e) => Err(mlua::Error::RuntimeError(format!(
-                "Failed to get symlink attributes: {}",
-                e
-            ))),
         }
+
+        Ok(attrs)
     })?;
     lfs.set("symlinkattributes", symlinkattributes_fn)?;
 

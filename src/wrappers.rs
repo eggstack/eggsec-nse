@@ -11,8 +11,11 @@ use crate::capabilities::{
     NseCapabilityContext, NseCapabilityDecision, NseCapabilityKind, NseCapabilityRequest,
 };
 use crate::providers::{
-    broker_dns_lookup, broker_resolve_and_select, NativeTcpSocketProvider, NativeUdpSocketProvider,
-    NseDnsRecordType, NseHostServices, NseTransportProtocol,
+    broker_dns_lookup, broker_fs_create_dir_all, broker_fs_hard_link, broker_fs_read,
+    broker_fs_read_link, broker_fs_read_to_string, broker_fs_remove_dir, broker_fs_remove_file,
+    broker_fs_rename, broker_fs_set_unix_mode, broker_fs_symlink, broker_fs_write,
+    broker_resolve_and_select, NativeTcpSocketProvider, NativeUdpSocketProvider, NseDnsRecordType,
+    NseHostServices, NseTransportProtocol,
 };
 
 /// Check a time/clock capability and return the decision.
@@ -184,90 +187,41 @@ fn build_request(
 }
 
 /// Read a file to string after checking filesystem-read capability.
+///
+/// Compatibility shim over native services: capability, sandbox,
+/// accounting, and the provider call all live in the broker.
 pub fn nse_fs_read_to_string(
     ctx: &NseCapabilityContext,
     path: &str,
 ) -> Result<std::string::String, String> {
     let op = "wrapper.fs_read_to_string";
     ctx.check_cancelled(op)?;
-    let request = build_request(
-        NseCapabilityKind::FilesystemRead,
-        Some(path.to_string()),
-        None,
-        op,
-    );
-    let decision = ctx.check_capability(&request);
-    if !decision.is_allowed() {
-        return Err(decision
-            .deny_reason()
-            .unwrap_or("filesystem read denied")
-            .to_string());
-    }
-    ctx.before_blocking_operation(&request)?;
-    match std::fs::read_to_string(path) {
-        Ok(content) => {
-            ctx.after_blocking_operation(&request, Some(content.len() as u64));
-            Ok(content)
-        }
-        Err(e) => Err(format!("Failed to read '{}': {}", path, e)),
-    }
+    broker_fs_read_to_string(ctx, &NseHostServices::native(), path, op)
 }
 
 /// Read a file to bytes after checking filesystem-read capability.
+///
+/// Compatibility shim over native services (see `nse_fs_read_to_string`).
 pub fn nse_fs_read(ctx: &NseCapabilityContext, path: &str) -> Result<Vec<u8>, String> {
     let op = "wrapper.fs_read";
     ctx.check_cancelled(op)?;
-    let request = build_request(
-        NseCapabilityKind::FilesystemRead,
-        Some(path.to_string()),
-        None,
-        op,
-    );
-    let decision = ctx.check_capability(&request);
-    if !decision.is_allowed() {
-        return Err(decision
-            .deny_reason()
-            .unwrap_or("filesystem read denied")
-            .to_string());
-    }
-    ctx.before_blocking_operation(&request)?;
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            ctx.after_blocking_operation(&request, Some(bytes.len() as u64));
-            Ok(bytes)
-        }
-        Err(e) => Err(format!("Failed to read '{}': {}", path, e)),
-    }
+    broker_fs_read(ctx, &NseHostServices::native(), path, op)
 }
 
 /// Write bytes to a file after checking filesystem-write capability.
+///
+/// Compatibility shim over native services (see `nse_fs_read_to_string`).
 pub fn nse_fs_write(ctx: &NseCapabilityContext, path: &str, bytes: &[u8]) -> Result<(), String> {
     let op = "wrapper.fs_write";
     ctx.check_cancelled(op)?;
-    let request = build_request(
-        NseCapabilityKind::FilesystemWrite,
-        Some(path.to_string()),
-        Some(bytes.len() as u64),
-        op,
-    );
-    let decision = ctx.check_capability(&request);
-    if !decision.is_allowed() {
-        return Err(decision
-            .deny_reason()
-            .unwrap_or("filesystem write denied")
-            .to_string());
-    }
-    ctx.before_blocking_operation(&request)?;
-    match std::fs::write(path, bytes) {
-        Ok(()) => {
-            ctx.after_blocking_operation(&request, Some(bytes.len() as u64));
-            Ok(())
-        }
-        Err(e) => Err(format!("Failed to write '{}': {}", path, e)),
-    }
+    broker_fs_write(ctx, &NseHostServices::native(), path, bytes, op)
 }
 
 /// Get file metadata after checking filesystem-read capability.
+///
+/// Compatibility shim: the signature returns `std::fs::Metadata` (a
+/// pre-provider contract), so the capability-gated native stat stays here.
+/// New code should use [`broker_fs_metadata`](broker_fs_metadata).
 pub fn nse_fs_metadata(
     ctx: &NseCapabilityContext,
     path: &str,
@@ -298,6 +252,10 @@ pub fn nse_fs_metadata(
 }
 
 /// Read directory entries after checking filesystem-read capability.
+///
+/// Compatibility shim: the signature returns `std::fs::DirEntry` (a
+/// pre-provider contract), so the capability-gated native listing stays
+/// here. New code should use the `broker_fs_read_dir` provider broker.
 pub fn nse_fs_read_dir(
     ctx: &NseCapabilityContext,
     path: &str,
@@ -329,211 +287,77 @@ pub fn nse_fs_read_dir(
 }
 
 /// Remove a file after checking filesystem-write capability.
+///
+/// Compatibility shim over native services (see `nse_fs_read_to_string`).
 pub fn nse_fs_remove_file(ctx: &NseCapabilityContext, path: &str) -> Result<(), String> {
     let op = "wrapper.fs_remove_file";
     ctx.check_cancelled(op)?;
-    let request = build_request(
-        NseCapabilityKind::FilesystemWrite,
-        Some(path.to_string()),
-        None,
-        op,
-    );
-    let decision = ctx.check_capability(&request);
-    if !decision.is_allowed() {
-        return Err(decision
-            .deny_reason()
-            .unwrap_or("filesystem write denied")
-            .to_string());
-    }
-    ctx.before_blocking_operation(&request)?;
-    match std::fs::remove_file(path) {
-        Ok(()) => {
-            ctx.after_blocking_operation(&request, None);
-            Ok(())
-        }
-        Err(e) => Err(format!("Failed to remove '{}': {}", path, e)),
-    }
+    broker_fs_remove_file(ctx, &NseHostServices::native(), path, op)
 }
 
 /// Rename a file/directory after checking filesystem-write capability.
+///
+/// Compatibility shim over native services (see `nse_fs_read_to_string`).
 pub fn nse_fs_rename(ctx: &NseCapabilityContext, from: &str, to: &str) -> Result<(), String> {
     let op = "wrapper.fs_rename";
     ctx.check_cancelled(op)?;
-    let request = build_request(
-        NseCapabilityKind::FilesystemWrite,
-        Some(from.to_string()),
-        None,
-        op,
-    );
-    let decision = ctx.check_capability(&request);
-    if !decision.is_allowed() {
-        return Err(decision
-            .deny_reason()
-            .unwrap_or("filesystem write denied")
-            .to_string());
-    }
-    ctx.before_blocking_operation(&request)?;
-    match std::fs::rename(from, to) {
-        Ok(()) => {
-            ctx.after_blocking_operation(&request, None);
-            Ok(())
-        }
-        Err(e) => Err(format!("Failed to rename '{}' -> '{}': {}", from, to, e)),
-    }
+    broker_fs_rename(ctx, &NseHostServices::native(), from, to, op)
 }
 
 /// Create directories recursively after checking filesystem-write capability.
+///
+/// Compatibility shim over native services (see `nse_fs_read_to_string`).
 pub fn nse_fs_create_dir_all(ctx: &NseCapabilityContext, path: &str) -> Result<(), String> {
     let op = "wrapper.fs_create_dir_all";
     ctx.check_cancelled(op)?;
-    let request = build_request(
-        NseCapabilityKind::FilesystemWrite,
-        Some(path.to_string()),
-        None,
-        op,
-    );
-    let decision = ctx.check_capability(&request);
-    if !decision.is_allowed() {
-        return Err(decision
-            .deny_reason()
-            .unwrap_or("filesystem write denied")
-            .to_string());
-    }
-    ctx.before_blocking_operation(&request)?;
-    match std::fs::create_dir_all(path) {
-        Ok(()) => {
-            ctx.after_blocking_operation(&request, None);
-            Ok(())
-        }
-        Err(e) => Err(format!("Failed to create dir '{}': {}", path, e)),
-    }
+    broker_fs_create_dir_all(ctx, &NseHostServices::native(), path, op)
 }
 
 /// Remove a directory after checking filesystem-write capability.
+///
+/// Compatibility shim over native services (see `nse_fs_read_to_string`).
 pub fn nse_fs_remove_dir(ctx: &NseCapabilityContext, path: &str) -> Result<(), String> {
     let op = "wrapper.fs_remove_dir";
     ctx.check_cancelled(op)?;
-    let request = build_request(
-        NseCapabilityKind::FilesystemWrite,
-        Some(path.to_string()),
-        None,
-        op,
-    );
-    let decision = ctx.check_capability(&request);
-    if !decision.is_allowed() {
-        return Err(decision
-            .deny_reason()
-            .unwrap_or("filesystem write denied")
-            .to_string());
-    }
-    ctx.before_blocking_operation(&request)?;
-    match std::fs::remove_dir(path) {
-        Ok(()) => {
-            ctx.after_blocking_operation(&request, None);
-            Ok(())
-        }
-        Err(e) => Err(format!("Failed to remove dir '{}': {}", path, e)),
-    }
+    broker_fs_remove_dir(ctx, &NseHostServices::native(), path, op)
 }
 
 /// Create a hard link after checking filesystem-write capability.
+///
+/// Compatibility shim over native services (see `nse_fs_read_to_string`).
 pub fn nse_fs_hard_link(ctx: &NseCapabilityContext, src: &str, dst: &str) -> Result<(), String> {
     let op = "wrapper.fs_hard_link";
     ctx.check_cancelled(op)?;
-    let request = build_request(
-        NseCapabilityKind::FilesystemWrite,
-        Some(src.to_string()),
-        None,
-        op,
-    );
-    let decision = ctx.check_capability(&request);
-    if !decision.is_allowed() {
-        return Err(decision
-            .deny_reason()
-            .unwrap_or("filesystem write denied")
-            .to_string());
-    }
-    ctx.before_blocking_operation(&request)?;
-    match std::fs::hard_link(src, dst) {
-        Ok(()) => {
-            ctx.after_blocking_operation(&request, None);
-            Ok(())
-        }
-        Err(e) => Err(format!("Failed to hard link '{}' -> '{}': {}", src, dst, e)),
-    }
+    broker_fs_hard_link(ctx, &NseHostServices::native(), src, dst, op)
 }
 
 /// Create a symbolic link after checking filesystem-write capability.
+///
+/// Compatibility shim over native services (platform handling lives in the
+/// native provider; see `nse_fs_read_to_string`).
 pub fn nse_fs_symlink(ctx: &NseCapabilityContext, src: &str, dst: &str) -> Result<(), String> {
     let op = "wrapper.fs_symlink";
     ctx.check_cancelled(op)?;
-    let request = build_request(
-        NseCapabilityKind::FilesystemWrite,
-        Some(src.to_string()),
-        None,
-        op,
-    );
-    let decision = ctx.check_capability(&request);
-    if !decision.is_allowed() {
-        return Err(decision
-            .deny_reason()
-            .unwrap_or("filesystem write denied")
-            .to_string());
-    }
-    ctx.before_blocking_operation(&request)?;
-    #[cfg(unix)]
-    {
-        match std::os::unix::fs::symlink(src, dst) {
-            Ok(()) => {
-                ctx.after_blocking_operation(&request, None);
-                Ok(())
-            }
-            Err(e) => Err(format!("Failed to symlink '{}' -> '{}': {}", src, dst, e)),
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        match std::os::windows::fs::symlink_file(src, dst) {
-            Ok(()) => {
-                ctx.after_blocking_operation(&request, None);
-                Ok(())
-            }
-            Err(e) => Err(format!("Failed to symlink '{}' -> '{}': {}", src, dst, e)),
-        }
-    }
+    broker_fs_symlink(ctx, &NseHostServices::native(), src, dst, op)
 }
 
 /// Read a symlink target after checking filesystem-read capability.
+///
+/// Compatibility shim over native services (see `nse_fs_read_to_string`).
 pub fn nse_fs_read_link(
     ctx: &NseCapabilityContext,
     path: &str,
 ) -> Result<std::path::PathBuf, String> {
     let op = "wrapper.fs_read_link";
     ctx.check_cancelled(op)?;
-    let request = build_request(
-        NseCapabilityKind::FilesystemRead,
-        Some(path.to_string()),
-        None,
-        op,
-    );
-    let decision = ctx.check_capability(&request);
-    if !decision.is_allowed() {
-        return Err(decision
-            .deny_reason()
-            .unwrap_or("filesystem read denied")
-            .to_string());
-    }
-    ctx.before_blocking_operation(&request)?;
-    match std::fs::read_link(path) {
-        Ok(target) => {
-            ctx.after_blocking_operation(&request, None);
-            Ok(target)
-        }
-        Err(e) => Err(format!("Failed to read link '{}': {}", path, e)),
-    }
+    broker_fs_read_link(ctx, &NseHostServices::native(), path, op)
 }
 
 /// Set file permissions after checking filesystem-write capability.
+///
+/// Compatibility shim over native services. Unix permission bits go through
+/// the provider on Unix; elsewhere write-bits map to the portable
+/// read-only flag.
 pub fn nse_fs_set_permissions(
     ctx: &NseCapabilityContext,
     path: &str,
@@ -541,32 +365,22 @@ pub fn nse_fs_set_permissions(
 ) -> Result<(), String> {
     let op = "wrapper.fs_set_permissions";
     ctx.check_cancelled(op)?;
-    let request = build_request(
-        NseCapabilityKind::FilesystemWrite,
-        Some(path.to_string()),
-        None,
-        op,
-    );
-    let decision = ctx.check_capability(&request);
-    if !decision.is_allowed() {
-        return Err(decision
-            .deny_reason()
-            .unwrap_or("filesystem write denied")
-            .to_string());
+    let services = NseHostServices::native();
+    #[cfg(unix)]
+    {
+        broker_fs_set_unix_mode(ctx, &services, path, mode, op)
     }
-    ctx.before_blocking_operation(&request)?;
-    use std::os::unix::fs::PermissionsExt;
-    let permissions = std::fs::Permissions::from_mode(mode);
-    match std::fs::set_permissions(path, permissions) {
-        Ok(()) => {
-            ctx.after_blocking_operation(&request, None);
-            Ok(())
-        }
-        Err(e) => Err(format!("Failed to set permissions on '{}': {}", path, e)),
+    #[cfg(not(unix))]
+    {
+        crate::providers::broker_fs_set_readonly(ctx, &services, path, mode & 0o222 == 0, op)
     }
 }
 
 /// Get symlink metadata (does not follow symlinks) after checking filesystem-read capability.
+///
+/// Compatibility shim: the signature returns `std::fs::Metadata` (a
+/// pre-provider contract), so the capability-gated native stat stays here.
+/// New code should use [`broker_fs_symlink_metadata`](broker_fs_symlink_metadata).
 pub fn nse_fs_symlink_metadata(
     ctx: &NseCapabilityContext,
     path: &str,
@@ -848,6 +662,11 @@ pub fn nse_dns_lookup(
 }
 
 /// Execute a process after checking process-exec capability.
+///
+/// Compatibility shim: the signature returns `std::process::Output` (a
+/// pre-provider contract; `ExitStatus` has no portable constructor), so the
+/// capability-gated native execution stays here. Lua paths use the
+/// `broker_process_run`/`broker_process_spawn` provider brokers.
 pub fn nse_process_exec(
     ctx: &NseCapabilityContext,
     command: &str,

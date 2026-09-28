@@ -133,4 +133,60 @@ for f in src/libraries/socket.rs src/libraries/comm.rs src/libraries/dns.rs src/
   fi
 done
 
+# M005D filesystem/process portability: migrated modules must go through the
+# provider broker. Native implementations (src/providers.rs) are the single
+# allow-listed direct-execution zone; narrowly documented compatibility
+# shims and loader residuals are the only other direct sites.
+#
+# - No process-global CWD mutation anywhere in src/ (virtual CWD only).
+# - io.rs / lfs.rs: zero direct fs/env/os calls (brokered providers only;
+#   std::process::id and the env temp_dir fallback in io.tmpfile are
+#   inventoried, not bypasses).
+# - os.rs: no direct fs removes/renames or CWD mutation (env temp_dir
+#   fallback + hostname lookup are inventoried residuals).
+# - nmap.rs: no direct child-process spawns (discovery is provider-backed).
+# - wrappers.rs: delegated filesystem fns must not call std::fs directly;
+#   metadata/read_dir/symlink-metadata/process-exec shims keep native
+#   bodies for their leaking signatures (documented, inventoried).
+if rg -n 'env::set_current_dir' src/; then
+  echo "M005D violation: process-global set_current_dir in src/ (use the virtual per-run CWD provider)" >&2
+  exit 1
+fi
+
+if rg -n -e 'std::fs::' -e 'std::process::Command' -e 'OpenOptions' -e 'PermissionsExt' -e 'os::unix' -e 'os::windows' -e 'env::current_dir' src/libraries/io.rs; then
+  echo "M005D violation: direct fs/process call in io.rs (use filesystem/process providers broker)" >&2
+  exit 1
+fi
+
+if rg -n -e 'std::fs' -e 'std::env' -e 'std::os' src/libraries/lfs.rs; then
+  echo "M005D violation: direct fs/env/os call in lfs.rs (use filesystem providers broker)" >&2
+  exit 1
+fi
+
+if rg -n -e 'std::fs::' -e 'env::current_dir' src/libraries/os.rs; then
+  echo "M005D violation: direct fs/CWD call in os.rs (use filesystem providers broker)" >&2
+  exit 1
+fi
+
+if rg -n -e 'process::Command' -e 'Command::new' src/libraries/nmap.rs; then
+  echo "M005D violation: direct child-process spawn in nmap.rs (use process provider broker)" >&2
+  exit 1
+fi
+
+# wrappers.rs hosts an inline #[cfg(test)] module whose fixtures may use
+# std directly (denial tests must set up files without capability); the
+# delegation-shim guard therefore scans only production code above it.
+if rg -n -e 'std::fs::read_to_string' -e 'std::fs::read\(' -e 'std::fs::write' -e 'std::fs::remove_file' -e 'std::fs::rename' -e 'std::fs::create_dir_all' -e 'std::fs::remove_dir' -e 'std::fs::hard_link' -e 'std::fs::read_link' -e 'std::fs::set_permissions' -e 'unix::fs::symlink' -e 'PermissionsExt' <(head -n "$(( $(grep -n 'mod tests' src/wrappers.rs | head -n 1 | cut -d: -f1) - 1 ))" src/wrappers.rs); then
+  echo "M005D violation: direct fs call in wrappers.rs delegation shims (use filesystem providers broker)" >&2
+  exit 1
+fi
+
+# Broker presence (filesystem/process): migrated modules must reference it.
+for f in src/libraries/io.rs src/libraries/lfs.rs src/libraries/os.rs src/libraries/nmap.rs; do
+  if ! rg -q 'broker_' "$f"; then
+    echo "M005D violation: $f contains no broker_ call (migrated modules must use filesystem/process providers broker)" >&2
+    exit 1
+  fi
+done
+
 echo "standalone boundary and provenance checks passed"

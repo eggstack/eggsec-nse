@@ -1054,10 +1054,11 @@ impl ExecutorCore {
         crate::libraries::creds::register_creds_library(&self.lua, &self.capability_context)?;
         crate::libraries::openssl::register_openssl_library(&self.lua, &self.capability_context)?;
         crate::libraries::pcre::register_pcre_library(&self.lua)?;
-        crate::libraries::io::register_io_library(
+        crate::libraries::io::register_io_library_with_services(
             &self.lua,
             &self.sandbox,
             &self.capability_context,
+            &self.host_services,
         )?;
         crate::libraries::os::register_os_library_with_services(
             &self.lua,
@@ -1151,10 +1152,11 @@ impl ExecutorCore {
         crate::libraries::matchs::register_matchs_library(&self.lua)?;
         crate::libraries::lpeg_utility::register_lpeg_utility_library(&self.lua)?;
         crate::libraries::lpeg::register_lpeg_library(&self.lua)?;
-        crate::libraries::lfs::register_lfs_library(
+        crate::libraries::lfs::register_lfs_library_with_services(
             &self.lua,
             &self.sandbox,
             &self.capability_context,
+            &self.host_services,
         )?;
         crate::libraries::libssh2::register_libssh2_library(&self.lua, &self.capability_context)?;
         crate::libraries::msrpcperformance::register_msrpcperformance_library(&self.lua)?;

@@ -148,10 +148,11 @@ impl NseEnvironmentProvider for NativeEnvironmentProvider {
 
 /// Lightweight per-run host-service bundle.
 ///
-/// Carries the M005A domains plus the M005B network/DNS domains; later M005
-/// slices extend this struct with additional provider fields. Cloning shares
-/// the underlying providers (cheap `Arc` clones) so concurrent runs can hold
-/// different bundles without process-global state.
+/// Carries the M005A domains, the M005B network/DNS domains, and the M005D
+/// filesystem/process domains; later M005 slices extend this struct with
+/// additional provider fields. Cloning shares the underlying providers
+/// (cheap `Arc` clones) so concurrent runs can hold different bundles
+/// without process-global state.
 #[derive(Clone)]
 pub struct NseHostServices {
     clock: Arc<dyn NseClockProvider>,
@@ -160,6 +161,8 @@ pub struct NseHostServices {
     dns: Arc<dyn NseDnsProvider>,
     tcp: Arc<dyn NseTcpSocketProvider>,
     udp: Arc<dyn NseUdpSocketProvider>,
+    fs: Arc<dyn NseFilesystemProvider>,
+    process: Arc<dyn NseProcessProvider>,
 }
 
 impl std::fmt::Debug for NseHostServices {
@@ -171,6 +174,8 @@ impl std::fmt::Debug for NseHostServices {
             .field("has_dns", &true)
             .field("has_tcp", &true)
             .field("has_udp", &true)
+            .field("has_fs", &true)
+            .field("has_process", &true)
             .finish()
     }
 }
@@ -191,13 +196,15 @@ impl NseHostServices {
             dns: Arc::new(NativeDnsProvider::new()),
             tcp: Arc::new(NativeTcpSocketProvider),
             udp: Arc::new(NativeUdpSocketProvider),
+            fs: Arc::new(NativeFilesystemProvider::new()),
+            process: Arc::new(NativeProcessProvider),
         }
     }
 
     /// Build from explicit providers.
     ///
     /// The M005A three-domain form is preserved for compatibility; network
-    /// domains default to native. Use the `with_dns`/`with_tcp`/`with_udp`
+    /// and filesystem/process domains default to native. Use the `with_*`
     /// builders to override them.
     pub fn new(
         clock: Arc<dyn NseClockProvider>,
@@ -211,6 +218,8 @@ impl NseHostServices {
             dns: Arc::new(NativeDnsProvider::new()),
             tcp: Arc::new(NativeTcpSocketProvider),
             udp: Arc::new(NativeUdpSocketProvider),
+            fs: Arc::new(NativeFilesystemProvider::new()),
+            process: Arc::new(NativeProcessProvider),
         }
     }
 
@@ -230,6 +239,8 @@ impl NseHostServices {
             dns,
             tcp,
             udp,
+            fs: Arc::new(NativeFilesystemProvider::new()),
+            process: Arc::new(NativeProcessProvider),
         }
     }
 
@@ -269,6 +280,18 @@ impl NseHostServices {
         self
     }
 
+    /// Replace the filesystem provider.
+    pub fn with_fs(mut self, provider: Arc<dyn NseFilesystemProvider>) -> Self {
+        self.fs = provider;
+        self
+    }
+
+    /// Replace the process provider.
+    pub fn with_process(mut self, provider: Arc<dyn NseProcessProvider>) -> Self {
+        self.process = provider;
+        self
+    }
+
     /// Borrow the clock provider.
     pub fn clock(&self) -> &Arc<dyn NseClockProvider> {
         &self.clock
@@ -297,6 +320,16 @@ impl NseHostServices {
     /// Borrow the UDP socket provider.
     pub fn udp(&self) -> &Arc<dyn NseUdpSocketProvider> {
         &self.udp
+    }
+
+    /// Borrow the filesystem provider.
+    pub fn fs(&self) -> &Arc<dyn NseFilesystemProvider> {
+        &self.fs
+    }
+
+    /// Borrow the process provider.
+    pub fn process(&self) -> &Arc<dyn NseProcessProvider> {
+        &self.process
     }
 }
 
@@ -719,6 +752,8 @@ mod tests {
         assert!(Arc::ptr_eq(services.dns(), cloned.dns()));
         assert!(Arc::ptr_eq(services.tcp(), cloned.tcp()));
         assert!(Arc::ptr_eq(services.udp(), cloned.udp()));
+        assert!(Arc::ptr_eq(services.fs(), cloned.fs()));
+        assert!(Arc::ptr_eq(services.process(), cloned.process()));
     }
 
     #[test]
@@ -2319,4 +2354,1943 @@ pub(crate) fn endpoint_in_networks(
     }
     let ip = endpoint.address.to_std();
     nets.iter().any(|net| net.contains(ip))
+}
+
+// ---------------------------------------------------------------------------
+// M005D: filesystem and process providers (portability + per-run isolation).
+//
+// ADR-0003 boundary: narrow filesystem/process traits join the per-run
+// [`NseHostServices`] bundle; capability-aware brokers own the
+// capability/sandbox-path decision -> cancellation/resource preflight ->
+// provider operation -> accounting/event sequence. Checks apply to the
+// resolved provider path: relative paths resolve against the per-run
+// virtual CWD, sandbox containment applies to the resolved path, and the
+// provider operates on the approved path with no second transformation.
+//
+// Native implementations live in this module (the single allow-listed
+// native zone, mirroring M005A/M005B). Migrated libraries (`io`, `lfs`,
+// filesystem portions of `os`, `nmap` privilege/interface discovery, and
+// the non-leaking filesystem wrappers) must go through the brokers below.
+// Process-global `set_current_dir` is gone: the native filesystem provider
+// keeps a per-instance virtual CWD override and never mutates the process.
+// ---------------------------------------------------------------------------
+
+use std::path::{Path, PathBuf as FsPathBuf};
+
+/// Runtime-owned file metadata: only the fields NSE compatibility consumes.
+///
+/// No `std::fs::Metadata` crosses the provider contract; natives map via
+/// [`NseFileMetadata::from_std`] (native interop, marked as such).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NseFileMetadata {
+    /// File length in bytes.
+    pub len: u64,
+    /// True for directories.
+    pub is_dir: bool,
+    /// True for regular files.
+    pub is_file: bool,
+    /// True for symlinks (from `symlink_metadata`; always false for
+    /// following `metadata` on most platforms).
+    pub is_symlink: bool,
+    /// True when read-only.
+    pub readonly: bool,
+    /// Modification time (seconds since the Unix epoch), if available.
+    pub modified_secs: Option<u64>,
+    /// Last access time (seconds since the Unix epoch), if available.
+    pub accessed_secs: Option<u64>,
+    /// Creation time (seconds since the Unix epoch), if available.
+    pub created_secs: Option<u64>,
+    /// Unix permission bits, if the platform reports them.
+    pub unix_mode: Option<u32>,
+}
+
+impl NseFileMetadata {
+    /// Map native metadata to the runtime-owned DTO (native interop).
+    pub fn from_std(meta: &std::fs::Metadata) -> Self {
+        fn secs(t: std::io::Result<std::time::SystemTime>) -> Option<u64> {
+            t.ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs())
+        }
+        Self {
+            len: meta.len(),
+            is_dir: meta.is_dir(),
+            is_file: meta.is_file(),
+            is_symlink: meta.is_symlink(),
+            readonly: meta.permissions().readonly(),
+            modified_secs: secs(meta.modified()),
+            accessed_secs: secs(meta.accessed()),
+            created_secs: secs(meta.created()),
+            unix_mode: unix_mode_of(meta),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn unix_mode_of(meta: &std::fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    Some(meta.permissions().mode())
+}
+
+#[cfg(not(unix))]
+fn unix_mode_of(_meta: &std::fs::Metadata) -> Option<u32> {
+    None
+}
+
+/// File type carried by directory entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NseFileType {
+    /// Regular file.
+    File,
+    /// Directory.
+    Dir,
+    /// Symlink or other special entry.
+    Symlink,
+    /// Unknown (entry type unavailable).
+    Unknown,
+}
+
+/// Runtime-owned directory entry (name + type; no `DirEntry` leakage).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NseDirEntry {
+    /// File name within the listed directory.
+    pub name: String,
+    /// Entry type, if known.
+    pub file_type: NseFileType,
+}
+
+impl NseDirEntry {
+    /// Build an entry.
+    pub fn new(name: impl Into<String>, file_type: NseFileType) -> Self {
+        Self {
+            name: name.into(),
+            file_type,
+        }
+    }
+}
+
+/// Open mode for provider file handles (maps Lua `io.open` mode strings).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NseOpenMode {
+    /// Read-only (`"r"`).
+    Read,
+    /// Write, truncate, create (`"w"`, `"w+"` without read).
+    Write,
+    /// Append, create (`"a"`).
+    Append,
+    /// Read/write without truncate (`"r+"`).
+    ReadWrite,
+    /// Read/write, truncate, create (`"w+"`).
+    WriteRead,
+    /// Read/append, create (`"a+"`).
+    AppendRead,
+}
+
+impl NseOpenMode {
+    /// Parse a Lua `io.open` mode string (unknown modes fall back to
+    /// read-only, matching the pre-provider behavior).
+    pub fn parse(mode: &str) -> Self {
+        match mode {
+            "w" => Self::Write,
+            "a" => Self::Append,
+            "r+" => Self::ReadWrite,
+            "w+" => Self::WriteRead,
+            "a+" => Self::AppendRead,
+            _ => Self::Read,
+        }
+    }
+
+    /// True for modes that create or modify content.
+    pub fn is_write(&self) -> bool {
+        !matches!(self, Self::Read)
+    }
+}
+
+/// Opaque file handle (no `std::fs::File` in the contract).
+pub trait NseFileHandle: Send + Sync {
+    /// Read up to `max_bytes`.
+    fn read(&mut self, max_bytes: usize) -> Result<Vec<u8>, NseProviderError>;
+    /// Write bytes; returns bytes written.
+    fn write(&mut self, data: &[u8]) -> Result<usize, NseProviderError>;
+    /// Flush buffered writes.
+    fn flush(&mut self) -> Result<(), NseProviderError>;
+    /// Seek from the start; returns the new position.
+    fn seek_from_start(&mut self, pos: u64) -> Result<u64, NseProviderError>;
+    /// Close the handle (idempotent).
+    fn close(&mut self);
+    /// True while the handle is open.
+    fn is_open(&self) -> bool;
+}
+
+/// Filesystem operations.
+///
+/// One domain trait (not a monolithic host trait): every method is a
+/// path-scoped filesystem operation on runtime-owned path types. Path
+/// arguments are already-resolved absolute paths approved by the broker;
+/// relative-path joining against the virtual CWD happens in the broker via
+/// [`broker_fs_resolve`], never by re-resolving after approval.
+pub trait NseFilesystemProvider: Send + Sync {
+    /// Read a whole file to a string.
+    fn read_to_string(&self, path: &Path) -> Result<String, NseProviderError>;
+    /// Read a whole file to bytes.
+    fn read(&self, path: &Path) -> Result<Vec<u8>, NseProviderError>;
+    /// Write bytes to a file (create or truncate).
+    fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), NseProviderError>;
+    /// Following metadata.
+    fn metadata(&self, path: &Path) -> Result<NseFileMetadata, NseProviderError>;
+    /// Non-following (symlink) metadata.
+    fn symlink_metadata(&self, path: &Path) -> Result<NseFileMetadata, NseProviderError>;
+    /// List directory entries.
+    fn read_dir(&self, path: &Path) -> Result<Vec<NseDirEntry>, NseProviderError>;
+    /// Remove a file.
+    fn remove_file(&self, path: &Path) -> Result<(), NseProviderError>;
+    /// Rename/move a file or directory.
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), NseProviderError>;
+    /// Create directories recursively.
+    fn create_dir_all(&self, path: &Path) -> Result<(), NseProviderError>;
+    /// Remove an empty directory.
+    fn remove_dir(&self, path: &Path) -> Result<(), NseProviderError>;
+    /// Create a hard link.
+    fn hard_link(&self, src: &Path, dst: &Path) -> Result<(), NseProviderError>;
+    /// Create a symbolic link (platform-localized; directory targets may
+    /// be unsupported on some platforms).
+    fn symlink(&self, src: &Path, dst: &Path) -> Result<(), NseProviderError>;
+    /// Read a symlink target.
+    fn read_link(&self, path: &Path) -> Result<FsPathBuf, NseProviderError>;
+    /// Set Unix permission bits (unsupported on non-Unix platforms).
+    fn set_unix_mode(&self, path: &Path, mode: u32) -> Result<(), NseProviderError>;
+    /// Set the read-only flag (portable).
+    fn set_readonly(&self, path: &Path, readonly: bool) -> Result<(), NseProviderError>;
+    /// True when the path exists (any type).
+    fn exists(&self, path: &Path) -> bool;
+    /// Open a file handle.
+    fn open(
+        &self,
+        path: &Path,
+        mode: NseOpenMode,
+    ) -> Result<Box<dyn NseFileHandle>, NseProviderError>;
+    /// Per-run working directory: the virtual override when set through
+    /// [`NseFilesystemProvider::set_current_dir`], else the process CWD.
+    fn current_dir(&self) -> Result<FsPathBuf, NseProviderError>;
+    /// Set the per-run virtual working directory. Records the override on
+    /// this provider instance only; never mutates the embedding process.
+    fn set_current_dir(&self, path: &Path) -> Result<(), NseProviderError>;
+}
+
+/// Process execution specification (no shell implied; callers select the
+/// platform shell explicitly when shell semantics are required).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NseProcessSpec {
+    /// Program to execute.
+    pub program: String,
+    /// Arguments (not shell-parsed).
+    pub args: Vec<String>,
+    /// Wall-clock bound for completion.
+    pub timeout: std::time::Duration,
+}
+
+impl NseProcessSpec {
+    /// Build a spec.
+    pub fn new(
+        program: impl Into<String>,
+        args: Vec<String>,
+        timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            args,
+            timeout,
+        }
+    }
+}
+
+/// Process execution result (no `std::process::Output` in the contract).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NseProcessResult {
+    /// Exit code, when the process exited normally.
+    pub code: Option<i32>,
+    /// True when the exit code is zero.
+    pub success: bool,
+    /// Captured standard output.
+    pub stdout: Vec<u8>,
+    /// Captured standard error.
+    pub stderr: Vec<u8>,
+}
+
+/// Network interface record for privilege/interface discovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NseNetworkInterface {
+    /// Interface/device name.
+    pub name: String,
+    /// Associated addresses.
+    pub addresses: Vec<NseIpAddress>,
+}
+
+impl NseNetworkInterface {
+    /// Build an interface record.
+    pub fn new(name: impl Into<String>, addresses: Vec<NseIpAddress>) -> Self {
+        Self {
+            name: name.into(),
+            addresses,
+        }
+    }
+}
+
+/// Process execution and platform discovery.
+///
+/// Bounded execution only: implementations must enforce the spec timeout
+/// (killing the child) and must not leave detached children.
+pub trait NseProcessProvider: Send + Sync {
+    /// Run to completion with captured output (bounded by spec timeout).
+    fn run(&self, spec: &NseProcessSpec) -> Result<NseProcessResult, NseProviderError>;
+    /// Spawn a child without waiting (for `io.popen` semantics); the
+    /// caller owns the handle and must terminate it.
+    fn spawn(&self, spec: &NseProcessSpec) -> Result<Box<dyn NseChildProcess>, NseProviderError>;
+    /// Platform-localized privilege probe (`id -u == 0` on Unix, always
+    /// false elsewhere).
+    fn is_privileged(&self) -> Result<bool, NseProviderError>;
+    /// Platform-localized interface enumeration with a loopback fallback.
+    fn network_interfaces(&self) -> Result<Vec<NseNetworkInterface>, NseProviderError>;
+}
+
+/// Opaque running child process (for spawn-without-wait semantics).
+pub trait NseChildProcess: Send {
+    /// OS process id, if known.
+    fn id(&self) -> Option<u32>;
+    /// True while the child is still running.
+    fn is_running(&mut self) -> bool;
+    /// Terminate the child (best effort, idempotent).
+    fn kill(&mut self);
+}
+
+// ---------------------------------------------------------------------------
+// Native implementations (default behavior, unchanged for existing callers).
+// ---------------------------------------------------------------------------
+
+/// Native file handle backed by `std::fs` (single allow-listed native zone).
+pub struct NativeFileHandle {
+    file: Option<std::fs::File>,
+}
+
+impl NativeFileHandle {
+    /// Wrap an open native file (native interop).
+    pub fn from_std(file: std::fs::File) -> Self {
+        Self { file: Some(file) }
+    }
+}
+
+impl NseFileHandle for NativeFileHandle {
+    fn read(&mut self, max_bytes: usize) -> Result<Vec<u8>, NseProviderError> {
+        use std::io::Read;
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| NseProviderError::new("fs", "file handle is closed"))?;
+        let size = max_bytes.clamp(1, 16 * 1024 * 1024);
+        let mut buffer = vec![0u8; size];
+        let n = file
+            .read(&mut buffer)
+            .map_err(|e| NseProviderError::new("fs", format!("file read failed: {e}")))?;
+        buffer.truncate(n);
+        Ok(buffer)
+    }
+
+    fn write(&mut self, data: &[u8]) -> Result<usize, NseProviderError> {
+        use std::io::Write;
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| NseProviderError::new("fs", "file handle is closed"))?;
+        file.write_all(data)
+            .map_err(|e| NseProviderError::new("fs", format!("file write failed: {e}")))?;
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> Result<(), NseProviderError> {
+        use std::io::Write;
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| NseProviderError::new("fs", "file handle is closed"))?;
+        file.flush()
+            .map_err(|e| NseProviderError::new("fs", format!("file flush failed: {e}")))?;
+        Ok(())
+    }
+
+    fn seek_from_start(&mut self, pos: u64) -> Result<u64, NseProviderError> {
+        use std::io::Seek;
+        let file = self
+            .file
+            .as_mut()
+            .ok_or_else(|| NseProviderError::new("fs", "file handle is closed"))?;
+        file.seek(std::io::SeekFrom::Start(pos))
+            .map_err(|e| NseProviderError::new("fs", format!("file seek failed: {e}")))
+    }
+
+    fn close(&mut self) {
+        if let Some(file) = self.file.take() {
+            // Preserve the legacy sync-on-close behavior (warn, not fail).
+            if let Err(e) = file.sync_all() {
+                tracing::warn!("failed to sync file on close: {e}");
+            }
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        self.file.is_some()
+    }
+}
+
+impl Drop for NativeFileHandle {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+/// Native filesystem backed by `std::fs`/`std::env` (single allow-listed
+/// native zone).
+///
+/// The virtual CWD override is per-instance state: concurrent runs hold
+/// independent providers and never observe each other's `set_current_dir`.
+/// The process working directory is never mutated.
+pub struct NativeFilesystemProvider {
+    cwd_override: Mutex<Option<FsPathBuf>>,
+}
+
+impl NativeFilesystemProvider {
+    /// Build a native filesystem provider (no virtual CWD override).
+    pub fn new() -> Self {
+        Self {
+            cwd_override: Mutex::new(None),
+        }
+    }
+}
+
+impl Default for NativeFilesystemProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NseFilesystemProvider for NativeFilesystemProvider {
+    fn read_to_string(&self, path: &Path) -> Result<String, NseProviderError> {
+        std::fs::read_to_string(path)
+            .map_err(|e| NseProviderError::new("fs", format!("read failed: {e}")))
+    }
+
+    fn read(&self, path: &Path) -> Result<Vec<u8>, NseProviderError> {
+        std::fs::read(path).map_err(|e| NseProviderError::new("fs", format!("read failed: {e}")))
+    }
+
+    fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), NseProviderError> {
+        std::fs::write(path, bytes)
+            .map_err(|e| NseProviderError::new("fs", format!("write failed: {e}")))
+    }
+
+    fn metadata(&self, path: &Path) -> Result<NseFileMetadata, NseProviderError> {
+        std::fs::metadata(path)
+            .map(|m| NseFileMetadata::from_std(&m))
+            .map_err(|e| NseProviderError::new("fs", format!("stat failed: {e}")))
+    }
+
+    fn symlink_metadata(&self, path: &Path) -> Result<NseFileMetadata, NseProviderError> {
+        std::fs::symlink_metadata(path)
+            .map(|m| NseFileMetadata::from_std(&m))
+            .map_err(|e| NseProviderError::new("fs", format!("lstat failed: {e}")))
+    }
+
+    fn read_dir(&self, path: &Path) -> Result<Vec<NseDirEntry>, NseProviderError> {
+        let dir = std::fs::read_dir(path)
+            .map_err(|e| NseProviderError::new("fs", format!("read_dir failed: {e}")))?;
+        let mut entries = Vec::new();
+        for entry in dir {
+            let entry =
+                entry.map_err(|e| NseProviderError::new("fs", format!("dir entry failed: {e}")))?;
+            let file_type = entry
+                .file_type()
+                .map(|t| {
+                    if t.is_dir() {
+                        NseFileType::Dir
+                    } else if t.is_file() {
+                        NseFileType::File
+                    } else if t.is_symlink() {
+                        NseFileType::Symlink
+                    } else {
+                        NseFileType::Unknown
+                    }
+                })
+                .unwrap_or(NseFileType::Unknown);
+            entries.push(NseDirEntry::new(
+                entry.file_name().to_string_lossy(),
+                file_type,
+            ));
+        }
+        Ok(entries)
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), NseProviderError> {
+        std::fs::remove_file(path)
+            .map_err(|e| NseProviderError::new("fs", format!("remove failed: {e}")))
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), NseProviderError> {
+        std::fs::rename(from, to)
+            .map_err(|e| NseProviderError::new("fs", format!("rename failed: {e}")))
+    }
+
+    fn create_dir_all(&self, path: &Path) -> Result<(), NseProviderError> {
+        std::fs::create_dir_all(path)
+            .map_err(|e| NseProviderError::new("fs", format!("mkdir failed: {e}")))
+    }
+
+    fn remove_dir(&self, path: &Path) -> Result<(), NseProviderError> {
+        std::fs::remove_dir(path)
+            .map_err(|e| NseProviderError::new("fs", format!("rmdir failed: {e}")))
+    }
+
+    fn hard_link(&self, src: &Path, dst: &Path) -> Result<(), NseProviderError> {
+        std::fs::hard_link(src, dst)
+            .map_err(|e| NseProviderError::new("fs", format!("hard link failed: {e}")))
+    }
+
+    fn symlink(&self, src: &Path, dst: &Path) -> Result<(), NseProviderError> {
+        symlink_native(src, dst)
+    }
+
+    fn read_link(&self, path: &Path) -> Result<FsPathBuf, NseProviderError> {
+        std::fs::read_link(path)
+            .map_err(|e| NseProviderError::new("fs", format!("read_link failed: {e}")))
+    }
+
+    fn set_unix_mode(&self, path: &Path, mode: u32) -> Result<(), NseProviderError> {
+        set_unix_mode_native(path, mode)
+    }
+
+    fn set_readonly(&self, path: &Path, readonly: bool) -> Result<(), NseProviderError> {
+        let meta = std::fs::symlink_metadata(path)
+            .map_err(|e| NseProviderError::new("fs", format!("stat failed: {e}")))?;
+        let mut perms = meta.permissions();
+        perms.set_readonly(readonly);
+        std::fs::set_permissions(path, perms)
+            .map_err(|e| NseProviderError::new("fs", format!("set permissions failed: {e}")))
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+
+    fn open(
+        &self,
+        path: &Path,
+        mode: NseOpenMode,
+    ) -> Result<Box<dyn NseFileHandle>, NseProviderError> {
+        use std::fs::OpenOptions;
+        let file = match mode {
+            NseOpenMode::Read => OpenOptions::new().read(true).open(path),
+            NseOpenMode::Write => OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path),
+            NseOpenMode::Append => OpenOptions::new().append(true).create(true).open(path),
+            NseOpenMode::ReadWrite => OpenOptions::new().read(true).write(true).open(path),
+            NseOpenMode::WriteRead => OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(path),
+            NseOpenMode::AppendRead => OpenOptions::new()
+                .read(true)
+                .append(true)
+                .create(true)
+                .open(path),
+        }
+        .map_err(|e| NseProviderError::new("fs", format!("open failed: {e}")))?;
+        Ok(Box::new(NativeFileHandle::from_std(file)))
+    }
+
+    fn current_dir(&self) -> Result<FsPathBuf, NseProviderError> {
+        if let Some(dir) = self
+            .cwd_override
+            .lock()
+            .map_err(|e| NseProviderError::new("fs", format!("CWD lock failed: {e}")))?
+            .clone()
+        {
+            return Ok(dir);
+        }
+        std::env::current_dir()
+            .map_err(|e| NseProviderError::new("fs", format!("current_dir failed: {e}")))
+    }
+
+    fn set_current_dir(&self, path: &Path) -> Result<(), NseProviderError> {
+        if !path.is_dir() {
+            return Err(NseProviderError::new(
+                "fs",
+                "chdir target is not a directory",
+            ));
+        }
+        *self
+            .cwd_override
+            .lock()
+            .map_err(|e| NseProviderError::new("fs", format!("CWD lock failed: {e}")))? =
+            Some(path.to_path_buf());
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn symlink_native(src: &Path, dst: &Path) -> Result<(), NseProviderError> {
+    std::os::unix::fs::symlink(src, dst)
+        .map_err(|e| NseProviderError::new("fs", format!("symlink failed: {e}")))
+}
+
+#[cfg(windows)]
+fn symlink_native(src: &Path, dst: &Path) -> Result<(), NseProviderError> {
+    // Windows distinguishes file/dir symlinks and requires privileges;
+    // file targets use symlink_file, directory targets are unsupported.
+    if src.is_dir() {
+        return Err(NseProviderError::new(
+            "fs",
+            "directory symlinks are unsupported on Windows",
+        ));
+    }
+    std::os::windows::fs::symlink_file(src, dst)
+        .map_err(|e| NseProviderError::new("fs", format!("symlink failed: {e}")))
+}
+
+#[cfg(not(unix))]
+#[cfg(not(windows))]
+fn symlink_native(_src: &Path, _dst: &Path) -> Result<(), NseProviderError> {
+    Err(NseProviderError::new(
+        "fs",
+        "symlinks are unsupported on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn set_unix_mode_native(path: &Path, mode: u32) -> Result<(), NseProviderError> {
+    use std::os::unix::fs::PermissionsExt;
+    let permissions = std::fs::Permissions::from_mode(mode);
+    std::fs::set_permissions(path, permissions)
+        .map_err(|e| NseProviderError::new("fs", format!("set mode failed: {e}")))
+}
+
+#[cfg(not(unix))]
+fn set_unix_mode_native(_path: &Path, _mode: u32) -> Result<(), NseProviderError> {
+    Err(NseProviderError::new(
+        "fs",
+        "Unix permission bits are unsupported on this platform (use set_readonly)",
+    ))
+}
+
+/// Platform shell for `sh -c`/`cmd /C` semantics, localized in the native
+/// layer so compatibility libraries never branch on the platform.
+pub fn shell_command(cmd: &str) -> NseProcessSpec {
+    #[cfg(unix)]
+    {
+        NseProcessSpec::new(
+            "sh",
+            vec!["-c".to_string(), cmd.to_string()],
+            PROCESS_TIMEOUT,
+        )
+    }
+    #[cfg(windows)]
+    {
+        NseProcessSpec::new(
+            "cmd",
+            vec!["/C".to_string(), cmd.to_string()],
+            PROCESS_TIMEOUT,
+        )
+    }
+    #[cfg(not(unix))]
+    #[cfg(not(windows))]
+    {
+        let _ = cmd;
+        NseProcessSpec::new("", Vec::new(), PROCESS_TIMEOUT)
+    }
+}
+
+/// Default bound for shell-p spawned processes (matches the legacy
+/// `io.popen` posture of spawning without a bound, now bounded).
+const PROCESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Native running child backed by `std::process` (allow-listed native zone).
+pub struct NativeChildProcess {
+    child: Option<std::process::Child>,
+}
+
+impl NativeChildProcess {
+    /// Wrap a spawned native child (native interop).
+    pub fn from_std(child: std::process::Child) -> Self {
+        Self { child: Some(child) }
+    }
+}
+
+impl NseChildProcess for NativeChildProcess {
+    fn id(&self) -> Option<u32> {
+        self.child.as_ref().map(|c| c.id())
+    }
+
+    fn is_running(&mut self) -> bool {
+        match self.child.as_mut() {
+            None => false,
+            Some(child) => match child.try_wait() {
+                Ok(None) => true,
+                _ => false,
+            },
+        }
+    }
+
+    fn kill(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            // Best effort: kill, then reap without blocking indefinitely.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for NativeChildProcess {
+    fn drop(&mut self) {
+        // Never leave detached children behind when the owning run ends.
+        self.kill();
+    }
+}
+
+/// Native process provider backed by `std::process` (allow-listed zone).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NativeProcessProvider;
+
+impl NativeProcessProvider {
+    fn spawn_native(spec: &NseProcessSpec) -> Result<std::process::Child, NseProviderError> {
+        if spec.program.is_empty() {
+            return Err(NseProviderError::new(
+                "process",
+                "process execution is unsupported on this platform",
+            ));
+        }
+        std::process::Command::new(&spec.program)
+            .args(&spec.args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| NseProviderError::new("process", format!("spawn failed: {e}")))
+    }
+}
+
+impl NseProcessProvider for NativeProcessProvider {
+    fn run(&self, spec: &NseProcessSpec) -> Result<NseProcessResult, NseProviderError> {
+        use std::io::Read;
+        let mut child = Self::spawn_native(spec)?;
+        let deadline = std::time::Instant::now() + spec.timeout;
+        loop {
+            match child
+                .try_wait()
+                .map_err(|e| NseProviderError::new("process", format!("wait failed: {e}")))?
+            {
+                Some(status) => {
+                    let mut stdout = Vec::new();
+                    let mut stderr = Vec::new();
+                    if let Some(mut out) = child.stdout.take() {
+                        let _ = out.read_to_end(&mut stdout);
+                    }
+                    if let Some(mut err) = child.stderr.take() {
+                        let _ = err.read_to_end(&mut stderr);
+                    }
+                    return Ok(NseProcessResult {
+                        code: status.code(),
+                        success: status.success(),
+                        stdout,
+                        stderr,
+                    });
+                }
+                None => {
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(NseProviderError::new(
+                            "process",
+                            "process execution timed out",
+                        ));
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(25));
+                }
+            }
+        }
+    }
+
+    fn spawn(&self, spec: &NseProcessSpec) -> Result<Box<dyn NseChildProcess>, NseProviderError> {
+        Ok(Box::new(NativeChildProcess::from_std(Self::spawn_native(
+            spec,
+        )?)))
+    }
+
+    fn is_privileged(&self) -> Result<bool, NseProviderError> {
+        is_privileged_native()
+    }
+
+    fn network_interfaces(&self) -> Result<Vec<NseNetworkInterface>, NseProviderError> {
+        network_interfaces_native()
+    }
+}
+
+#[cfg(unix)]
+fn is_privileged_native() -> Result<bool, NseProviderError> {
+    match std::process::Command::new("id").arg("-u").output() {
+        Ok(output) => Ok(output.stdout == b"0\n"),
+        Err(e) => Err(NseProviderError::new(
+            "process",
+            format!("privilege probe failed: {e}"),
+        )),
+    }
+}
+
+#[cfg(not(unix))]
+fn is_privileged_native() -> Result<bool, NseProviderError> {
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn network_interfaces_native() -> Result<Vec<NseNetworkInterface>, NseProviderError> {
+    match std::process::Command::new("ip").arg("addr").output() {
+        Ok(output) => Ok(parse_ip_addr_output(&String::from_utf8_lossy(
+            &output.stdout,
+        ))),
+        Err(e) => Err(NseProviderError::new(
+            "process",
+            format!("interface enumeration failed: {e}"),
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn network_interfaces_native() -> Result<Vec<NseNetworkInterface>, NseProviderError> {
+    match std::process::Command::new("ipconfig").output() {
+        Ok(output) => Ok(parse_ipconfig_output(&String::from_utf8_lossy(
+            &output.stdout,
+        ))),
+        Err(e) => Err(NseProviderError::new(
+            "process",
+            format!("interface enumeration failed: {e}"),
+        )),
+    }
+}
+
+#[cfg(not(unix))]
+#[cfg(not(windows))]
+fn network_interfaces_native() -> Result<Vec<NseNetworkInterface>, NseProviderError> {
+    Ok(vec![NseNetworkInterface::new(
+        "lo",
+        vec![NseIpAddress::V4([127, 0, 0, 1])],
+    )])
+}
+
+// ---------------------------------------------------------------------------
+// Deterministic test providers (public so downstream harnesses can reuse).
+// ---------------------------------------------------------------------------
+
+/// Counting filesystem wrapper proving denial prevents provider invocation.
+pub struct CountingFilesystemProvider {
+    calls: AtomicU64,
+}
+
+impl CountingFilesystemProvider {
+    /// Build a counting wrapper around native behavior.
+    pub fn new() -> Self {
+        Self {
+            calls: AtomicU64::new(0),
+        }
+    }
+
+    /// Number of provider invocations observed.
+    pub fn calls(&self) -> u64 {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for CountingFilesystemProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+macro_rules! counted_fs {
+    ($self:ident, $native:expr) => {{
+        $self.calls.fetch_add(1, Ordering::SeqCst);
+        $native
+    }};
+}
+
+impl NseFilesystemProvider for CountingFilesystemProvider {
+    fn read_to_string(&self, path: &Path) -> Result<String, NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().read_to_string(path))
+    }
+
+    fn read(&self, path: &Path) -> Result<Vec<u8>, NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().read(path))
+    }
+
+    fn write(&self, path: &Path, bytes: &[u8]) -> Result<(), NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().write(path, bytes))
+    }
+
+    fn metadata(&self, path: &Path) -> Result<NseFileMetadata, NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().metadata(path))
+    }
+
+    fn symlink_metadata(&self, path: &Path) -> Result<NseFileMetadata, NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().symlink_metadata(path))
+    }
+
+    fn read_dir(&self, path: &Path) -> Result<Vec<NseDirEntry>, NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().read_dir(path))
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().remove_file(path))
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> Result<(), NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().rename(from, to))
+    }
+
+    fn create_dir_all(&self, path: &Path) -> Result<(), NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().create_dir_all(path))
+    }
+
+    fn remove_dir(&self, path: &Path) -> Result<(), NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().remove_dir(path))
+    }
+
+    fn hard_link(&self, src: &Path, dst: &Path) -> Result<(), NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().hard_link(src, dst))
+    }
+
+    fn symlink(&self, src: &Path, dst: &Path) -> Result<(), NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().symlink(src, dst))
+    }
+
+    fn read_link(&self, path: &Path) -> Result<FsPathBuf, NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().read_link(path))
+    }
+
+    fn set_unix_mode(&self, path: &Path, mode: u32) -> Result<(), NseProviderError> {
+        counted_fs!(
+            self,
+            NativeFilesystemProvider::new().set_unix_mode(path, mode)
+        )
+    }
+
+    fn set_readonly(&self, path: &Path, readonly: bool) -> Result<(), NseProviderError> {
+        counted_fs!(
+            self,
+            NativeFilesystemProvider::new().set_readonly(path, readonly)
+        )
+    }
+
+    fn exists(&self, path: &Path) -> bool {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        NativeFilesystemProvider::new().exists(path)
+    }
+
+    fn open(
+        &self,
+        path: &Path,
+        mode: NseOpenMode,
+    ) -> Result<Box<dyn NseFileHandle>, NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().open(path, mode))
+    }
+
+    fn current_dir(&self) -> Result<FsPathBuf, NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().current_dir())
+    }
+
+    fn set_current_dir(&self, path: &Path) -> Result<(), NseProviderError> {
+        counted_fs!(self, NativeFilesystemProvider::new().set_current_dir(path))
+    }
+}
+
+/// Denying filesystem provider: every fallible operation fails closed.
+///
+/// Used to prove brokers never reach the provider on denial (via the
+/// counting wrapper) and to simulate unavailable filesystems.
+pub struct DenyFilesystemProvider {
+    message: String,
+}
+
+impl DenyFilesystemProvider {
+    /// Build a denying provider with a fixed failure message.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    fn deny(&self) -> NseProviderError {
+        NseProviderError::new("fs", self.message.clone())
+    }
+}
+
+impl NseFilesystemProvider for DenyFilesystemProvider {
+    fn read_to_string(&self, _path: &Path) -> Result<String, NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn read(&self, _path: &Path) -> Result<Vec<u8>, NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn write(&self, _path: &Path, _bytes: &[u8]) -> Result<(), NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn metadata(&self, _path: &Path) -> Result<NseFileMetadata, NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn symlink_metadata(&self, _path: &Path) -> Result<NseFileMetadata, NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn read_dir(&self, _path: &Path) -> Result<Vec<NseDirEntry>, NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn remove_file(&self, _path: &Path) -> Result<(), NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn rename(&self, _from: &Path, _to: &Path) -> Result<(), NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn create_dir_all(&self, _path: &Path) -> Result<(), NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn remove_dir(&self, _path: &Path) -> Result<(), NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn hard_link(&self, _src: &Path, _dst: &Path) -> Result<(), NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn symlink(&self, _src: &Path, _dst: &Path) -> Result<(), NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn read_link(&self, _path: &Path) -> Result<FsPathBuf, NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn set_unix_mode(&self, _path: &Path, _mode: u32) -> Result<(), NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn set_readonly(&self, _path: &Path, _readonly: bool) -> Result<(), NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn exists(&self, _path: &Path) -> bool {
+        false
+    }
+
+    fn open(
+        &self,
+        _path: &Path,
+        _mode: NseOpenMode,
+    ) -> Result<Box<dyn NseFileHandle>, NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn current_dir(&self) -> Result<FsPathBuf, NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn set_current_dir(&self, _path: &Path) -> Result<(), NseProviderError> {
+        Err(self.deny())
+    }
+}
+
+/// Counting process wrapper proving denial prevents provider invocation.
+pub struct CountingProcessProvider {
+    calls: AtomicU64,
+}
+
+impl CountingProcessProvider {
+    /// Build a counting wrapper around native behavior.
+    pub fn new() -> Self {
+        Self {
+            calls: AtomicU64::new(0),
+        }
+    }
+
+    /// Number of provider invocations observed.
+    pub fn calls(&self) -> u64 {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for CountingProcessProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl NseProcessProvider for CountingProcessProvider {
+    fn run(&self, spec: &NseProcessSpec) -> Result<NseProcessResult, NseProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        NativeProcessProvider.run(spec)
+    }
+
+    fn spawn(&self, spec: &NseProcessSpec) -> Result<Box<dyn NseChildProcess>, NseProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        NativeProcessProvider.spawn(spec)
+    }
+
+    fn is_privileged(&self) -> Result<bool, NseProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        NativeProcessProvider.is_privileged()
+    }
+
+    fn network_interfaces(&self) -> Result<Vec<NseNetworkInterface>, NseProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        NativeProcessProvider.network_interfaces()
+    }
+}
+
+/// Denying process provider: every operation fails closed.
+pub struct DenyProcessProvider {
+    message: String,
+}
+
+impl DenyProcessProvider {
+    /// Build a denying provider with a fixed failure message.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    fn deny(&self) -> NseProviderError {
+        NseProviderError::new("process", self.message.clone())
+    }
+}
+
+impl NseProcessProvider for DenyProcessProvider {
+    fn run(&self, _spec: &NseProcessSpec) -> Result<NseProcessResult, NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn spawn(&self, _spec: &NseProcessSpec) -> Result<Box<dyn NseChildProcess>, NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn is_privileged(&self) -> Result<bool, NseProviderError> {
+        Err(self.deny())
+    }
+
+    fn network_interfaces(&self) -> Result<Vec<NseNetworkInterface>, NseProviderError> {
+        Err(self.deny())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Capability-aware broker functions (filesystem/process, M005D).
+//
+// Sequence (ADR-0003, plan §6):
+//   capability/sandbox path decision -> cancellation/resource preflight ->
+//   provider operation -> accounting/event result.
+//
+// Relative paths resolve against the per-run virtual CWD first; capability
+// and sandbox checks apply to the resolved absolute path; the sandbox
+// canonicalizes (when enabled) and the provider operates on that approved
+// path with no second transformation. Denial or cancellation never reaches
+// the provider.
+// ---------------------------------------------------------------------------
+
+/// Resolve `path` against the per-run virtual CWD (absolute paths pass
+/// through). Pure joining only — no filesystem access, no canonicalization.
+pub fn broker_fs_resolve(
+    services: &NseHostServices,
+    path: &str,
+    operation: &'static str,
+) -> Result<FsPathBuf, String> {
+    let candidate = FsPathBuf::from(path);
+    if candidate.is_absolute() {
+        return Ok(candidate);
+    }
+    let cwd = services
+        .fs()
+        .current_dir()
+        .map_err(|e| format!("{operation}: working directory unavailable: {e}"))?;
+    Ok(cwd.join(candidate))
+}
+
+fn fs_approved_path(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    kind: NseCapabilityKind,
+    operation: &'static str,
+) -> Result<(NseCapabilityRequest, FsPathBuf), String> {
+    ctx.check_cancelled(operation)?;
+    let resolved = broker_fs_resolve(services, path, operation)?;
+    let request = broker_request(
+        kind,
+        Some(resolved.to_string_lossy().to_string()),
+        None,
+        operation,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(deny_message(&decision, "filesystem access denied"));
+    }
+    // Sandbox canonicalizes + enforces containment on the resolved path;
+    // disabled sandbox passes the resolved path through unchanged.
+    match ctx.sandbox.get_allowed_path(&resolved.to_string_lossy()) {
+        Some(approved) => Ok((request, approved)),
+        None => Err(format!(
+            "{operation}: path '{}' blocked by sandbox",
+            resolved.display()
+        )),
+    }
+}
+
+/// Brokered whole-file string read.
+pub fn broker_fs_read_to_string(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    operation: &'static str,
+) -> Result<String, String> {
+    let (request, approved) = fs_approved_path(
+        ctx,
+        services,
+        path,
+        NseCapabilityKind::FilesystemRead,
+        operation,
+    )?;
+    ctx.before_blocking_operation(&request)?;
+    let content = services
+        .fs()
+        .read_to_string(&approved)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, Some(content.len() as u64));
+    Ok(content)
+}
+
+/// Brokered whole-file byte read.
+pub fn broker_fs_read(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    operation: &'static str,
+) -> Result<Vec<u8>, String> {
+    let (request, approved) = fs_approved_path(
+        ctx,
+        services,
+        path,
+        NseCapabilityKind::FilesystemRead,
+        operation,
+    )?;
+    ctx.before_blocking_operation(&request)?;
+    let bytes = services
+        .fs()
+        .read(&approved)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, Some(bytes.len() as u64));
+    Ok(bytes)
+}
+
+/// Brokered file write.
+pub fn broker_fs_write(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    bytes: &[u8],
+    operation: &'static str,
+) -> Result<(), String> {
+    ctx.check_cancelled(operation)?;
+    let resolved = broker_fs_resolve(services, path, operation)?;
+    let request = broker_request(
+        NseCapabilityKind::FilesystemWrite,
+        Some(resolved.to_string_lossy().to_string()),
+        Some(bytes.len() as u64),
+        operation,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(deny_message(&decision, "filesystem write denied"));
+    }
+    let approved = match ctx.sandbox.get_allowed_path(&resolved.to_string_lossy()) {
+        Some(approved) => approved,
+        None => {
+            return Err(format!(
+                "{operation}: path '{}' blocked by sandbox",
+                resolved.display()
+            ))
+        }
+    };
+    ctx.before_blocking_operation(&request)?;
+    services
+        .fs()
+        .write(&approved, bytes)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, Some(bytes.len() as u64));
+    Ok(())
+}
+
+/// Brokered following metadata stat.
+pub fn broker_fs_metadata(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    operation: &'static str,
+) -> Result<NseFileMetadata, String> {
+    let (request, approved) = fs_approved_path(
+        ctx,
+        services,
+        path,
+        NseCapabilityKind::FilesystemRead,
+        operation,
+    )?;
+    ctx.before_blocking_operation(&request)?;
+    let meta = services
+        .fs()
+        .metadata(&approved)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(meta)
+}
+
+/// Brokered symlink (non-following) metadata stat.
+pub fn broker_fs_symlink_metadata(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    operation: &'static str,
+) -> Result<NseFileMetadata, String> {
+    let (request, approved) = fs_approved_path(
+        ctx,
+        services,
+        path,
+        NseCapabilityKind::FilesystemRead,
+        operation,
+    )?;
+    ctx.before_blocking_operation(&request)?;
+    let meta = services
+        .fs()
+        .symlink_metadata(&approved)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(meta)
+}
+
+/// Brokered directory listing.
+pub fn broker_fs_read_dir(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    operation: &'static str,
+) -> Result<Vec<NseDirEntry>, String> {
+    let (request, approved) = fs_approved_path(
+        ctx,
+        services,
+        path,
+        NseCapabilityKind::FilesystemRead,
+        operation,
+    )?;
+    ctx.before_blocking_operation(&request)?;
+    let entries = services
+        .fs()
+        .read_dir(&approved)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(entries)
+}
+
+/// Brokered file removal.
+pub fn broker_fs_remove_file(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    operation: &'static str,
+) -> Result<(), String> {
+    let (request, approved) = fs_approved_path(
+        ctx,
+        services,
+        path,
+        NseCapabilityKind::FilesystemWrite,
+        operation,
+    )?;
+    ctx.before_blocking_operation(&request)?;
+    services
+        .fs()
+        .remove_file(&approved)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(())
+}
+
+/// Brokered rename/move (both ends resolved, checked, and sandbox-approved).
+pub fn broker_fs_rename(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    from: &str,
+    to: &str,
+    operation: &'static str,
+) -> Result<(), String> {
+    let (request, approved_from) = fs_approved_path(
+        ctx,
+        services,
+        from,
+        NseCapabilityKind::FilesystemWrite,
+        operation,
+    )?;
+    let resolved_to = broker_fs_resolve(services, to, operation)?;
+    let request_to = broker_request(
+        NseCapabilityKind::FilesystemWrite,
+        Some(resolved_to.to_string_lossy().to_string()),
+        None,
+        operation,
+    );
+    let decision = ctx.check_capability(&request_to);
+    if !decision.is_allowed() {
+        return Err(deny_message(&decision, "filesystem write denied"));
+    }
+    let approved_to = match ctx.sandbox.get_allowed_path(&resolved_to.to_string_lossy()) {
+        Some(approved) => approved,
+        None => {
+            return Err(format!(
+                "{operation}: path '{}' blocked by sandbox",
+                resolved_to.display()
+            ))
+        }
+    };
+    ctx.before_blocking_operation(&request)?;
+    services
+        .fs()
+        .rename(&approved_from, &approved_to)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(())
+}
+
+/// Brokered recursive directory creation.
+pub fn broker_fs_create_dir_all(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    operation: &'static str,
+) -> Result<(), String> {
+    let (request, approved) = fs_approved_path(
+        ctx,
+        services,
+        path,
+        NseCapabilityKind::FilesystemWrite,
+        operation,
+    )?;
+    ctx.before_blocking_operation(&request)?;
+    services
+        .fs()
+        .create_dir_all(&approved)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(())
+}
+
+/// Brokered empty-directory removal.
+pub fn broker_fs_remove_dir(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    operation: &'static str,
+) -> Result<(), String> {
+    let (request, approved) = fs_approved_path(
+        ctx,
+        services,
+        path,
+        NseCapabilityKind::FilesystemWrite,
+        operation,
+    )?;
+    ctx.before_blocking_operation(&request)?;
+    services
+        .fs()
+        .remove_dir(&approved)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(())
+}
+
+/// Brokered hard-link creation (both ends approved).
+pub fn broker_fs_hard_link(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    src: &str,
+    dst: &str,
+    operation: &'static str,
+) -> Result<(), String> {
+    let (request, approved_src) = fs_approved_path(
+        ctx,
+        services,
+        src,
+        NseCapabilityKind::FilesystemWrite,
+        operation,
+    )?;
+    let resolved_dst = broker_fs_resolve(services, dst, operation)?;
+    let decision = ctx.check_capability(&broker_request(
+        NseCapabilityKind::FilesystemWrite,
+        Some(resolved_dst.to_string_lossy().to_string()),
+        None,
+        operation,
+    ));
+    if !decision.is_allowed() {
+        return Err(deny_message(&decision, "filesystem write denied"));
+    }
+    let approved_dst = match ctx
+        .sandbox
+        .get_allowed_path(&resolved_dst.to_string_lossy())
+    {
+        Some(approved) => approved,
+        None => {
+            return Err(format!(
+                "{operation}: path '{}' blocked by sandbox",
+                resolved_dst.display()
+            ))
+        }
+    };
+    ctx.before_blocking_operation(&request)?;
+    services
+        .fs()
+        .hard_link(&approved_src, &approved_dst)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(())
+}
+
+/// Brokered symlink creation (both ends approved; platform-localized).
+pub fn broker_fs_symlink(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    src: &str,
+    dst: &str,
+    operation: &'static str,
+) -> Result<(), String> {
+    let (request, approved_src) = fs_approved_path(
+        ctx,
+        services,
+        src,
+        NseCapabilityKind::FilesystemWrite,
+        operation,
+    )?;
+    let resolved_dst = broker_fs_resolve(services, dst, operation)?;
+    let decision = ctx.check_capability(&broker_request(
+        NseCapabilityKind::FilesystemWrite,
+        Some(resolved_dst.to_string_lossy().to_string()),
+        None,
+        operation,
+    ));
+    if !decision.is_allowed() {
+        return Err(deny_message(&decision, "filesystem write denied"));
+    }
+    let approved_dst = match ctx
+        .sandbox
+        .get_allowed_path(&resolved_dst.to_string_lossy())
+    {
+        Some(approved) => approved,
+        None => {
+            return Err(format!(
+                "{operation}: path '{}' blocked by sandbox",
+                resolved_dst.display()
+            ))
+        }
+    };
+    ctx.before_blocking_operation(&request)?;
+    services
+        .fs()
+        .symlink(&approved_src, &approved_dst)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(())
+}
+
+/// Brokered symlink-target read.
+pub fn broker_fs_read_link(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    operation: &'static str,
+) -> Result<FsPathBuf, String> {
+    let (request, approved) = fs_approved_path(
+        ctx,
+        services,
+        path,
+        NseCapabilityKind::FilesystemRead,
+        operation,
+    )?;
+    ctx.before_blocking_operation(&request)?;
+    let target = services
+        .fs()
+        .read_link(&approved)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(target)
+}
+
+/// Brokered Unix permission-bit change (unsupported on non-Unix providers).
+pub fn broker_fs_set_unix_mode(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    mode: u32,
+    operation: &'static str,
+) -> Result<(), String> {
+    let (request, approved) = fs_approved_path(
+        ctx,
+        services,
+        path,
+        NseCapabilityKind::FilesystemWrite,
+        operation,
+    )?;
+    ctx.before_blocking_operation(&request)?;
+    services
+        .fs()
+        .set_unix_mode(&approved, mode)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(())
+}
+
+/// Brokered read-only flag change (portable).
+pub fn broker_fs_set_readonly(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    readonly: bool,
+    operation: &'static str,
+) -> Result<(), String> {
+    let (request, approved) = fs_approved_path(
+        ctx,
+        services,
+        path,
+        NseCapabilityKind::FilesystemWrite,
+        operation,
+    )?;
+    ctx.before_blocking_operation(&request)?;
+    services
+        .fs()
+        .set_readonly(&approved, readonly)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(())
+}
+
+/// Brokered existence probe.
+pub fn broker_fs_exists(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    operation: &'static str,
+) -> bool {
+    // Existence is a read-class question; denial or cancellation answers
+    // "no" without touching the provider.
+    if ctx.check_cancelled(operation).is_err() {
+        return false;
+    }
+    let Ok(resolved) = broker_fs_resolve(services, path, operation) else {
+        return false;
+    };
+    let decision = ctx.check_capability(&broker_request(
+        NseCapabilityKind::FilesystemRead,
+        Some(resolved.to_string_lossy().to_string()),
+        None,
+        operation,
+    ));
+    if !decision.is_allowed() {
+        return false;
+    }
+    if ctx
+        .sandbox
+        .get_allowed_path(&resolved.to_string_lossy())
+        .is_none()
+    {
+        return false;
+    }
+    services.fs().exists(&resolved)
+}
+
+/// Brokered file-handle open (returns the opaque handle; callers own it).
+pub fn broker_fs_open(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    mode: NseOpenMode,
+    operation: &'static str,
+) -> Result<Box<dyn NseFileHandle>, String> {
+    let kind = if mode.is_write() {
+        NseCapabilityKind::FilesystemWrite
+    } else {
+        NseCapabilityKind::FilesystemRead
+    };
+    let (request, approved) = fs_approved_path(ctx, services, path, kind, operation)?;
+    ctx.before_blocking_operation(&request)?;
+    let handle = services
+        .fs()
+        .open(&approved, mode)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(handle)
+}
+
+/// Brokered per-run working-directory read.
+pub fn broker_fs_current_dir(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    operation: &'static str,
+) -> Result<FsPathBuf, String> {
+    ctx.check_cancelled(operation)?;
+    let request = broker_request(NseCapabilityKind::FilesystemRead, None, None, operation);
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(deny_message(&decision, "filesystem access denied"));
+    }
+    ctx.before_blocking_operation(&request)?;
+    let dir = services
+        .fs()
+        .current_dir()
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(dir)
+}
+
+/// Brokered per-run working-directory change.
+///
+/// Records the virtual CWD override on the provider; never mutates the
+/// embedding process.
+pub fn broker_fs_set_current_dir(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    path: &str,
+    operation: &'static str,
+) -> Result<(), String> {
+    let (request, approved) = fs_approved_path(
+        ctx,
+        services,
+        path,
+        NseCapabilityKind::FilesystemRead,
+        operation,
+    )?;
+    ctx.before_blocking_operation(&request)?;
+    services
+        .fs()
+        .set_current_dir(&approved)
+        .map_err(|e| format!("filesystem provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(())
+}
+
+/// Brokered bounded process execution.
+///
+/// Denied in AgentSafe/CiSafe before the provider is invoked.
+pub fn broker_process_run(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    spec: &NseProcessSpec,
+    operation: &'static str,
+) -> Result<NseProcessResult, String> {
+    ctx.check_cancelled(operation)?;
+    let request = broker_request(
+        NseCapabilityKind::ProcessExec,
+        Some(spec.program.clone()),
+        None,
+        operation,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(deny_message(&decision, "process execution denied"));
+    }
+    ctx.before_blocking_operation(&request)?;
+    let result = services
+        .process()
+        .run(spec)
+        .map_err(|e| format!("process provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(result)
+}
+
+/// Brokered process spawn (for `io.popen` semantics; caller must terminate).
+pub fn broker_process_spawn(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    spec: &NseProcessSpec,
+    operation: &'static str,
+) -> Result<Box<dyn NseChildProcess>, String> {
+    ctx.check_cancelled(operation)?;
+    let request = broker_request(
+        NseCapabilityKind::ProcessExec,
+        Some(spec.program.clone()),
+        None,
+        operation,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(deny_message(&decision, "process execution denied"));
+    }
+    ctx.before_blocking_operation(&request)?;
+    let child = services
+        .process()
+        .spawn(spec)
+        .map_err(|e| format!("process provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(child)
+}
+
+/// Brokered privilege probe.
+pub fn broker_is_privileged(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    program_label: &str,
+    operation: &'static str,
+) -> Result<bool, String> {
+    ctx.check_cancelled(operation)?;
+    let request = broker_request(
+        NseCapabilityKind::ProcessExec,
+        Some(program_label.to_string()),
+        None,
+        operation,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(deny_message(&decision, "process execution denied"));
+    }
+    ctx.before_blocking_operation(&request)?;
+    let privileged = services
+        .process()
+        .is_privileged()
+        .map_err(|e| format!("process provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(privileged)
+}
+
+/// Brokered interface enumeration.
+pub fn broker_network_interfaces(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    program_label: &str,
+    operation: &'static str,
+) -> Result<Vec<NseNetworkInterface>, String> {
+    ctx.check_cancelled(operation)?;
+    let request = broker_request(
+        NseCapabilityKind::ProcessExec,
+        Some(program_label.to_string()),
+        None,
+        operation,
+    );
+    let decision = ctx.check_capability(&request);
+    if !decision.is_allowed() {
+        return Err(deny_message(&decision, "process execution denied"));
+    }
+    ctx.before_blocking_operation(&request)?;
+    let interfaces = services
+        .process()
+        .network_interfaces()
+        .map_err(|e| format!("process provider failed: {e}"))?;
+    ctx.after_blocking_operation(&request, None);
+    Ok(interfaces)
+}
+
+/// Parse `ip addr` output into interface records (moved verbatim from the
+/// compatibility layer so behavior is preserved).
+fn parse_ip_addr_output(output: &str) -> Vec<NseNetworkInterface> {
+    let mut interfaces: Vec<NseNetworkInterface> = Vec::new();
+    let mut current: Option<NseNetworkInterface> = None;
+    for line in output.lines() {
+        if line
+            .split(':')
+            .nth(1)
+            .map(|name| !name.trim().is_empty())
+            .unwrap_or(false)
+            && line.starts_with(|c: char| c.is_ascii_digit())
+        {
+            if let Some(iface) = current.take() {
+                interfaces.push(iface);
+            }
+            let name = line
+                .split(':')
+                .nth(1)
+                .unwrap_or("unknown")
+                .trim()
+                .split('@')
+                .next()
+                .unwrap_or("unknown")
+                .to_string();
+            current = Some(NseNetworkInterface::new(name, Vec::new()));
+        } else if line.trim().starts_with("inet ") {
+            if let Some(ref mut iface) = current {
+                if let Some(addr) = line.trim().split_whitespace().nth(1) {
+                    let ip = addr.split('/').next().unwrap_or(addr);
+                    if let Some(parsed) = NseIpAddress::parse(ip) {
+                        iface.addresses.push(parsed);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(iface) = current.take() {
+        interfaces.push(iface);
+    }
+    if interfaces.is_empty() {
+        interfaces.push(NseNetworkInterface::new(
+            "lo",
+            vec![NseIpAddress::V4([127, 0, 0, 1])],
+        ));
+    }
+    interfaces
+}
+
+/// Parse `ipconfig` output into interface records (moved verbatim from the
+/// compatibility layer so behavior is preserved).
+#[cfg(windows)]
+fn parse_ipconfig_output(output: &str) -> Vec<NseNetworkInterface> {
+    let mut interfaces: Vec<NseNetworkInterface> = Vec::new();
+    let mut current: Option<NseNetworkInterface> = None;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.ends_with(':') && !trimmed.contains("adapter") && !trimmed.is_empty() {
+            if let Some(iface) = current.take() {
+                if !iface.addresses.is_empty() || !iface.name.is_empty() {
+                    interfaces.push(iface);
+                }
+            }
+            current = Some(NseNetworkInterface::new(
+                trimmed.trim_end_matches(':').trim(),
+                Vec::new(),
+            ));
+        } else if trimmed.to_lowercase().starts_with("ipv4") {
+            if let Some(ref mut iface) = current {
+                if let Some(addr) = trimmed.split(':').nth(1) {
+                    if let Some(parsed) = NseIpAddress::parse(addr.trim()) {
+                        iface.addresses.push(parsed);
+                    }
+                }
+            }
+        }
+    }
+    if let Some(iface) = current.take() {
+        if !iface.addresses.is_empty() || !iface.name.is_empty() {
+            interfaces.push(iface);
+        }
+    }
+    if interfaces.is_empty() {
+        interfaces.push(NseNetworkInterface::new(
+            "lo",
+            vec![NseIpAddress::V4([127, 0, 0, 1])],
+        ));
+    }
+    interfaces
 }

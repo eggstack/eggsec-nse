@@ -21,7 +21,11 @@ use crate::providers::{
 /// (no direct connects or resolution in this module).
 struct ConnectionEntry {
     handle: Box<dyn NseTcpConnection>,
+    // Approved endpoint identity + insertion metadata: audit trail for 005E
+    // qualification (written on insert, not read on the hot path).
+    #[allow(dead_code)]
     endpoint: NseResolvedEndpoint,
+    #[allow(dead_code)]
     created_at: u64,
 }
 
@@ -701,24 +705,15 @@ pub fn register_nmap_library_with_services(
         "is_admin",
         lua.create_function({
             let cap = capability_ctx.clone();
+            let svc = provider_services.clone();
             move |_lua, _: ()| {
-                #[cfg(unix)]
-                {
-                    use crate::wrappers;
-                    let decision = wrappers::check_process_exec(&cap, "id", "nmap.is_admin");
-                    if decision.is_denied() {
-                        return Ok(false);
-                    }
-                    Ok(std::process::Command::new("id")
-                        .arg("-u")
-                        .output()
-                        .map(|o| o.stdout == b"0\n")
-                        .unwrap_or(false))
-                }
-                #[cfg(not(unix))]
-                {
-                    Ok(false)
-                }
+                // Privilege probe via the process provider (platform
+                // semantics localized in the native provider; denied
+                // profiles fail closed to false, as before).
+                Ok(
+                    crate::providers::broker_is_privileged(&cap, &svc, "id", "nmap.is_admin")
+                        .unwrap_or(false),
+                )
             }
         })?,
     )?;
@@ -1136,24 +1131,12 @@ pub fn register_nmap_library_with_services(
         "is_privileged",
         lua.create_function({
             let cap = capability_ctx.clone();
+            let svc = provider_services.clone();
             move |_lua, _: ()| {
-                #[cfg(unix)]
-                {
-                    use crate::wrappers;
-                    let decision = wrappers::check_process_exec(&cap, "id", "nmap.is_privileged");
-                    if decision.is_denied() {
-                        return Ok(false);
-                    }
-                    Ok(std::process::Command::new("id")
-                        .arg("-u")
-                        .output()
-                        .map(|o| o.stdout == b"0\n")
-                        .unwrap_or(false))
-                }
-                #[cfg(not(unix))]
-                {
-                    Ok(false)
-                }
+                Ok(
+                    crate::providers::broker_is_privileged(&cap, &svc, "id", "nmap.is_privileged")
+                        .unwrap_or(false),
+                )
             }
         })?,
     )?;
@@ -1544,15 +1527,24 @@ pub fn register_nmap_library_with_services(
         "list_interfaces",
         lua.create_function({
             let cap = capability_ctx.clone();
+            let svc = provider_services.clone();
             move |_lua, ()| {
                 let interfaces = _lua.create_table()?;
 
-                #[cfg(unix)]
-                {
-                    use crate::wrappers;
-                    let decision = wrappers::check_process_exec(&cap, "ip", "nmap.list_interfaces");
-                    if decision.is_denied() {
-                        // Return empty/fallback list when process exec is denied
+                // Interface enumeration via the process provider (platform
+                // parsing localized in the native provider). Denied
+                // profiles receive the loopback fallback, as before.
+                // Shape note: one entry per interface with filled
+                // addresses (the legacy parser emitted one entry per
+                // matching output line, including bare address lines).
+                let records = match crate::providers::broker_network_interfaces(
+                    &cap,
+                    &svc,
+                    "ip",
+                    "nmap.list_interfaces",
+                ) {
+                    Ok(records) => records,
+                    Err(_) => {
                         let iface = _lua.create_table()?;
                         iface.set("device", "lo")?;
                         let addrs = _lua.create_table()?;
@@ -1561,49 +1553,17 @@ pub fn register_nmap_library_with_services(
                         interfaces.set(1, iface)?;
                         return Ok(interfaces);
                     }
-                    use std::process::Command;
-                    if let Ok(output) = Command::new("ip").arg("addr").output() {
-                        let output_str = String::from_utf8_lossy(&output.stdout);
-                        let mut idx = 1;
-                        for line in output_str.lines() {
-                            if line.starts_with(|c: char| c.is_ascii_digit())
-                                || line.starts_with("inet ")
-                            {
-                                let iface = _lua.create_table()?;
-                                let name = line.split(':').next().unwrap_or("unknown").trim();
-                                iface.set("device", name)?;
-                                iface.set("addresses", _lua.create_table()?)?;
-                                interfaces.set(idx, iface)?;
-                                idx += 1;
-                            }
-                        }
-                    }
-                }
+                };
 
-                #[cfg(windows)]
-                {
-                    use std::process::Command;
-                    if let Ok(output) = Command::new("ipconfig").output() {
-                        let output_str = String::from_utf8_lossy(&output.stdout);
-                        let mut current_iface = _lua.create_table()?;
-                        let mut idx = 1;
-                        for line in output_str.lines() {
-                            let trimmed = line.trim();
-                            if trimmed.ends_with(':') && !trimmed.contains("adapter") {
-                                if !current_iface.len().unwrap_or(0) == 0 {
-                                    interfaces.set(idx, current_iface)?;
-                                    idx += 1;
-                                    current_iface = _lua.create_table()?;
-                                }
-                                let name = trimmed.trim_end_matches(':').trim();
-                                current_iface.set("device", name)?;
-                                current_iface.set("addresses", _lua.create_table()?)?;
-                            }
-                        }
-                        if !current_iface.len().unwrap_or(0) == 0 {
-                            interfaces.set(idx, current_iface)?;
-                        }
+                for (idx, record) in records.iter().enumerate() {
+                    let iface = _lua.create_table()?;
+                    iface.set("device", record.name.clone())?;
+                    let addrs = _lua.create_table()?;
+                    for (j, addr) in record.addresses.iter().enumerate() {
+                        addrs.set(j + 1, addr.to_string())?;
                     }
+                    iface.set("addresses", addrs)?;
+                    interfaces.set(idx + 1, iface)?;
                 }
 
                 if interfaces.len().unwrap_or(0) == 0 {
@@ -1624,6 +1584,7 @@ pub fn register_nmap_library_with_services(
         "get_interface",
         lua.create_function({
             let cap = capability_ctx.clone();
+            let svc = provider_services.clone();
             move |_lua, (name,): (Option<String>,)| {
                 let iface = _lua.create_table()?;
 
@@ -1638,36 +1599,23 @@ pub fn register_nmap_library_with_services(
                     }
                     iface.set("device", iface_name.clone())?;
 
-                    #[cfg(unix)]
-                    {
-                        use crate::wrappers;
-                        let decision =
-                            wrappers::check_process_exec(&cap, "ip", "nmap.get_interface");
-                        if decision.is_denied() {
-                            iface.set("addresses", _lua.create_table()?)?;
-                            return Ok(iface);
-                        }
-                        use std::process::Command;
-                        let output = Command::new("ip")
-                            .arg("addr")
-                            .arg("show")
-                            .arg(&iface_name)
-                            .output();
-
-                        if let Ok(out) = output {
-                            let output_str = String::from_utf8_lossy(&out.stdout);
+                    match crate::providers::broker_network_interfaces(
+                        &cap,
+                        &svc,
+                        "ip",
+                        "nmap.get_interface",
+                    ) {
+                        Ok(records) => {
                             let addrs = _lua.create_table()?;
-                            let mut idx = 1;
-                            for line in output_str.lines() {
-                                if line.trim().starts_with("inet ") {
-                                    let parts: Vec<&str> = line.split_whitespace().collect();
-                                    if parts.len() >= 2 {
-                                        addrs.set(idx, parts[1].to_string())?;
-                                        idx += 1;
-                                    }
+                            if let Some(record) = records.iter().find(|r| r.name == iface_name) {
+                                for (idx, addr) in record.addresses.iter().enumerate() {
+                                    addrs.set(idx + 1, addr.to_string())?;
                                 }
                             }
                             iface.set("addresses", addrs)?;
+                        }
+                        Err(_) => {
+                            iface.set("addresses", _lua.create_table()?)?;
                         }
                     }
                 } else {

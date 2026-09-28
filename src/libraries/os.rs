@@ -191,114 +191,97 @@ pub fn register_os_library_with_services(
 
     let sandbox_for_remove = sandbox.clone();
     let cap_ctx_for_remove = capability_ctx.clone();
+    let svc_for_remove = services.clone();
     let remove_fn = lua.create_function(move |_lua, filename: String| {
-        // Capability context check (write)
-        {
-            use crate::wrappers;
-            let decision = wrappers::check_fs_write(
-                &cap_ctx_for_remove,
-                &filename,
-                "os.remove",
-            );
-            if decision.is_denied() {
-                OS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-                if sandbox_for_remove.log_violations {
-                    tracing::warn!(path = %filename, "Capability: blocked os.remove call: {}", decision.deny_reason().unwrap_or("denied"));
-                }
-                return Ok(false);
-            }
-        }
-        let file_path = if sandbox_for_remove.enabled {
-            match sandbox_for_remove.get_allowed_path(&filename) {
-                Some(canonical) => canonical,
-                None => {
+        // Capability + sandbox enforcement lives in the broker; the legacy
+        // sandbox violation wording is preserved for blocked paths.
+        match crate::providers::broker_fs_remove_file(
+            &cap_ctx_for_remove,
+            &svc_for_remove,
+            &filename,
+            "os.remove",
+        ) {
+            Ok(()) => Ok(true),
+            Err(e) => {
+                if e.contains("denied")
+                    || e.contains("not allowed")
+                    || e.contains("blocked")
+                    || e.contains("sandbox")
+                {
                     OS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
                     if sandbox_for_remove.log_violations {
-                        tracing::warn!(path = %filename, "Sandbox: blocked os.remove call");
+                        tracing::warn!(path = %filename, "Capability: blocked os.remove call: {}", e);
                     }
-                    return Ok(false);
                 }
+                Ok(false)
             }
-        } else {
-            std::path::PathBuf::from(&filename)
-        };
-        match std::fs::remove_file(&file_path) {
-            Ok(()) => Ok(true),
-            Err(_) => Ok(false),
         }
     })?;
     nse_os.set("remove", remove_fn)?;
 
     let sandbox_for_rename = sandbox.clone();
     let cap_ctx_for_rename = capability_ctx.clone();
+    let svc_for_rename = services.clone();
     let rename_fn = lua.create_function(move |_lua, (oldname, newname): (String, String)| {
-        // Capability context check (write)
-        {
-            use crate::wrappers;
-            let decision = wrappers::check_fs_write(
-                &cap_ctx_for_rename,
-                &oldname,
-                "os.rename",
-            );
-            if decision.is_denied() {
-                OS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-                if sandbox_for_rename.log_violations {
-                    tracing::warn!(old = %oldname, new = %newname, "Capability: blocked os.rename call: {}", decision.deny_reason().unwrap_or("denied"));
-                }
-                return Ok(false);
-            }
-        }
-        let (old_path, new_path) = if sandbox_for_rename.enabled {
-            let Some(canonical_old) = sandbox_for_rename.get_allowed_path(&oldname) else {
-                OS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-                if sandbox_for_rename.log_violations {
-                    tracing::warn!(old = %oldname, new = %newname, "Sandbox: blocked os.rename call");
-                }
-                return Ok(false);
-            };
-            let Some(canonical_new) = sandbox_for_rename.get_allowed_path(&newname) else {
-                OS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
-                if sandbox_for_rename.log_violations {
-                    tracing::warn!(old = %oldname, new = %newname, "Sandbox: blocked os.rename call");
-                }
-                return Ok(false);
-            };
-            (canonical_old, canonical_new)
-        } else {
-            (std::path::PathBuf::from(&oldname), std::path::PathBuf::from(&newname))
-        };
-        match std::fs::rename(&old_path, &new_path) {
+        match crate::providers::broker_fs_rename(
+            &cap_ctx_for_rename,
+            &svc_for_rename,
+            &oldname,
+            &newname,
+            "os.rename",
+        ) {
             Ok(()) => Ok(true),
-            Err(_) => Ok(false),
+            Err(e) => {
+                if e.contains("denied")
+                    || e.contains("not allowed")
+                    || e.contains("blocked")
+                    || e.contains("sandbox")
+                {
+                    OS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
+                    if sandbox_for_rename.log_violations {
+                        tracing::warn!(old = %oldname, new = %newname, "Capability: blocked os.rename call: {}", e);
+                    }
+                }
+                Ok(false)
+            }
         }
     })?;
     nse_os.set("rename", rename_fn)?;
 
-    let getcwd_fn = lua.create_function(|_lua, _: ()| match env::current_dir() {
-        Ok(p) => Ok(p.to_string_lossy().to_string()),
-        Err(_) => Ok("/".to_string()),
-    })?;
+    // Per-run working directory read (direct provider read, preserving the
+    // legacy check-free behavior exactly).
+    let svc_for_getcwd = services.clone();
+    let getcwd_fn =
+        lua.create_function(move |_lua, _: ()| match svc_for_getcwd.fs().current_dir() {
+            Ok(p) => Ok(p.to_string_lossy().to_string()),
+            Err(_) => Ok("/".to_string()),
+        })?;
     nse_os.set("getcwd", getcwd_fn)?;
 
     let sandbox_for_chdir = sandbox.clone();
+    let cap_ctx_for_chdir = capability_ctx.clone();
+    let svc_for_chdir = services.clone();
     let chdir_fn = lua.create_function(move |_lua, path: String| {
-        let dir_path = if sandbox_for_chdir.enabled {
-            match sandbox_for_chdir.get_allowed_path(&path) {
-                Some(canonical) => canonical,
-                None => {
+        // Brokered virtual-CWD change (read-kind gate, matching lfs.chdir;
+        // never mutates the process). Legacy os.chdir had no capability
+        // check; the broker adds one — documented hardening, Manual
+        // profiles unaffected.
+        match crate::providers::broker_fs_set_current_dir(
+            &cap_ctx_for_chdir,
+            &svc_for_chdir,
+            &path,
+            "os.chdir",
+        ) {
+            Ok(()) => Ok(0),
+            Err(e) => {
+                if e.contains("blocked by sandbox") {
                     OS_SANDBOX_VIOLATIONS.fetch_add(1, Ordering::SeqCst);
                     if sandbox_for_chdir.log_violations {
                         tracing::warn!(path = %path, "Sandbox: blocked os.chdir call");
                     }
-                    return Ok(-1);
                 }
+                Ok(-1)
             }
-        } else {
-            std::path::PathBuf::from(&path)
-        };
-        match env::set_current_dir(&dir_path) {
-            Ok(()) => Ok(0),
-            Err(_) => Ok(-1),
         }
     })?;
     nse_os.set("chdir", chdir_fn)?;

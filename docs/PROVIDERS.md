@@ -1,7 +1,8 @@
-# NSE Host Providers (M005A broker foundation + M005B network/DNS)
+# NSE Host Providers (M005A broker foundation + M005B network/DNS + M005D filesystem/process)
 
-Status: M005A implementation (clock, randomness, environment reads) plus
-M005B implementation (authority-preserving DNS/TCP/UDP).
+Status: M005A implementation (clock, randomness, environment reads), M005B
+implementation (authority-preserving DNS/TCP/UDP), and M005D implementation
+(filesystem/process providers, per-run virtual CWD, platform localization).
 
 ADR-0003 boundary: narrow per-domain provider traits, a per-run `NseHostServices`
 composition bundle, native defaults, additive `NseRunRequest::with_host_services`
@@ -203,3 +204,118 @@ The M005B section additionally enforces: zero direct network calls in
 `tryssl`); no connection creation/resolution in `nmap.rs` (`TcpStream` only
 in shim signatures/comments); no creation/resolution in `wrappers.rs`;
 `broker_` presence in every migrated network module.
+
+The M005D section additionally enforces: no process-global
+`set_current_dir` in `src/`; zero direct fs/process calls in `io.rs`/`lfs.rs`
+(`std::process::id` + the env `temp_dir` fallback in `io.tmpfile` are
+inventoried); no direct fs/CWD calls in `os.rs` (env `temp_dir` fallback +
+`hostname` lookup inventoried); no child-process spawns in `nmap.rs`;
+delegated wrapper fns call no `std::fs` directly (metadata/read-dir/
+symlink-metadata/process-exec shims keep native bodies for their leaking
+signatures); `broker_` presence in `io`/`lfs`/`os`/`nmap`.
+
+## M005D — filesystem/process providers and per-run isolation
+
+Broker sequence for every filesystem/process operation (plan §6):
+
+```text
+capability/sandbox path decision (on the resolved absolute path)
+-> cancellation/resource preflight
+-> provider operation on the sandbox-approved path (no second transformation)
+-> accounting/event result
+```
+
+Relative paths resolve against the per-run virtual CWD first; the sandbox
+canonicalizes (when enabled) and enforces containment; the provider
+operates on the approved path. Denial or cancellation never reaches the
+provider.
+
+### Domains in this slice
+
+| Domain | Trait | Native | Broker | Migrated paths |
+|---|---|---|---|---|
+| Filesystem | `NseFilesystemProvider` (17 path-scoped ops) + `NseFileHandle` (read/write/flush/seek/close) | `NativeFilesystemProvider`/`NativeFileHandle` (`std::fs`/`std::env`); per-instance virtual-CWD override, never process-global | `broker_fs_*` (read/write/stat/dir/remove/rename/mkdir/links/permissions/exists/open/CWD) + `broker_fs_resolve` (pure CWD join) | `io` (open/read/write/flush/seek/lines/tmpfile; per-registration handle registry), `lfs` (all fns; `chdir`/`currentdir` virtual), `os` remove/rename/getcwd/chdir, non-leaking filesystem wrappers |
+| Process | `NseProcessProvider` (run/spawn/is_privileged/network_interfaces) + `NseChildProcess` | `NativeProcessProvider`/`NativeChildProcess` (`std::process`; bounded run with kill-on-timeout; kill-on-drop) | `broker_process_run`, `broker_process_spawn`, `broker_is_privileged`, `broker_network_interfaces` | `io.popen` (platform shell localized in `shell_command`), `nmap` is_admin/is_privileged/list_interfaces/get_interface |
+
+DTOs: `NseFileMetadata` (len/type/readonly/timestamps/unix-mode), `NseDirEntry`,
+`NseOpenMode`, `NseProcessSpec`/`NseProcessResult`, `NseNetworkInterface`
+(reuses `NseIpAddress`). No `std::fs`/`std::process` types cross provider
+contracts; native-only interop (`from_std`, `from_std` handles) is marked as
+such. Deterministic story: `CountingFilesystemProvider`,
+`DenyFilesystemProvider`, `CountingProcessProvider`, `DenyProcessProvider`
+(zero-call denial proofs); I/O parity via isolated tempdir fixtures.
+
+### Virtual CWD semantics
+
+- `set_current_dir` records an override on the provider instance (validated
+  `is_dir`); `current_dir` returns the override or the live process CWD.
+- Concurrent runs hold independent providers: different virtual CWDs,
+  same fd numbers, no interference (contention test).
+- Fresh bundles have no override (run-local state resets with the run).
+- Intentional isolation fix: `lfs.chdir`/`os.chdir` no longer mutate the
+  process. Non-migrated protocol libraries still see the process CWD for
+  relative paths (documented boundary; they are deferred).
+- `os.chdir` newly carries a read-kind capability gate (matching
+  `lfs.chdir`); `os.getcwd`/`lfs.currentdir` stay check-free (legacy-exact).
+
+### Platform support matrix
+
+| Area | Unix | Windows | Other |
+|---|---|---|---|
+| Core fs ops | native | native | native |
+| Symlinks | `symlink` | `symlink_file` (files; dir targets unsupported, explicit error) | explicit unsupported error |
+| Permission bits | `set_unix_mode` | unsupported (use `set_readonly`; wrapper maps write-bits) | unsupported |
+| Privilege probe | `id -u == 0` | always false | always false |
+| Interface enumeration | `ip addr` parse | `ipconfig` parse | loopback fallback |
+| Process run/spawn | `Command` + timeout kill | `Command` + timeout kill | spawn unsupported error |
+| `io.popen` shell | `sh -c` | `cmd /C` | unsupported error |
+| CI | full | `check` (no-default, nse, nse+sandbox) | — |
+
+Unix/Windows differences live in `providers.rs` native fns (`symlink_native`,
+`set_unix_mode_native`, `is_privileged_native`,
+`network_interfaces_native`, `shell_command`); compatibility libraries
+contain no `cfg(unix)`/`cfg(windows)` branches for fs/process anymore.
+
+### Semantic notes (behavior deltas, all intentional)
+
+- `io` handles are per-registration: fd numbers restart at 100 per run;
+  `reset_for_run` is a documented no-op for handles (kept for API compat);
+  live-handle metrics continue via a counter (no global handle storage).
+- `io.open` parent auto-creation is now capability-gated (was unchecked).
+- `io` handle read/write carry cancellation/limit preflight + byte
+  accounting (open-time policy only, handles are capabilities).
+- `io.tmpfile` names gain a randomness suffix (`eggsec_tmp_{pid}_{rand}`).
+- `io.popen` children are tracked per-registration and terminated at run
+  end (previously leaked); spawn itself is unbounded, the run is the bound.
+- `nmap.list_interfaces` emits one entry per interface with filled
+  addresses (legacy emitted one entry per matching output line).
+- Failed filesystem ops do not bump counters (success-only accounting,
+  matching the 005B network semantics).
+- Loader reads (script/module search + `datafiles`) stay direct: policy is
+  enforced at resolution with canonical containment, and broker events
+  there would double-count into reports. Inventoried, not hidden.
+
+### Remaining direct host-operation inventory (explicit, not hidden)
+
+- Loader/lookup reads: `executor_core.rs` script search reads,
+  `datafiles.rs` authorized reads (policy enforced pre-read on the same
+  path).
+- Wrapper shims with leaking signatures: `nse_fs_metadata`,
+  `nse_fs_read_dir`, `nse_fs_symlink_metadata` (`std::fs` types),
+  `nse_process_exec` (`std::process::Output`) — capability-gated native
+  bodies, documented for 005E disposition.
+- `os.hostname` (`hostname` crate) and `os.tmpdir`/`io.tmpfile` env
+  `temp_dir` fallbacks: ungated host reads preserved from legacy.
+- `SandboxConfig::resolve_host`/`is_host_allowed`: no production callers
+  in migrated paths (superseded by broker resolution + selection).
+- `nmap` registry metadata + `add/get_connection` shims: unchanged from
+  005B inventory.
+- Protocol-specific file/process helpers (not shared/core): deferred per
+  plan scope; covered by 005E source audit.
+- `std::process::id` (pid labels) and `NSE_ENV` thread-local setenv state:
+  not host mutations/reads of concern; retained.
+
+Regeneration: `rg -n -e 'std::fs::' -e 'std::process::' -e 'std::env::' -e
+'std::os::' src/libraries/io.rs src/libraries/lfs.rs src/libraries/os.rs
+src/libraries/nmap.rs src/wrappers.rs` (only allow-listed residuals may
+remain; guards enforce the rest).
