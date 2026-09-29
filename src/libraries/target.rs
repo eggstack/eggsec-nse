@@ -1,10 +1,26 @@
 //! NSE target library wrapper
 //!
 //! Utility functions for adding new discovered targets to Nmap scan queue.
+//!
+//! M007B corrective: `target.resolve` previously called
+//! `std::net::ToSocketAddrs::to_socket_addrs` directly. That made the
+//! library a direct host-network effect site (a DNS query leaving the
+//! process) while the effect manifest classified it `Pure`, so the
+//! name was exposed to `AgentSafe`/`CiSafe` with no capability check,
+//! no cancellation, and no accounting.
+//!
+//! Resolution now goes through [`broker_dns_lookup`] (M005B), which
+//! applies the `DnsResolution` capability gate, cancellation, and
+//! resource accounting before the injected [`NseDnsProvider`] is
+//! touched. The literal-IP fast path is unchanged and performs no
+//! provider call.
 
 use mlua::{Lua, Result as LuaResult};
-use std::net::ToSocketAddrs;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
+
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_dns_lookup, NseDnsRecordType, NseHostServices};
 
 static TARGET_QUEUE: std::sync::LazyLock<Arc<Mutex<Vec<String>>>> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(Vec::new())));
@@ -17,9 +33,36 @@ pub fn reset_for_run() {
     }
 }
 
+/// Compatibility registration with native services and a manual-permissive
+/// capability context.
+///
+/// Retained so the pre-M007B public signature keeps working for embedders
+/// that only have a [`Lua`] handle. `ExecutorCore` uses
+/// [`register_target_library_with_services`] so the runtime profile,
+/// capability context, and injected providers apply.
 pub fn register_target_library(lua: &Lua) -> LuaResult<()> {
+    let profile = crate::profile::ResolvedNseExecutionProfile::manual_permissive(None);
+    let ctx = NseCapabilityContext::from_profile(
+        &profile,
+        Arc::new(crate::limits::NseResourceCounters::new()),
+    );
+    register_target_library_with_services(lua, &ctx, &NseHostServices::native())
+}
+
+/// Provider-backed registration.
+///
+/// `services.dns()` backs `target.resolve`; the DNS capability gate,
+/// cancellation, and accounting are applied by the broker. Every other
+/// `target` entry is in-memory bookkeeping with no host effect.
+pub fn register_target_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let target = lua.create_table()?;
+    let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
 
     target.set(
         "add",
@@ -104,15 +147,18 @@ pub fn register_target_library(lua: &Lua) -> LuaResult<()> {
 
     target.set(
         "resolve",
-        lua.create_function(|_lua, hostname: String| {
-            if hostname.parse::<std::net::IpAddr>().is_ok() {
+        lua.create_function(move |_lua, hostname: String| {
+            if hostname.parse::<IpAddr>().is_ok() {
                 return Ok(hostname);
             }
 
-            let host_port = format!("{}:0", hostname);
-            if let Ok(mut iter) = host_port.to_socket_addrs() {
-                if let Some(addr) = iter.next() {
-                    return Ok(addr.ip().to_string());
+            for record in [NseDnsRecordType::A, NseDnsRecordType::Aaaa] {
+                if let Ok(answer) =
+                    broker_dns_lookup(&cap_ctx, &svc, &hostname, record, "target.resolve")
+                {
+                    if let Some(first) = answer.addresses().first() {
+                        return Ok(first.to_string());
+                    }
                 }
             }
 

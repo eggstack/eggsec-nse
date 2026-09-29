@@ -149,6 +149,39 @@ fn assert_library_blocked_by_manifest(
     );
 }
 
+/// M007B: a promoted library is *available* under automated profiles, so
+/// the automated-profile denial now has to come from the broker's
+/// capability gate rather than from the `require()` gate. This asserts both
+/// halves of that contract: the global is present (so the promotion did not
+/// silently regress) and the network effect is denied with a recorded
+/// capability event, so the caller can pair it with a zero-server-hits
+/// assertion.
+fn assert_promoted_library_denied_at_capability_gate(
+    report: &eggsec_nse::NseRunReport,
+    library: &str,
+    profile_label: &str,
+) {
+    let loaded = report
+        .libraries
+        .iter()
+        .any(|m| m.name == library && m.loaded);
+    assert!(
+        loaded,
+        "{} library '{}' must be available after the M007B promotion: modules={:?}",
+        profile_label, library, report.libraries,
+    );
+
+    let denied_network = report
+        .capability_events
+        .iter()
+        .any(|e| !e.allowed && e.kind.starts_with("network"));
+    assert!(
+        denied_network,
+        "{} library '{}' must record a denied network capability event: events={:?}, output={}",
+        profile_label, library, report.capability_events, report.output.content,
+    );
+}
+
 fn run_local_fixture(
     script_path: &str,
     target_ip: &str,
@@ -1490,7 +1523,7 @@ fn local_sslcert_get_certificate_agent_safe_denied() {
         Some("https"),
         &profile,
     );
-    assert_library_blocked_by_manifest(&report, "sslcert", "AgentSafe");
+    assert_promoted_library_denied_at_capability_gate(&report, "sslcert", "AgentSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -1512,7 +1545,7 @@ fn local_sslcert_get_chain_certs_agent_safe_denied() {
         Some("https"),
         &profile,
     );
-    assert_library_blocked_by_manifest(&report, "sslcert", "AgentSafe");
+    assert_promoted_library_denied_at_capability_gate(&report, "sslcert", "AgentSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -1534,7 +1567,7 @@ fn local_sslcert_get_certificate_ci_safe_denied() {
         Some("https"),
         &profile,
     );
-    assert_library_blocked_by_manifest(&report, "sslcert", "CiSafe");
+    assert_promoted_library_denied_at_capability_gate(&report, "sslcert", "CiSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -1556,7 +1589,7 @@ fn local_sslcert_get_chain_certs_ci_safe_denied() {
         Some("https"),
         &profile,
     );
-    assert_library_blocked_by_manifest(&report, "sslcert", "CiSafe");
+    assert_promoted_library_denied_at_capability_gate(&report, "sslcert", "CiSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -1721,7 +1754,7 @@ fn local_ftp_connect_agent_safe_denied() {
         Some("ftp"),
         &profile,
     );
-    assert_library_blocked_by_manifest(&report, "ftp", "AgentSafe");
+    assert_promoted_library_denied_at_capability_gate(&report, "ftp", "AgentSafe");
     assert_eq!(server.hits(), 0, "AgentSafe ftp must not reach the server");
 }
 
@@ -1739,7 +1772,7 @@ fn local_ftp_connect_ci_safe_denied() {
         Some("ftp"),
         &profile,
     );
-    assert_library_blocked_by_manifest(&report, "ftp", "CiSafe");
+    assert_promoted_library_denied_at_capability_gate(&report, "ftp", "CiSafe");
     assert_eq!(server.hits(), 0, "CiSafe ftp must not reach the server");
 }
 
@@ -1761,7 +1794,7 @@ fn local_upnp_get_external_ip_agent_safe_denied() {
         Some("upnp"),
         &profile,
     );
-    assert_library_blocked_by_manifest(&report, "upnp", "AgentSafe");
+    assert_promoted_library_denied_at_capability_gate(&report, "upnp", "AgentSafe");
     assert_eq!(server.hits(), 0, "AgentSafe upnp must not reach the server");
 }
 
@@ -1779,7 +1812,7 @@ fn local_upnp_get_external_ip_ci_safe_denied() {
         Some("upnp"),
         &profile,
     );
-    assert_library_blocked_by_manifest(&report, "upnp", "CiSafe");
+    assert_promoted_library_denied_at_capability_gate(&report, "upnp", "CiSafe");
     assert_eq!(server.hits(), 0, "CiSafe upnp must not reach the server");
 }
 
@@ -2022,7 +2055,7 @@ fn local_ftp_list_pasv_agent_safe_denied() {
         &profile,
     );
 
-    assert_library_blocked_by_manifest(&report, "ftp", "AgentSafe");
+    assert_promoted_library_denied_at_capability_gate(&report, "ftp", "AgentSafe");
 
     assert_eq!(
         server.control_hits(),
@@ -2051,7 +2084,7 @@ fn local_ftp_list_pasv_ci_safe_denied() {
         &profile,
     );
 
-    assert_library_blocked_by_manifest(&report, "ftp", "CiSafe");
+    assert_promoted_library_denied_at_capability_gate(&report, "ftp", "CiSafe");
 
     assert_eq!(
         server.control_hits(),

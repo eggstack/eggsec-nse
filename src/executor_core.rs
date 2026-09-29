@@ -1133,7 +1133,11 @@ impl ExecutorCore {
             &self.capability_context,
             &self.host_services,
         )?;
-        crate::libraries::radius::register_radius_library(&self.lua)?;
+        crate::libraries::radius::register_radius_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         self.gate_then_register("dhcp", |ctx| {
             crate::libraries::dhcp::register_dhcp_library(&ctx.lua, &ctx.capability_context)
         })?;
@@ -1237,7 +1241,11 @@ impl ExecutorCore {
             &self.host_services,
         )?;
         crate::libraries::unittest::register_unittest_library(&self.lua)?;
-        crate::libraries::target::register_target_library(&self.lua)?;
+        crate::libraries::target::register_target_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::strbuf::register_strbuf_library(&self.lua)?;
         crate::libraries::tab::register_tab_library(&self.lua)?;
         crate::libraries::stringaux::register_stringaux_library(&self.lua)?;

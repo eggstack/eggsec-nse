@@ -227,37 +227,91 @@ for f in src/libraries/http.rs src/libraries/httppipeline.rs src/libraries/comm.
   fi
 done
 
-# M005E provider-coverage qualification: the specialized direct-socket
-# inventory is pinned. Protocol libraries intentionally retain direct
-# socket I/O (rewriting them is out of scope); the guard enforces that the
-# set cannot silently expand and that advisory-gated files keep their
-# capability gates. Full classification lives in docs/PROVIDERS.md (M005E
-# audit section); the two lists below are the machine-readable inventory.
+# ---------------------------------------------------------------------------
+# M007B specialized direct-I/O residual + migration classification.
+# ---------------------------------------------------------------------------
 #
-# - nse-specialized-advisory.txt: direct socket use + capability consulted
-#   at Lua entries (no provider injection/accounting; mixed files noted
-#   in docs).
-# - nse-specialized-ungated.txt: direct socket use with no capability
-#   consultation (documented residual; empirically proven; follow-up work
-#   recommended in the 005E closure).
-m005e_production_socket_files() {
-    for f in $(rg -l --no-heading -e 'TcpStream::connect' -e 'UdpSocket::bind' -e 'AsyncTcpStream::connect' src/ | sort); do
-        case "$f" in src/providers.rs) continue ;; esac
-        if grep -q "mod tests" "$f"; then
-            line=$(grep -n "mod tests" "$f" | head -n 1 | cut -d: -f1)
-            if head -n $((line - 1)) "$f" | rg -q -e 'TcpStream::connect' -e 'UdpSocket::bind' -e 'AsyncTcpStream::connect'; then
-                echo "$f"
-            fi
-        else
+# M005E pinned 97 files (72 ungated + 25 advisory) that performed direct host
+# socket I/O. M007B migrated the broker-compatible cohort, so the pins had to
+# be regenerated from the new source truth. The M005E scan was also too
+# coarse to express the migration:
+#
+#   1. `TcpStream::connect` substring-matches `BrokeredTcpStream::connect`,
+#      so every broker-migrated file still looked like a direct residual
+#      (this is what made hosted CI red on `699d374`);
+#   2. direct DNS resolution (`to_socket_addrs`, `ToSocketAddrs`,
+#      `lookup_host`, `hickory`, `tokio::net`) was never covered;
+#   3. provider/broker infrastructure (`src/providers.rs`,
+#      `src/brokered_stream.rs`) is not a specialized protocol residual.
+#
+# The corrected scan therefore:
+#
+# - restricts the *specialized zone* to `src/libraries/**` and
+#   `src/public_api/api.rs`;
+# - anchors each pattern behind a non-identifier boundary so brokered
+#   abstractions (`BrokeredTcpStream::connect`, `broker_udp_connect`, …)
+#   never match;
+# - scans production code only (above the first `mod tests`) and drops
+#   comment-only lines, so prose references are not residual evidence;
+# - treats direct DNS resolution as a network effect.
+#
+# Residual inventory (split by whether the file still consults capability):
+#
+# - nse-specialized-ungated.txt: direct effect, no capability consultation.
+# - nse-specialized-advisory.txt: direct effect, capability consultation
+#   present (still outside provider cancellation/accounting/authority).
+#
+# scripts/nse-migration-classes.txt carries exactly one final
+# effect-shape class per baseline M005E entry, and every current residual
+# file must have a class. A `BrokerCompatible*` class may never sit on a
+# file that still has a direct effect: that is the M007B closure invariant.
+
+# Production-code view of a file: everything above the first `mod tests`.
+nse_production_code() {
+    if grep -q "mod tests" "$1"; then
+        line=$(grep -n "mod tests" "$1" | head -n 1 | cut -d: -f1)
+        head -n $((line - 1)) "$1"
+    else
+        cat "$1"
+    fi
+}
+
+# Specialized direct host network-effect patterns. Every pattern is anchored
+# behind `(^|[^A-Za-z0-9_])` so an identifier prefix (Brokered…, broker_…)
+# cannot satisfy it. `rg -v '^[[:space:]]*(//|/\*|\*)'` drops comment-only
+# lines. The final stage uses `-c` (count) rather than `-q` so it always
+# drains its input: an early-exiting `rg -q` would SIGPIPE the upstream
+# stages and, under `set -o pipefail`, silently report "no match".
+nse_specialized_effect_hits() {
+    nse_production_code "$1" \
+        | rg -v -e '^[[:space:]]*(//|/\*|\*)' \
+        | rg -c -e '(^|[^A-Za-z0-9_])TcpStream::(connect|connect_timeout)' \
+               -e '(^|[^A-Za-z0-9_])UdpSocket::bind' \
+               -e '(^|[^A-Za-z0-9_])TcpListener::bind' \
+               -e '(^|[^A-Za-z0-9_])AsyncTcpStream::connect' \
+               -e '(^|[^A-Za-z0-9_])AsyncUdpSocket::bind' \
+               -e '(^|[^A-Za-z0-9_])to_socket_addrs' \
+               -e '(^|[^A-Za-z0-9_])ToSocketAddrs' \
+               -e '(^|[^A-Za-z0-9_])lookup_host' \
+               -e '(^|[^A-Za-z0-9_])hickory' \
+               -e '(^|[^A-Za-z0-9_])tokio::net' || true
+}
+
+nse_specialized_residual() {
+    for f in $(rg -l --no-heading -e 'TcpStream::' -e 'UdpSocket::' -e 'TcpListener::' \
+                      -e 'AsyncTcpStream::' -e 'AsyncUdpSocket::' -e 'to_socket_addrs' \
+                      -e 'ToSocketAddrs' -e 'lookup_host' -e 'hickory' -e 'tokio::net' \
+                      src/libraries src/public_api/api.rs | sort); do
+        if [ -n "$(nse_specialized_effect_hits "$f")" ]; then
             echo "$f"
         fi
     done
 }
 
 expected_socket_files=$(sort scripts/nse-specialized-advisory.txt scripts/nse-specialized-ungated.txt | uniq)
-actual_socket_files=$(m005e_production_socket_files)
+actual_socket_files=$(nse_specialized_residual)
 if [ "$actual_socket_files" != "$expected_socket_files" ]; then
-    echo "M005E violation: direct-socket file set changed (see docs/PROVIDERS.md M005E audit)." >&2
+    echo "M007B violation: specialized direct-I/O residual changed (see docs/PROVIDERS.md M007B audit)." >&2
     echo "--- expected (pinned) ---" >&2
     echo "$expected_socket_files" >&2
     echo "--- actual (source) ---" >&2
@@ -269,7 +323,7 @@ fi
 # gate removal; per-entry coverage caveats are documented, not enforced).
 while read -r f; do
     if ! rg -q "capability_ctx|cap_ctx|check_capability|wrappers::|maybe_denied" "$f"; then
-        echo "M005E violation: advisory file $f lost its capability gate" >&2
+        echo "M007B violation: advisory file $f lost its capability gate" >&2
         exit 1
     fi
 done < scripts/nse-specialized-advisory.txt
@@ -293,19 +347,12 @@ fi
 # zone. Production code (above `mod tests`) outside providers.rs must not
 # reference os::unix/os::windows/nix/libc; cfg-gated fallbacks that carry
 # no os:: path (executor_core script roots, wrappers permission shim,
-# nsedebug estimates) are unaffected.
-m005e_production_code() {
-    if grep -q "mod tests" "$1"; then
-        line=$(grep -n "mod tests" "$1" | head -n 1 | cut -d: -f1)
-        head -n $((line - 1)) "$1"
-    else
-        cat "$1"
-    fi
-}
+# nsedebug estimates) are unaffected. (Production-code view is
+# `nse_production_code`, defined in the M007B section above.)
 platform_violation=""
 for f in $(rg -l --no-heading -e 'os::unix' -e 'os::windows' -e 'nix::' -e 'libc::' src/ | sort); do
     case "$f" in src/providers.rs) continue ;; esac
-    if m005e_production_code "$f" | rg -q -e 'os::unix' -e 'os::windows' -e 'nix::' -e 'libc::'; then
+    if nse_production_code "$f" | rg -q -e 'os::unix' -e 'os::windows' -e 'nix::' -e 'libc::'; then
         platform_violation="$platform_violation $f"
     fi
 done
@@ -341,17 +388,170 @@ if ! rg -q 'scrub_ineligible_globals\(\)' src/executor_core.rs; then
     exit 1
 fi
 
-# Representative M005E residuals must stay manual-only in the manifest.
-for lib in pop3 smb ftp ssh sslcert tftp sip; do
+# Representative M007B residuals must stay manual-only in the manifest:
+# unconnected/broadcast UDP (`tftp`), native socket handoff (`ssh`), and
+# raw/unconnected UDP discovery (`snmp`). These are the shapes the current
+# provider contract cannot represent, so promotion would be a false
+# authority claim.
+for lib in tftp ssh snmp eigrp packet; do
     if ! rg -q -e "name: \"$lib\"" src/effect_manifest.rs; then
-        echo "M007A violation: representative library '$lib' missing from manifest" >&2
+        echo "M007B violation: representative residual library '$lib' missing from manifest" >&2
+        exit 1
+    fi
+    if ! grep -A4 -F "name: \"$lib\"" src/effect_manifest.rs | rg -q -e 'Eligibility::ManualOnly'; then
+        echo "M007B violation: residual library '$lib' promoted to automated-safe without a provider contract" >&2
         exit 1
     fi
 done
-if grep -A4 -F 'name: "pop3"' src/effect_manifest.rs | rg -q -e 'Eligibility::(Pure|ProviderBacked)'; then
-    echo "M007A violation: pop3 promoted out of manual-only without provider-backed evidence" >&2
+
+# Migration classification (M007B):
+#
+# 1. every baseline M005E entry keeps exactly one final class, and every
+#    class path must be a real source file;
+# 2. every current residual file must have a class;
+# 3. a `BrokerCompatible*` class may never sit on a file that still has a
+#    direct effect (that is the M007B closure invariant);
+# 4. a residual file must carry a manual-only class, never a
+#    broker-compatible one.
+m007b_class_field() {
+    # $1 = path, $2 = 1..3 (path, class, rationale start)
+    awk -v p="$1" -v f="$2" '
+        /^[[:space:]]*#/ { next }
+        NF == 0 { next }
+        { path[NR] = $1 }
+        END { for (i = 1; i <= NR; i++) if (path[i] == p) { print i; return } }
+    ' scripts/nse-migration-classes.txt
+}
+
+# 3/4: class-vs-residual agreement.
+while read -r f; do
+    [ -n "$f" ] || continue
+    cls=$(awk -v p="$f" '
+        /^[[:space:]]*#/ { next }
+        NF == 0 { next }
+        $1 == p { print $2; exit }
+    ' scripts/nse-migration-classes.txt)
+    if [ -z "$cls" ]; then
+        echo "M007B violation: residual $f has no migration class in scripts/nse-migration-classes.txt" >&2
+        exit 1
+    fi
+    case "$cls" in
+        BrokerCompatible*)
+            echo "M007B violation: $f is classified $cls but still has a direct host network effect" >&2
+            exit 1
+            ;;
+    esac
+done < <(cat scripts/nse-specialized-advisory.txt scripts/nse-specialized-ungated.txt)
+
+# 1/2: classification file integrity + coverage of the current residual.
+# A classified line is `<path> <CLASS> <rationale...>`; the class must be
+# one of the recorded effect shapes and the rationale must be present.
+known_class() {
+    case "$1" in
+        BrokerCompatibleTcp | BrokerCompatibleUdpConnected | AsyncDirectIo | \
+        UnconnectedDatagram | NativeHandleEscape | RawPacketOrInterface | \
+        PublicCompatibilityApi | ProviderBackedDns) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+duplicate_classes=$(rg -o -e '^src/[^ ]+' scripts/nse-migration-classes.txt | sort | uniq -d)
+if [ -n "$duplicate_classes" ]; then
+    echo "M007B violation: duplicate migration classification for: $duplicate_classes" >&2
     exit 1
 fi
+for p in $(rg -o -e '^src/[^ ]+' scripts/nse-migration-classes.txt | sort -u); do
+    if [ ! -f "$p" ]; then
+        echo "M007B violation: migration class references missing source file: $p" >&2
+        exit 1
+    fi
+    line=$(awk -v p="$p" '
+        /^[[:space:]]*#/ { next }
+        NF == 0 { next }
+        $1 == p { $1 = ""; $2 = ""; sub(/^  +/, ""); print; exit }
+    ' scripts/nse-migration-classes.txt)
+    if [ -z "$line" ]; then
+        echo "M007B violation: $p has no recognized migration class with rationale" >&2
+        exit 1
+    fi
+    cls=$(awk -v p="$p" '
+        /^[[:space:]]*#/ { next }
+        NF == 0 { next }
+        $1 == p { print $2; exit }
+    ' scripts/nse-migration-classes.txt)
+    if ! known_class "$cls"; then
+        echo "M007B violation: $p has unknown migration class '$cls'" >&2
+        exit 1
+    fi
+done
+
+# Provider/broker infrastructure must never be counted as a specialized
+# protocol residual (ADR-0003: the provider zone owns native mechanics).
+for infra in src/providers.rs src/brokered_stream.rs; do
+    if rg -q -F "$infra" scripts/nse-specialized-advisory.txt scripts/nse-specialized-ungated.txt; then
+        echo "M007B violation: provider/broker infrastructure $infra entered the specialized residual pins" >&2
+        exit 1
+    fi
+done
+
+# Reverse manifest -> registration consistency (M007A finding closed in
+# M007B). Every `src/libraries/*.rs` module that defines a
+# `pub fn register_*` must either be called from
+# `ExecutorCore::register_libraries()` or be listed with a reviewed
+# rationale in scripts/nse-registration-compat-entries.txt. Stale or
+# newly-orphaned modules fail CI.
+compat_paths=$(rg -o -e '^src/[^ ]+' scripts/nse-registration-compat-entries.txt | sort -u)
+for f in $(rg -l --no-heading -e '^pub fn register_[a-z0-9_]+' src/libraries | sort); do
+    mod=$(basename "$f" .rs)
+    if rg -q -e "crate::libraries::${mod}::register_[a-z0-9_]+\(" src/executor_core.rs; then
+        continue
+    fi
+    if ! printf '%s\n' "$compat_paths" | rg -q -x -F "$f"; then
+        echo "M007B violation: library module $f defines register_* but is never registered and is not listed in scripts/nse-registration-compat-entries.txt" >&2
+        exit 1
+    fi
+done
+
+# The compatibility allowlist must not rot: every listed path must exist
+# and must still be genuinely unregistered.
+for p in $compat_paths; do
+    if [ ! -f "$p" ]; then
+        echo "M007B violation: registration compat entry references missing file: $p" >&2
+        exit 1
+    fi
+    mod=$(basename "$p" .rs)
+    if rg -q -e "crate::libraries::${mod}::register_[a-z0-9_]+\(" src/executor_core.rs; then
+        echo "M007B violation: registration compat entry $p is now registered; remove it from the allowlist" >&2
+        exit 1
+    fi
+done
+
+# Direct-HTTP residual (the reqwest inventory is the pin set) must stay
+# manual-only for every library module that appears in the effect
+# manifest, so a native-HTTP site can never be promoted to
+# automated-safe. Helper modules with no manifest entry (shared client
+# builders) are exempt by construction.
+manifest_name_for_module() {
+    # POSIX-awk only: string-splitting on the quote character, no regex
+    # escapes (mawk rejects `\"` inside a regex literal).
+    awk -v m="$1" '
+        BEGIN { q = sprintf("%c", 34) }
+        index($0, "name: " q) > 0 {
+            rest = substr($0, index($0, q) + 1)
+            name = substr(rest, 1, index(rest, q) - 1)
+        }
+        index($0, "source_module: " q m q) > 0 { print name; exit }
+    ' src/effect_manifest.rs
+}
+for f in $(rg -l --no-heading -e 'reqwest' src/libraries | sort); do
+    mod=$(echo "$f" | sed -e 's|^src/libraries/||' -e 's|\.rs$||')
+    name=$(manifest_name_for_module "libraries/$mod")
+    [ -n "$name" ] || continue
+    if ! grep -A4 -F "name: \"$name\"" src/effect_manifest.rs | rg -q -e 'Eligibility::ManualOnly'; then
+        echo "M007B violation: direct-HTTP module $f (manifest name '$name') is not ManualOnly" >&2
+        exit 1
+    fi
+done
 
 # Native HTTP must never default to authority-bound.
 if ! rg -q 'http_authority_bound: false' src/providers.rs; then

@@ -1,0 +1,36 @@
+# Registration compatibility allowlist (M007B corrective, plan §9).
+#
+# Every `src/libraries/*.rs` module that defines a `pub fn register_*` must
+# either be called from `ExecutorCore::register_libraries()` or appear here
+# with a reviewed rationale. `scripts/check-boundaries.sh` enforces both
+# directions: a newly orphaned module fails CI, and a listed module that has
+# since been wired up fails CI until the entry is removed.
+#
+# M007A recorded a low-severity gap: registration -> manifest coverage was
+# mechanically checked, but manifest -> registration had 12 extra
+# compatibility entries. Those 12 are the entries below with
+# `manifest=<lua-name>`; the remaining 4 modules have no manifest entry at
+# all because they are unreachable and therefore not part of the
+# automated-eligibility surface.
+#
+# Format: `<module-path> manifest=<lua-name|-> <rationale>`
+
+# --- manifest compatibility entries (classified but not registered) ---
+src/libraries/finger.rs manifest=finger Nmap NSE compat surface; registration predates the services-aware refactor and was never wired into register_libraries(). Effect classification retained so a future registration cannot bypass the gate.
+src/libraries/kafka.rs manifest=kafka Same as finger: classified ManualOnlyDirectIo, reachable only if explicitly registered. Not part of the runtime Lua environment today.
+src/libraries/match_lib.rs manifest=match_lib Classified Pure; the registered Lua global `match` is provided by matchs.rs, so match_lib is a compatibility shim only.
+src/libraries/mqtt.rs manifest=mqtt Classified ManualOnlyDirectIo; broker-migrated in M007B but not wired into register_libraries(). Promotion eligibility is retained for a future controlled registration.
+src/libraries/nse_string.rs manifest=nse_string Pure string helpers; the stringaux library is the registered surface.
+src/libraries/nse_table.rs manifest=nse_table Pure table helpers; the tableaux library is the registered surface.
+src/libraries/packet.rs manifest=packet Classified ManualOnlyDirectIo (RawPacketOrInterface). Raw packet facilities have no provider contract, so the module is intentionally left unregistered rather than exposed.
+src/libraries/sftp.rs manifest=sftp Classified ManualOnlyDirectIo; broker-migrated in M007B but not wired into register_libraries().
+src/libraries/stun.rs manifest=stun Classified ManualOnlyDirectIo; unconnected/broadcast UDP discovery has no provider contract, so the module is intentionally left unregistered.
+src/libraries/telnet.rs manifest=telnet Classified ManualOnlyDirectIo; broker-migrated in M007B but not wired into register_libraries().
+src/libraries/websocket.rs manifest=websocket Classified ManualOnlyDirectIo; broker-migrated in M007B but not wired into register_libraries().
+src/libraries/whois.rs manifest=whois Classified ManualOnlyDirectIo; broker-migrated in M007B but not wired into register_libraries().
+
+# --- unreachable modules with no manifest entry ---
+src/libraries/dnsbl.rs manifest=- DNSBL lookups were direct DNS effects (ToSocketAddrs + a process-global hickory resolver). M007B corrective routed them through broker_dns_lookup and added the services-aware entry point; the module is still not registered, so it is outside the automated-eligibility surface.
+src/libraries/elasticsearch.rs manifest=- Uses reqwest directly (native HTTP, not authority-bound). Never registered, so it is unreachable from any Lua profile; migrating it is a separate HTTP-cohort decision.
+src/libraries/nsedebug.rs manifest=- Debug/estimate helper. No host-network effect; never registered, so it is outside the automated-eligibility surface.
+src/libraries/strict.rs manifest=- Strict-mode assertion helper. No host-network effect; never registered, so it is outside the automated-eligibility surface.

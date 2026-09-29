@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """M007B mechanical migration for stereotyped blocking-TCP libraries.
 
+SPENT ONE-SHOT TOOL, retained as the record of how the broker-compatible
+cohort was migrated. Every file it could handle is already migrated, so
+running it against current source is a no-op that exits non-zero (no
+connect block matches). The migration *outcome* is now guarded, not by
+this script, but by `scripts/check-boundaries.sh` (M007B section) and
+`scripts/nse-migration-classes.txt`. New work that needs a brokered
+stream should follow `src/brokered_stream.rs` directly, not this script.
+
 Rewrites, per file:
 - imports (TcpStream/Read/Write -> broker imports)
 - register_X_library(lua) -> register_X_library_with_services(lua, ctx, services)

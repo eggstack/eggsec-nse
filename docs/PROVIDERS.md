@@ -150,24 +150,29 @@ rewriting them is explicitly out of scope for 005B:
 - Protocol-specific libraries with direct `connect_timeout`/
   `TcpStream::connect`/`UdpSocket`/`tokio::net` calls. The 005B text
   claimed these "fail closed on DenyAll/CI-safe (capability check
-  first)"; the M005E source audit falsified that blanket claim. The
-  corrected split (machine-readable pin in
-  `scripts/nse-specialized-{advisory,ungated}.txt`, guard-enforced):
-  - **advisory-gated (25 files)**: Lua entries consult capability
-    before direct I/O (`brute`, `dhcp`, `dhcp6`, `ftp`, `imap`, `ldap`,
-    `libssh2`, `mongodb`, `mssql`, `mysql`, `ntp`, `openssl`,
-    `postgres`, `rdp`, `redis`, `smb`, `smb2`, `smtp`, `snmp`, `ssh`,
-    `sslcert`, `tls`, `upnp`, `vnc`, `xdmcp`). Denials are enforced at entry; provider injection,
-    cancellation, and byte accounting do NOT apply. Mixed files
-    (`brute` TCP helpers, parts of `openssl`/`sslcert`) keep ungated
-    entries alongside gated ones — file-level "advisory" means at
-    least one Lua entry gates, not every entry.
-  - **ungated residual (72 files)**: direct socket I/O with no
-    capability consultation at all (empirically proven: `pop3.connect`
-    reaches a loopback host under CiSafe+DenyAll with zero capability
-    events). Listed in `scripts/nse-specialized-ungated.txt`.
-    Rewriting them is out of scope for M005 (plan §5); the 005E
-    closure records severity and follow-up.
+  first)"; the M005E source audit falsified that blanket claim.
+  **M007B migrated the broker-compatible cohort**, so the residual is
+  now 22 files (15 ungated + 7 advisory), pinned in
+  `scripts/nse-specialized-{advisory,ungated}.txt` and
+  guard-enforced. The 97-file M005E baseline is preserved as history in
+  `scripts/nse-migration-classes.txt` (one final class per original
+  entry). The current split:
+  - **advisory-gated (7 files)**: capability consultation is present
+    but the direct effect still bypasses provider
+    injection/cancellation/accounting — `dhcp`, `dhcp6`, `libssh2`,
+    `ntp`, `snmp`, `ssh`, `xdmcp`.
+  - **ungated residual (15 files)**: direct socket I/O with no
+    capability consultation at all — `bjnp`, `coap`, `eigrp`, `iax2`,
+    `ike`, `ipmi`, `knx`, `natpmp`, `packet`, `srvloc`, `ssh2`, `stun`,
+    `tftp`, `wsdd`, plus `public_api/api.rs`.
+
+  Every remaining residual is a shape the current provider contract
+  cannot represent: unconnected/broadcast/multicast UDP, raw packet or
+  interface access, native socket handoff to `ssh2::Session`, or the
+  public sync compatibility surface. They are deliberately manual-only;
+  see the "M007B" section for the promotion rules and the guard that
+  fails if a `BrokerCompatible*` class is ever left on a file that still
+  holds a direct effect.
 - `comm.tryssl` (HTTPS via `reqwest`): deferred to the 005C HTTP provider.
 - `SandboxConfig::resolve_host`/`is_host_allowed` (`lib.rs`): legacy
   resolving sandbox helpers with documented rebinding risk; no production
@@ -242,6 +247,9 @@ inventories (`scripts/nse-specialized-{advisory,ungated}.txt`); every
 advisory file keeps consulting capability; `reqwest` is allow-listed to
 the pinned set (`scripts/nse-reqwest-inventory.txt`); no platform host
 modules (`os::unix`/`os::windows`/`nix`/`libc`) outside `providers.rs`.
+The M007B section (below) replaces the M005E socket scan with a
+corrected, provider-aware one and adds the migration-class,
+registration-compat, and direct-HTTP cross-checks.
 The 005B/005C "capability-checked" blanket claims for deferred protocol
 libraries are corrected by the M005E audit (advisory vs ungated split).
 
@@ -455,20 +463,20 @@ is limited to the send-accounting defect below.
 | provider-backed (broker sequence) | `socket`, `dns`, `comm` (incl. tryssl), `http`, `httppipeline`, `io`, `lfs`, `os` (getenv/remove/tmpdir/hostname-intent), `datetime`, `rand`, `stdnse`, `nmap` Lua-visible clock/random, `vulns` NVD, `brute.http_auth`, `upnp` description fetch | capability + cancel + provider + accounting; guards |
 | native implementations | `providers.rs` only | single allow-listed zone; guards |
 | compatibility shims (capability-gated native bodies) | `wrappers.rs` leaking-signature shims (`fs_metadata`, `read_dir`, `symlink_metadata`, `process_exec`, `time_now`, `random_bytes`, `env_var`, TCP/UDP send/receive on caller handles); `nmap.add/get_connection` | gate + accounting; no injection (signatures leak std types); public but only tests call the `nse_*` time/random/env/process fns |
-| advisory-gated specialized (25 files) | `scripts/nse-specialized-advisory.txt` | entry denial; no injection/cancel/accounting; gate-presence guarded; mixed files documented (`brute` TCP, parts of `openssl`/`sslcert`) |
-| ungated specialized residual (72 files) | `scripts/nse-specialized-ungated.txt` (incl. `omp2`, whose ctx use is TLS-intent only) | none; set pinned against expansion; empirically proven (CiSafe+DenyAll `pop3.connect` reaches loopback, zero events) |
+| advisory-gated specialized (7 files, post-M007B) | `scripts/nse-specialized-advisory.txt` | entry denial; no injection/cancel/accounting; gate-presence guarded |
+| ungated specialized residual (15 files, post-M007B) | `scripts/nse-specialized-ungated.txt` | none; set pinned against expansion; the 97-file M005E baseline is preserved in `scripts/nse-migration-classes.txt` |
 | specialized HTTP/TLS/SSH clients | `public_api/api.rs` (public sync API, native), `cve/{nvd,osv,cisa_kev}.rs` (reqwest clients), `helpers.rs` (shared TLS/HTTP builders used by gated callers), `elasticsearch.rs`, `httpspider.rs`, `mobileme.rs`, `tls.rs` (gated `connect_tcp`), `sslcert.rs`/`openssl.rs` (mixed), `ssh.rs`/`libssh2.rs` (gated entries) | allow-listed reqwest set (`scripts/nse-reqwest-inventory.txt`) |
 | loader/lookup reads | `executor_core.rs` script search, `resolver` script/module loads, `datafiles.rs` policy-checked reads, `bjnp.rs`/`ls.rs`/`pppoe.rs` data reads | ScriptResolver/module policy gates the loader paths |
 | diagnostic timestamps | `output.rs` (report timing), `nmap` registry metadata | not Lua-visible; retained |
-| pure parse, no I/O | `capabilities.rs`/`target.rs`/`match_lib.rs` IP/SocketAddr parsing, `datetime` chrono conversions | none needed |
+| pure parse, no I/O | `capabilities.rs`/`match_lib.rs` IP/SocketAddr parsing, `datetime` chrono conversions | none needed |
 | stubs (no host effect) | `os.execute` (returns status 1, never spawns) | none needed |
-| runtime plumbing | `lib.rs` `spawn_blocking`, `async_executor` Runtime import, `run.rs` regex statics, `dnsbl` resolver static / `smb` session static / `nmap` connection registry / `openssl` TLS-connector static (specialized state, ungated — same residual class as their libraries) | documented |
+| runtime plumbing | `lib.rs` `spawn_blocking`, `async_executor` Runtime import, `run.rs` regex statics, `smb` session static / `nmap` connection registry / `openssl` TLS-connector static (specialized state, ungated — same residual class as their libraries) | documented; the `dnsbl` process-global resolver was removed in M007B |
 | process/env residuals | `io.rs` `process::id` + `temp_dir` fallback, `os.rs` `temp_dir` fallback + `hostname` lookup + `SystemTime`, `wrappers` env/time shims | inventoried 005D residuals |
 
-Regeneration: the three `scripts/nse-*.txt` pins plus
+Regeneration: the `scripts/nse-*.txt` pins plus
 `tests/provider_composition_tests.rs` (bundle coherence) are the
-machine-readable inventory; `scripts/check-boundaries.sh` (M005E
-section) diffs source against the pins.
+machine-readable inventory; `scripts/check-boundaries.sh` (M005E and
+M007B sections) diffs source against the pins.
 
 ### Send-accounting correction (closure-blocker fix)
 
@@ -507,20 +515,30 @@ every `register_*_library` call in `ExecutorCore::register_libraries()`:
 
 | Class | Meaning | Automated profiles |
 |---|---|---|
-| `Pure` (35) | no host side effects | allowed |
-| `ProviderBacked` (18) | effects route through the capability-aware broker | allowed |
-| `ManualOnlyDirectIo` (80) | direct host I/O remains, no provider injection | denied |
-| `ManualOnlyAdvisory` (26) | capability gate exists but effects stay outside provider accounting/authority | denied |
+| `Pure` (34) | no host side effects | allowed |
+| `ProviderBacked` (84) | effects route through the capability-aware broker | allowed |
+| `ManualOnlyDirectIo` (34) | direct host I/O remains, no provider injection | denied |
+| `ManualOnlyAdvisory` (7) | capability gate exists but effects stay outside provider accounting/authority | denied |
+
+M007B moved the broker-compatible cohort from manual-only to
+`ProviderBacked` (M007A baseline: 35 / 18 / 80 / 26). `target` moved from
+`Pure` to `ProviderBacked` because the corrective audit found a direct
+`ToSocketAddrs` call in `target.resolve`.
 
 Unknown/unclassified names resolve to `ManualOnlyDirectIo` (deny by
 default, ADR-0004 §3). The manifest is additive: the public
 `NseLibraryDescriptor` struct layout is untouched.
 
-The 72-file ungated + 25-file advisory M005E residual sets map to the
-two manual-only classes; no residual entry was promoted to
-automated-safe. Representative pins: `pop3` → `ManualOnlyDirectIo`,
-`smb` → `ManualOnlyAdvisory`, `http`/`stdnse` → `ProviderBacked`,
-`base64` → `Pure`.
+The 22-file post-M007B residual (15 ungated + 7 advisory) maps to the
+two manual-only classes; those 22 files are the only registered manual-only
+direct-I/O modules, and 13 further manual-only entries are conservative
+classifications of modules with no direct network effect (stubs such as
+`eap`, `gps`, `sasl`, `multicast`, `pppoe`, `rpc`, `ospf`, `giop`,
+`vuzedht`, `mobileme`, `httpspider`, `smbauth`; fail-closed, not a safety
+defect). Representative pins: `pop3`/`smb` → `ProviderBacked` (M007B
+promotion), `tftp` → `ManualOnlyDirectIo`, `snmp` →
+`ManualOnlyAdvisory`, `http`/`stdnse` → `ProviderBacked`, `base64`
+→ `Pure`.
 
 ### Registration gate
 
@@ -536,11 +554,38 @@ automated-safe. Representative pins: `pop3` → `ManualOnlyDirectIo`,
   `blocked-by-policy` warning.
 
 Proven by `tests/effect_manifest_tests.rs` (direct-global absence for
-`pop3`/`sip`/`tftp`/`smbauth`/`memcached`/`netbios`/`ftp`/`smb`/`ssh`/`sslcert`
-under AgentSafe+CiSafe, presence under manual, safe globals retained,
-require blocked for unsafe/unknown, require succeeds for `json`) and the
-migrated `tests/local_protocol_tests.rs` denial tests (16 tests now assert
-the manifest block instead of network-capability events).
+`tftp`/`snmp`/`ssh`/`packet`/`stun`/`smbauth` under AgentSafe+CiSafe,
+presence of the promoted cohort, presence under manual, safe globals
+retained, require blocked for unsafe/unknown, require succeeds for
+`json`) and the migrated `tests/local_protocol_tests.rs` denial tests.
+Post-M007B, promoted libraries are *registered* under automated
+profiles, so their automated denial comes from the broker's capability
+gate instead: `assert_promoted_library_denied_at_capability_gate`
+asserts the global is present **and** a denied `network*` capability
+event was recorded, paired with the existing zero-server-hits
+assertions. That is a stronger contract than the old
+"library absent" proof, because it pins the actual authority decision.
+
+### Registration ↔ manifest consistency (M007B)
+
+M007A checked registration → manifest only, and 12 manifest entries
+described modules that are never registered. M007B closes both
+directions:
+
+- `register_fn` on every manifest entry is the exact function called
+  from `ExecutorCore::register_libraries()` (the M005E-M007B baseline
+  recorded base names, which had gone stale for 66 entries after the
+  services-aware refactor);
+- `scripts/nse-registration-compat-entries.txt` pins the 16 modules
+  that define a `pub fn register_*` but are never registered, each with
+  a reviewed rationale (12 of them still have a manifest entry so a
+  future registration cannot bypass the gate; 4 are unreachable and
+  therefore outside the automated-eligibility surface).
+
+Enforced by `effect_manifest::tests::registration_and_manifest_agree`
+(via `include_str!`, so it holds in every feature combination) and by
+`scripts/check-boundaries.sh`, which also fails if a listed module has
+since been wired up.
 
 ### HTTP authority assurance
 
@@ -556,3 +601,107 @@ authority-bound provider in M007D.
 Regeneration: `scripts/check-boundaries.sh` (M007A section) asserts
 manifest coverage of every `register_*_library` call, scrub presence,
 representative residual pins, and the `false`-by-default HTTP flag.
+
+## M007B — broker-compatible protocol migration and residual reconciliation
+
+`BrokeredTcpStream` (`src/brokered_stream.rs`) is the compatibility
+adapter that let the blocking-TCP protocol cohort move to
+`broker_tcp_connect` / `broker_send_all` / `broker_read_into` without
+rewriting each protocol state machine. It exposes a `TcpStream`-shaped
+surface plus `Read`/`Write`, so `native_tls` handshakes and internal
+`TcpStream` plumbing work unchanged. The native socket is never exposed:
+there is no `into_inner`, `as_raw_fd`, `try_clone`, `set_nonblocking`,
+or `shutdown`. Call sites needing those stay manual-only
+(`NativeHandleEscape`).
+
+One documented behavior delta: `set_read_timeout(None)` /
+`set_write_timeout(None)` (infinite blocking) map to
+`BROKERED_STREAM_DEFAULT_TIMEOUT` (120s) because the provider contract
+requires a concrete duration. Keeping the run bounded is what makes
+cancellation meaningful under automated profiles.
+
+### What the corrective audit found
+
+The M005E scan (`TcpStream::connect | UdpSocket::bind |
+AsyncTcpStream::connect`, unanchored) could not distinguish a brokered
+call from a native one, because `TcpStream::connect` is a substring of
+`BrokeredTcpStream::connect`. Sixteen fully-migrated libraries therefore
+still matched. The corrected scan anchors every pattern behind a
+non-identifier boundary, drops comment-only lines, covers direct DNS
+resolution, and excludes provider/broker infrastructure. That surfaced
+four real findings beyond the migration bookkeeping:
+
+| Finding | Detail | Resolution |
+|---|---|---|
+| `target.resolve` was a direct DNS effect while classified `Pure` | `std::net::ToSocketAddrs::to_socket_addrs` with no capability check, no cancellation, no accounting, reachable from `AgentSafe`/`CiSafe` | migrated to `broker_dns_lookup`; reclassified `ProviderBacked` |
+| `radius.connect_async` was claimed migrated but was not | raw `tokio::net::UdpSocket::bind` + `connect` to the caller's host | migrated to `broker_udp_connect`; promoted to `ProviderBacked` |
+| `dnsbl` had two direct DNS effects and a process-global hickory resolver | `ToSocketAddrs` in `check`/`check_multi` plus a `OnceLock<TokioResolver>` in `check_async` | migrated to `broker_dns_lookup`; `check_async` now shares the brokered path |
+| 66 manifest `register_fn` values were stale, and 12 entries described unregistered modules | base-name prefix instead of the `_with_services` function actually called | corrected; reverse direction pinned in `scripts/nse-registration-compat-entries.txt` |
+
+### Residual after M007B
+
+97 M005E entries → **22** (15 ungated + 7 advisory). Every one is a
+shape the current provider contract cannot represent:
+
+- unconnected / broadcast / multicast UDP: `bjnp`, `coap`, `dhcp`,
+  `dhcp6`, `eigrp`, `iax2`, `ike`, `ipmi`, `knx`, `natpmp`, `ntp`,
+  `snmp`, `srvloc`, `stun`, `tftp`, `wsdd`, `xdmcp`;
+- raw packet / interface: `packet`;
+- native socket handoff to `ssh2::Session`: `libssh2`, `ssh`, `ssh2`;
+- public sync compatibility surface: `public_api/api.rs`.
+
+`scripts/nse-migration-classes.txt` keeps one final class per original
+M005E entry (plus the two DNS entries the corrected scan discovered), and
+`scripts/check-boundaries.sh` fails if a `BrokerCompatible*` /
+`ProviderBackedDns` class is ever left on a file that still holds a
+direct effect, if a residual file has no class, or if
+provider/broker infrastructure re-enters the pins.
+
+### Promotion rule
+
+A registered module became `ProviderBacked` only when every
+automated-relevant network effect is broker/provider-backed, the module
+has no unconnected/native-handle/raw effect reachable from its Lua
+surface, and its registration receives the runtime's
+`NseCapabilityContext` and `NseHostServices`. 65 modules qualified
+(the broker-compatible cohort plus `target` and `radius`).
+Line-count reduction alone was never a criterion.
+
+Automated exposure of these libraries is still governed by the
+runtime's network policy: `AgentSafe` builds
+`NseNetworkPolicy::AllowCidrs(scope)` or
+`AllowResolvedTargetSet([approved target])`, `CiSafe` builds
+`DenyAll`, and the broker evaluates the capability against the *concrete
+resolved endpoint*. An out-of-scope connect or a DNS query is refused
+before the provider is invoked, so promotion widens availability
+without weakening authority. Eggsec-side automated NSE stays
+quarantined until M007E.
+
+### Guards added in the M007B section
+
+`scripts/check-boundaries.sh` now asserts, in addition to the M005E
+checks:
+
+1. the specialized residual equals the pins, under the corrected
+   provider-aware scan;
+2. every current residual has a migration class, and no
+   `BrokerCompatible*` / `ProviderBackedDns` class sits on a file with
+   a direct effect;
+3. every classified path is a real source file, appears exactly once,
+   and carries a recognized class plus rationale;
+4. `src/providers.rs` / `src/brokered_stream.rs` never enter the
+   residual pins;
+5. representative residuals (`tftp`, `ssh`, `snmp`, `eigrp`, `packet`)
+   stay `ManualOnly*`;
+6. every `src/libraries/*.rs` defining `pub fn register_*` is either
+   registered or allow-listed, and the allow-list does not rot;
+7. every `reqwest`-touching library module that appears in the manifest
+   stays `ManualOnly*`, so a native-HTTP site can never be promoted.
+
+Tests: `src/effect_manifest.rs` (`registration_and_manifest_agree`,
+`migrated_cohort_is_promoted_to_provider_backed`,
+`unresolved_residual_stays_manual_only`),
+`tests/effect_manifest_tests.rs`, `tests/m007b_migration_tests.rs`
+(focused loopback success, in-scope/out-of-scope, CiSafe denial,
+cancellation, and byte-accounting evidence for `target`, `radius`, and
+the promoted TCP cohort), and `tests/brokered_stream_tests.rs`.

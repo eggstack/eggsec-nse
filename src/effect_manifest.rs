@@ -53,10 +53,23 @@
 //!
 //! The pre-existing `NseLibraryDescriptor::enforcement_status` field
 //! remains the source of truth for declarative library compatibility;
-//! this manifest only adds automated-profile gating. There is a known
-//! divergence between `enforcement_status` (43 entries) and this manifest
-//! (covers every `register_*_library` call); it is recorded and
-//! mechanically reconciled by `scripts/check-boundaries.sh` M007A guards.
+//! this manifest only adds automated-profile gating.
+//!
+//! ## Registration consistency (M007B corrective)
+//!
+//! M007A recorded a low-severity gap: registration -> manifest coverage was
+//! mechanically enforced, but manifest -> registration was not, leaving 12
+//! compatibility entries whose modules are never registered. M007B closes
+//! that gap in both directions:
+//!
+//! - `register_fn` on every entry is the exact function called from
+//!   `ExecutorCore::register_libraries()` (not a base-name prefix);
+//! - the remaining compatibility entries are pinned with a reviewed
+//!   rationale in `scripts/nse-registration-compat-entries.txt`, which is
+//!   the single source of truth for the reverse direction.
+//!
+//! Both directions are enforced by `tests::registration_and_manifest_agree`
+//! and, for the shell-visible view, by `scripts/check-boundaries.sh`.
 
 use std::fmt;
 
@@ -133,33 +146,33 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "afp",
         source_module: "libraries/afp",
-        register_fn: "register_afp_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Async Tokio TCP connect; no capability ctx consultation (M005E ungated).",
+        register_fn: "register_afp_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== ajp =====
     LibraryEffectEntry {
         name: "ajp",
         source_module: "libraries/ajp",
-        register_fn: "register_ajp_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Async Tokio I/O; no capability ctx consultation (M005E ungated).",
+        register_fn: "register_ajp_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== amqp =====
     LibraryEffectEntry {
         name: "amqp",
         source_module: "libraries/amqp",
-        register_fn: "register_amqp_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct protocol framing; no capability ctx (M005E ungated).",
+        register_fn: "register_amqp_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== anyconnect =====
     LibraryEffectEntry {
         name: "anyconnect",
         source_module: "libraries/anyconnect",
-        register_fn: "register_anyconnect_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TLS handshake; no capability ctx (M005E ungated).",
+        register_fn: "register_anyconnect_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== asn1 =====
     LibraryEffectEntry {
@@ -205,9 +218,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "bitcoin",
         source_module: "libraries/bitcoin",
-        register_fn: "register_bitcoin_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Blocking TCP connect/read/write; no capability ctx (M005E ungated).",
+        register_fn: "register_bitcoin_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== bits =====
     LibraryEffectEntry {
@@ -221,9 +234,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "bittorrent",
         source_module: "libraries/bittorrent",
-        register_fn: "register_bittorrent_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_bittorrent_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== bjnp =====
     LibraryEffectEntry {
@@ -238,24 +251,24 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
         name: "brute",
         source_module: "libraries/brute",
         register_fn: "register_brute_library_with_services",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "http_auth path is brokered, but core TCP iteration remains advisory-gated (M005E residual).",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: TCP login helpers use BrokeredTcpStream; HTTP-auth probes use broker_http_request; no direct socket effect remains.",
     },
     // ===== cassandra =====
     LibraryEffectEntry {
         name: "cassandra",
         source_module: "libraries/cassandra",
-        register_fn: "register_cassandra_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_cassandra_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== citrixxml =====
     LibraryEffectEntry {
         name: "citrixxml",
         source_module: "libraries/citrixxml",
-        register_fn: "register_citrixxml_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct XML/ICA framing; no capability ctx (M005E ungated).",
+        register_fn: "register_citrixxml_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== coap =====
     LibraryEffectEntry {
@@ -285,9 +298,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "cvs",
         source_module: "libraries/cvs",
-        register_fn: "register_cvs_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Blocking TCP connect/read/write; no capability ctx (M005E ungated).",
+        register_fn: "register_cvs_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== datafiles =====
     LibraryEffectEntry {
@@ -325,9 +338,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "dicom",
         source_module: "libraries/dicom",
-        register_fn: "register_dicom_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Blocking TCP connect/read/write; no capability ctx (M005E ungated).",
+        register_fn: "register_dicom_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== dns =====
     LibraryEffectEntry {
@@ -349,9 +362,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "drda",
         source_module: "libraries/drda",
-        register_fn: "register_drda_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct DB protocol; no capability ctx (M005E ungated).",
+        register_fn: "register_drda_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== eap =====
     LibraryEffectEntry {
@@ -389,9 +402,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "ftp",
         source_module: "libraries/ftp",
-        register_fn: "register_ftp_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx present; direct stream reads bypass provider accounting (M005E advisory).",
+        register_fn: "register_ftp_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: all blocking-TCP core sites use BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== geoip =====
     LibraryEffectEntry {
@@ -429,7 +442,7 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "http2",
         source_module: "libraries/http2",
-        register_fn: "register_http2_library",
+        register_fn: "register_http2_library_with_services",
         eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
         rationale: "Reuses the http broker + provider.",
     },
@@ -469,9 +482,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "iec61850mms",
         source_module: "libraries/iec61850mms",
-        register_fn: "register_iec61850mms_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_iec61850mms_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== ike =====
     LibraryEffectEntry {
@@ -485,17 +498,17 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "imap",
         source_module: "libraries/imap",
-        register_fn: "register_imap_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx present; some operations remain outside provider cancellation (M005E advisory).",
+        register_fn: "register_imap_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== informix =====
     LibraryEffectEntry {
         name: "informix",
         source_module: "libraries/informix",
-        register_fn: "register_informix_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct DB protocol; no capability ctx (M005E ungated).",
+        register_fn: "register_informix_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== io =====
     LibraryEffectEntry {
@@ -525,41 +538,41 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "ipp",
         source_module: "libraries/ipp",
-        register_fn: "register_ipp_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_ipp_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== irc =====
     LibraryEffectEntry {
         name: "irc",
         source_module: "libraries/irc",
-        register_fn: "register_irc_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_irc_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== iscsi =====
     LibraryEffectEntry {
         name: "iscsi",
         source_module: "libraries/iscsi",
-        register_fn: "register_iscsi_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_iscsi_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== isns =====
     LibraryEffectEntry {
         name: "isns",
         source_module: "libraries/isns",
-        register_fn: "register_isns_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_isns_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== jdwp =====
     LibraryEffectEntry {
         name: "jdwp",
         source_module: "libraries/jdwp",
-        register_fn: "register_jdwp_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_jdwp_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== json =====
     LibraryEffectEntry {
@@ -589,9 +602,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "ldap",
         source_module: "libraries/ldap",
-        register_fn: "register_ldap_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx present; LDIF/decode paths may consult ctx but direct I/O is unbrokered (M005E advisory).",
+        register_fn: "register_ldap_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== lfs =====
     LibraryEffectEntry {
@@ -613,7 +626,7 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "libssh2_utility",
         source_module: "libraries/libssh2_utility",
-        register_fn: "register_libssh2_utility_library",
+        register_fn: "register_libssh2_utility_library_with_services",
         eligibility: NseAutomatedLibraryEligibility::Pure,
         rationale: "Pure utility helpers over libssh2 (no direct I/O).",
     },
@@ -669,17 +682,17 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "membase",
         source_module: "libraries/membase",
-        register_fn: "register_membase_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_membase_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== memcached =====
     LibraryEffectEntry {
         name: "memcached",
         source_module: "libraries/memcached",
-        register_fn: "register_memcached_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_memcached_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== mobileme =====
     LibraryEffectEntry {
@@ -693,9 +706,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "mongodb",
         source_module: "libraries/mongodb",
-        register_fn: "register_mongodb_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx present; protocol frames bypass provider injection (M005E advisory).",
+        register_fn: "register_mongodb_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== mqtt =====
     LibraryEffectEntry {
@@ -709,17 +722,17 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "msrpc",
         source_module: "libraries/msrpc",
-        register_fn: "register_msrpc_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_msrpc_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== msrpcperformance =====
     LibraryEffectEntry {
         name: "msrpcperformance",
         source_module: "libraries/msrpcperformance",
-        register_fn: "register_msrpcperformance_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Helper over msrpc; inherits direct I/O (M005E ungated).",
+        register_fn: "register_msrpcperformance_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== msrpctypes =====
     LibraryEffectEntry {
@@ -733,9 +746,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "mssql",
         source_module: "libraries/mssql",
-        register_fn: "register_mssql_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx present; direct TDS framing remains outside provider (M005E advisory).",
+        register_fn: "register_mssql_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== multicast =====
     LibraryEffectEntry {
@@ -749,9 +762,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "mysql",
         source_module: "libraries/mysql",
-        register_fn: "register_mysql_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx present; mysql protocol frames bypass provider injection (M005E advisory).",
+        register_fn: "register_mysql_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== natpmp =====
     LibraryEffectEntry {
@@ -765,33 +778,33 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "nbd",
         source_module: "libraries/nbd",
-        register_fn: "register_nbd_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_nbd_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== ncp =====
     LibraryEffectEntry {
         name: "ncp",
         source_module: "libraries/ncp",
-        register_fn: "register_ncp_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_ncp_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== ndmp =====
     LibraryEffectEntry {
         name: "ndmp",
         source_module: "libraries/ndmp",
-        register_fn: "register_ndmp_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_ndmp_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== netbios =====
     LibraryEffectEntry {
         name: "netbios",
         source_module: "libraries/netbios",
-        register_fn: "register_netbios_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct UDP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_netbios_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== nmap =====
     LibraryEffectEntry {
@@ -805,9 +818,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "nrpc",
         source_module: "libraries/nrpc",
-        register_fn: "register_nrpc_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct RPC framing; no capability ctx (M005E ungated).",
+        register_fn: "register_nrpc_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== nse_string =====
     LibraryEffectEntry {
@@ -837,33 +850,33 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "omp2",
         source_module: "libraries/omp2",
-        register_fn: "register_omp2_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx used only for TLS intent; direct I/O remains manual (M005E residual).",
+        register_fn: "register_omp2_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: connect uses BrokeredTcpStream and the TLS handshake runs over that brokered stream.",
     },
     // ===== oops =====
     LibraryEffectEntry {
         name: "oops",
         source_module: "libraries/oops",
-        register_fn: "register_oops_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_oops_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== openssl =====
     LibraryEffectEntry {
         name: "openssl",
         source_module: "libraries/openssl",
-        register_fn: "register_openssl_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx consulted for crypto + network; direct connect paths in helper wrappers remain (M005E advisory).",
+        register_fn: "register_openssl_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: connects use BrokeredTcpStream and the TLS handshake runs over that brokered stream; no native handle escape.",
     },
     // ===== oracle =====
     LibraryEffectEntry {
         name: "oracle",
         source_module: "libraries/oracle",
-        register_fn: "register_oracle_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_oracle_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== os =====
     LibraryEffectEntry {
@@ -909,25 +922,25 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "pgsql",
         source_module: "libraries/pgsql",
-        register_fn: "register_pgsql_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_pgsql_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== pop3 =====
     LibraryEffectEntry {
         name: "pop3",
         source_module: "libraries/pop3",
-        register_fn: "register_pop3_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx; reaches loopback under CiSafe+DenyAll (M005E proven).",
+        register_fn: "register_pop3_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== postgres =====
     LibraryEffectEntry {
         name: "postgres",
         source_module: "libraries/postgres",
-        register_fn: "register_postgres_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx present; direct protocol framing bypasses provider (M005E advisory).",
+        register_fn: "register_postgres_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: struct-held stream and blocking connect use BrokeredTcpStream; spawn_blocking async aliases call the brokered path.",
     },
     // ===== pppoe =====
     LibraryEffectEntry {
@@ -941,9 +954,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "proxy",
         source_module: "libraries/proxy",
-        register_fn: "register_proxy_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Blocking TCP connect; no capability ctx (M005E ungated).",
+        register_fn: "register_proxy_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== punycode =====
     LibraryEffectEntry {
@@ -957,9 +970,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "radius",
         source_module: "libraries/radius",
-        register_fn: "register_radius_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct UDP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_radius_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B corrective: connect_async uses broker_udp_connect; the raw tokio UdpSocket bind+connect the audit found is gone, so the module is promoted. The remaining entries are pure stubs.",
     },
     // ===== rand =====
     LibraryEffectEntry {
@@ -973,9 +986,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "rdp",
         source_module: "libraries/rdp",
-        register_fn: "register_rdp_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx present; PDU framing uses direct I/O (M005E advisory).",
+        register_fn: "register_rdp_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== re =====
     LibraryEffectEntry {
@@ -989,17 +1002,17 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "redis",
         source_module: "libraries/redis",
-        register_fn: "register_redis_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx present; RESP protocol framing bypasses provider (M005E advisory).",
+        register_fn: "register_redis_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== rmi =====
     LibraryEffectEntry {
         name: "rmi",
         source_module: "libraries/rmi",
-        register_fn: "register_rmi_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_rmi_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== rpc =====
     LibraryEffectEntry {
@@ -1013,25 +1026,25 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "rpcap",
         source_module: "libraries/rpcap",
-        register_fn: "register_rpcap_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_rpcap_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== rsync =====
     LibraryEffectEntry {
         name: "rsync",
         source_module: "libraries/rsync",
-        register_fn: "register_rsync_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_rsync_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== rtsp =====
     LibraryEffectEntry {
         name: "rtsp",
         source_module: "libraries/rtsp",
-        register_fn: "register_rtsp_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_rtsp_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== sasl =====
     LibraryEffectEntry {
@@ -1061,9 +1074,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "sip",
         source_module: "libraries/sip",
-        register_fn: "register_sip_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Async Tokio TCP; no capability ctx (M005E ungated).",
+        register_fn: "register_sip_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== slaxml =====
     LibraryEffectEntry {
@@ -1077,17 +1090,17 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "smb",
         source_module: "libraries/smb",
-        register_fn: "register_smb_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx present; SMB framing remains outside provider injection (M005E advisory).",
+        register_fn: "register_smb_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: internal TcpStream plumbing plus async aliases use BrokeredTcpStream; no direct socket effect remains.",
     },
     // ===== smb2 =====
     LibraryEffectEntry {
         name: "smb2",
         source_module: "libraries/smb2",
-        register_fn: "register_smb2_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx present; SMB2/3 framing remains outside provider (M005E advisory).",
+        register_fn: "register_smb2_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== smbauth =====
     LibraryEffectEntry {
@@ -1101,9 +1114,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "smtp",
         source_module: "libraries/smtp",
-        register_fn: "register_smtp_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx present; direct SMTP framing bypasses provider (M005E advisory).",
+        register_fn: "register_smtp_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== snmp =====
     LibraryEffectEntry {
@@ -1125,9 +1138,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "socks",
         source_module: "libraries/socks",
-        register_fn: "register_socks_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_socks_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== srvloc =====
     LibraryEffectEntry {
@@ -1149,9 +1162,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "ssh1",
         source_module: "libraries/ssh1",
-        register_fn: "register_ssh1_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_ssh1_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== ssh2 =====
     LibraryEffectEntry {
@@ -1165,17 +1178,17 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "sslcert",
         source_module: "libraries/sslcert",
-        register_fn: "register_sslcert_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx consulted (network+crypto); get_certificate + parsing helpers use direct HTTP path (M005E advisory).",
+        register_fn: "register_sslcert_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: connect uses BrokeredTcpStream and the TLS handshake runs over that brokered stream.",
     },
     // ===== sslv2 =====
     LibraryEffectEntry {
         name: "sslv2",
         source_module: "libraries/sslv2",
-        register_fn: "register_sslv2_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP/TLS framing; no capability ctx (M005E ungated).",
+        register_fn: "register_sslv2_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== stdnse =====
     LibraryEffectEntry {
@@ -1229,8 +1242,8 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "target",
         source_module: "libraries/target",
-        register_fn: "register_target_library",
-        eligibility: NseAutomatedLibraryEligibility::Pure,
+        register_fn: "register_target_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
         rationale: "Pure host parsing helpers.",
     },
     // ===== telnet =====
@@ -1253,25 +1266,25 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "tls",
         source_module: "libraries/tls",
-        register_fn: "register_tls_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx used; connect_tcp gated but underlying native TLS handshake remains manual (M005E advisory).",
+        register_fn: "register_tls_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: connect uses BrokeredTcpStream and the TLS handshake runs over that brokered stream; connect_tcp stays capability-gated.",
     },
     // ===== tn3270 =====
     LibraryEffectEntry {
         name: "tn3270",
         source_module: "libraries/tn3270",
-        register_fn: "register_tn3270_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_tn3270_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== tns =====
     LibraryEffectEntry {
         name: "tns",
         source_module: "libraries/tns",
-        register_fn: "register_tns_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_tns_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== unicode =====
     LibraryEffectEntry {
@@ -1302,8 +1315,8 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
         name: "upnp",
         source_module: "libraries/upnp",
         register_fn: "register_upnp_library_with_services",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Description fetch brokered (HTTP); SSDP socket send/receive bypass provider (M005E advisory).",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: SSDP/SOAP TCP paths use BrokeredTcpStream and description fetch uses broker_http_request; no direct socket effect remains.",
     },
     // ===== url =====
     LibraryEffectEntry {
@@ -1317,17 +1330,17 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "versant",
         source_module: "libraries/versant",
-        register_fn: "register_versant_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_versant_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== vnc =====
     LibraryEffectEntry {
         name: "vnc",
         source_module: "libraries/vnc",
-        register_fn: "register_vnc_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyAdvisory,
-        rationale: "Capability ctx present; VNC handshake uses direct I/O (M005E advisory).",
+        register_fn: "register_vnc_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: struct-held streams and blocking connects use BrokeredTcpStream; async aliases call the brokered path directly.",
     },
     // ===== vulns =====
     LibraryEffectEntry {
@@ -1365,9 +1378,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "winrm",
         source_module: "libraries/winrm",
-        register_fn: "register_winrm_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_winrm_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== wsdd =====
     LibraryEffectEntry {
@@ -1389,9 +1402,9 @@ pub static LIBRARY_EFFECT_MANIFEST: &[LibraryEffectEntry] = &[
     LibraryEffectEntry {
         name: "xmpp",
         source_module: "libraries/xmpp",
-        register_fn: "register_xmpp_library",
-        eligibility: NseAutomatedLibraryEligibility::ManualOnlyDirectIo,
-        rationale: "Direct TCP framing; no capability ctx (M005E ungated).",
+        register_fn: "register_xmpp_library_with_services",
+        eligibility: NseAutomatedLibraryEligibility::ProviderBacked,
+        rationale: "M007B: broker-compatible TCP paths fully migrated to BrokeredTcpStream (broker_tcp_connect/send/receive); no direct socket effect remains.",
     },
     // ===== zlib =====
     LibraryEffectEntry {
@@ -1581,10 +1594,13 @@ mod tests {
 
     #[test]
     fn profile_gating_matches_spec() {
-        let pure = "stdnse";
+        let pure = "base64";
         let provider_backed = "http";
-        let manual_advisory = "smb";
-        let manual_direct = "pop3";
+        // Post-M007B, a still-direct effect is a shape the provider
+        // contract cannot represent (unconnected UDP / native socket
+        // handoff), not a merely-unmigrated TCP library.
+        let manual_advisory = "snmp";
+        let manual_direct = "tftp";
 
         for profile in [
             NseExecutionProfileKind::ManualPermissive,
@@ -1651,14 +1667,28 @@ mod tests {
     #[test]
     fn counts_make_sense() {
         let counts = eligibility_counts();
+        assert_eq!(
+            counts.total(),
+            LIBRARY_EFFECT_MANIFEST.len(),
+            "eligibility_counts() must cover every manifest entry"
+        );
+        assert_eq!(
+            counts.automated_safe() + counts.manual_only(),
+            counts.total(),
+            "every entry is either automated-safe or manual-only"
+        );
+        // M007B moved the broker-compatible cohort from manual-only to
+        // ProviderBacked. The floor tracks the post-migration residual so
+        // the M005E 97-entry count cannot silently return, while an
+        // accidental mass re-classification also fails.
         assert!(
-            counts.automated_safe() >= 20,
-            "expected at least 20 automated-safe entries, got {}",
+            counts.automated_safe() >= 110,
+            "expected at least 110 automated-safe entries after the M007B promotion, got {}",
             counts.automated_safe()
         );
         assert!(
-            counts.manual_only() >= 50,
-            "expected at least 50 manual-only entries (M005E residual), got {}",
+            counts.manual_only() >= 40,
+            "expected at least 40 manual-only entries (unresolved residual), got {}",
             counts.manual_only()
         );
     }
@@ -1674,5 +1704,240 @@ mod tests {
         assert!(!is_automated_profile(
             NseExecutionProfileKind::CompatibilityLab
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // M007B corrective: bidirectional registration/manifest consistency.
+    // -----------------------------------------------------------------
+
+    /// `(module, register_fn)` pairs actually invoked from
+    /// `ExecutorCore::register_libraries()`.
+    fn registered_pairs() -> std::collections::BTreeMap<String, String> {
+        let source = include_str!("executor_core.rs");
+        let body = source
+            .split_once("fn register_libraries(&self)")
+            .expect("register_libraries() must exist in executor_core.rs")
+            .1;
+        let mut pairs = std::collections::BTreeMap::new();
+        for line in body.lines() {
+            let Some(rest) = line.split("crate::libraries::").nth(1) else {
+                continue;
+            };
+            let Some((module, call)) = rest.split_once("::") else {
+                continue;
+            };
+            let call = call.trim_start();
+            if !call.starts_with("register_") {
+                continue;
+            }
+            let Some((fn_name, tail)) = call.split_once(['(', ' ']) else {
+                continue;
+            };
+            if tail.contains(')') && !call.contains('(') {
+                continue;
+            }
+            pairs
+                .entry(module.to_string())
+                .or_insert_with(|| fn_name.to_string());
+        }
+        pairs
+    }
+
+    /// `src/<module path>` entries pinned in the registration compat
+    /// allowlist, which is the reviewed source of truth for the
+    /// manifest -> registration direction.
+    fn registration_compat_entries() -> std::collections::BTreeSet<String> {
+        include_str!("../scripts/nse-registration-compat-entries.txt")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+            .filter_map(|l| l.split_whitespace().next())
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn registration_and_manifest_agree() {
+        let registered = registered_pairs();
+
+        // registration -> manifest: every registered module has exactly
+        // one entry, and its `register_fn` is the function actually called.
+        let mut matched = std::collections::BTreeSet::new();
+        for entry in LIBRARY_EFFECT_MANIFEST {
+            let Some(module) = entry.source_module.strip_prefix("libraries/") else {
+                continue;
+            };
+            let Some(actual_fn) = registered.get(module) else {
+                continue;
+            };
+            assert_eq!(
+                entry.register_fn, actual_fn,
+                "manifest entry '{}' records register_fn '{}' but executor_core.rs calls '{}'",
+                entry.name, entry.register_fn, actual_fn
+            );
+            assert!(
+                matched.insert(module.to_string()),
+                "module '{}' is claimed by more than one manifest entry",
+                module
+            );
+        }
+        for module in registered.keys() {
+            assert!(
+                matched.contains(module),
+                "registered module '{}' has no effect-manifest entry",
+                module
+            );
+        }
+
+        // manifest -> registration: every compatibility entry must be
+        // pinned in the allowlist, and the allowlist must not rot.
+        let compat = registration_compat_entries();
+        for entry in LIBRARY_EFFECT_MANIFEST {
+            let Some(module) = entry.source_module.strip_prefix("libraries/") else {
+                continue;
+            };
+            if registered.contains_key(module) {
+                continue;
+            }
+            let path = format!("src/libraries/{module}.rs");
+            assert!(
+                compat.contains(&path),
+                "manifest entry '{}' ({}) is not registered and is not listed in \
+                 scripts/nse-registration-compat-entries.txt",
+                entry.name,
+                path
+            );
+        }
+        for path in &compat {
+            let file = path
+                .strip_prefix("src/libraries/")
+                .and_then(|p| p.strip_suffix(".rs"));
+            let Some(module) = file else {
+                panic!("compat entry '{path}' must be a src/libraries/<module>.rs path");
+            };
+            assert!(
+                !registered.contains_key(module),
+                "compat entry '{path}' is now registered; remove it from the allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn migrated_cohort_is_promoted_to_provider_backed() {
+        // M007B promoted the broker-compatible cohort. Each name must be
+        // `ProviderBacked` so automated profiles get it, which is only
+        // sound because every one of its network effects is brokered.
+        const PROMOTED: &[&str] = &[
+            "afp",
+            "ajp",
+            "amqp",
+            "anyconnect",
+            "bitcoin",
+            "bittorrent",
+            "brute",
+            "cassandra",
+            "citrixxml",
+            "cvs",
+            "dicom",
+            "drda",
+            "ftp",
+            "iec61850mms",
+            "imap",
+            "informix",
+            "ipp",
+            "irc",
+            "iscsi",
+            "isns",
+            "jdwp",
+            "ldap",
+            "membase",
+            "memcached",
+            "mongodb",
+            "msrpc",
+            "msrpcperformance",
+            "mssql",
+            "mysql",
+            "nbd",
+            "ncp",
+            "ndmp",
+            "netbios",
+            "nrpc",
+            "omp2",
+            "oops",
+            "openssl",
+            "oracle",
+            "pgsql",
+            "pop3",
+            "postgres",
+            "proxy",
+            "rdp",
+            "redis",
+            "rmi",
+            "rpcap",
+            "rsync",
+            "rtsp",
+            "sip",
+            "smb",
+            "smb2",
+            "smtp",
+            "socks",
+            "ssh1",
+            "sslcert",
+            "sslv2",
+            "target",
+            "tls",
+            "tn3270",
+            "tns",
+            "upnp",
+            "versant",
+            "vnc",
+            "winrm",
+            "xmpp",
+        ];
+        for name in PROMOTED {
+            let entry = classify(name)
+                .unwrap_or_else(|| panic!("promoted library '{name}' must have a manifest entry"));
+            assert_eq!(
+                entry.eligibility,
+                NseAutomatedLibraryEligibility::ProviderBacked,
+                "'{name}' is in the M007B promoted cohort but is not ProviderBacked"
+            );
+            assert!(
+                eligible_for_profile(name, NseExecutionProfileKind::AgentSafe),
+                "'{name}' must be reachable under AgentSafe after promotion"
+            );
+        }
+    }
+
+    #[test]
+    fn unresolved_residual_stays_manual_only() {
+        // Shapes the current provider contract cannot represent must stay
+        // manual-only in both directions (effect class and profile gate).
+        const RESIDUAL: &[&str] = &[
+            "bjnp", "coap", "dhcp", "dhcp6", "eigrp", "iax2", "ike", "ipmi", "knx", "libssh2",
+            "natpmp", "ntp", "packet", "snmp", "srvloc", "ssh", "ssh2", "stun", "tftp", "wsdd",
+            "xdmcp",
+        ];
+        for name in RESIDUAL {
+            let entry = classify(name)
+                .unwrap_or_else(|| panic!("residual library '{name}' must have a manifest entry"));
+            assert!(
+                matches!(
+                    entry.eligibility,
+                    NseAutomatedLibraryEligibility::ManualOnlyDirectIo
+                        | NseAutomatedLibraryEligibility::ManualOnlyAdvisory
+                ),
+                "'{name}' still has a direct host network effect and must stay manual-only, got {}",
+                entry.eligibility
+            );
+            for profile in [
+                NseExecutionProfileKind::AgentSafe,
+                NseExecutionProfileKind::CiSafe,
+            ] {
+                assert!(
+                    !eligible_for_profile(name, profile),
+                    "'{name}' must not be reachable under {profile:?}"
+                );
+            }
+        }
     }
 }

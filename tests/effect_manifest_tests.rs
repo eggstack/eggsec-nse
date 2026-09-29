@@ -67,26 +67,34 @@ fn eligibility_classification_is_deterministic() {
 
 #[test]
 fn known_libraries_have_classification() {
-    // M005E direct-I/O residual
+    // Post-M007B the broker-compatible cohort is ProviderBacked.
     assert_eq!(
         automated_library_eligibility("pop3"),
-        NseAutomatedLibraryEligibility::ManualOnlyDirectIo
+        NseAutomatedLibraryEligibility::ProviderBacked
     );
-    // M005E advisory-gated
     assert_eq!(
         automated_library_eligibility("smb"),
+        NseAutomatedLibraryEligibility::ProviderBacked
+    );
+    // Shapes the provider contract cannot represent stay manual-only.
+    assert_eq!(
+        automated_library_eligibility("tftp"),
+        NseAutomatedLibraryEligibility::ManualOnlyDirectIo
+    );
+    assert_eq!(
+        automated_library_eligibility("snmp"),
         NseAutomatedLibraryEligibility::ManualOnlyAdvisory
     );
-    // Provider-backed
+    // Provider-backed (pre-existing)
     assert_eq!(
         automated_library_eligibility("http"),
         NseAutomatedLibraryEligibility::ProviderBacked
     );
-    // Pure
     assert_eq!(
         automated_library_eligibility("stdnse"),
         NseAutomatedLibraryEligibility::ProviderBacked
     );
+    // Pure
     assert_eq!(
         automated_library_eligibility("base64"),
         NseAutomatedLibraryEligibility::Pure
@@ -121,10 +129,14 @@ fn automated_profiles_block_unsafe_libraries() {
         // Safe
         assert!(is_automated_library_safe("http", profile.kind));
         assert!(is_automated_library_safe("stdnse", profile.kind));
-        // Unsafe
-        assert!(!is_automated_library_safe("smb", profile.kind));
-        assert!(!is_automated_library_safe("pop3", profile.kind));
+        // Safe after the M007B promotion (broker-backed effects only).
+        assert!(is_automated_library_safe("smb", profile.kind));
+        assert!(is_automated_library_safe("pop3", profile.kind));
+        // Unsafe: unconnected UDP / raw packet / native socket handoff.
+        assert!(!is_automated_library_safe("tftp", profile.kind));
         assert!(!is_automated_library_safe("ssh", profile.kind));
+        assert!(!is_automated_library_safe("packet", profile.kind));
+        assert!(!is_automated_library_safe("stun", profile.kind));
     }
 }
 
@@ -194,16 +206,22 @@ fn manifest_automated_safe_count_is_substantial() {
 }
 
 #[test]
-fn manifest_manual_only_count_matches_m005e_residual() {
-    // 72 ungated + 25 advisory = 97 entries with manual-only profile.
-    // Pure/ProviderBacked libraries are also eligible under manual
-    // profiles; we only assert the manual-only subset meets the M005E
-    // floor.
+fn manifest_manual_only_count_matches_unresolved_residual() {
+    // The M005E baseline was 97 direct-I/O entries. M007B migrated the
+    // broker-compatible cohort, so only the shapes the provider contract
+    // cannot represent remain manual-only. The floor keeps the residual
+    // from silently returning without pinning an exact number that a
+    // future migration must update deliberately.
     let counts = eggsec_nse::eligibility_counts();
     assert!(
-        counts.manual_only() >= 70,
-        "expected at least 70 manual-only entries (M005E residual floor), got {}",
+        counts.manual_only() >= 40,
+        "expected at least 40 manual-only entries (unresolved residual floor), got {}",
         counts.manual_only()
+    );
+    assert!(
+        counts.automated_safe() >= 110,
+        "expected at least 110 automated-safe entries after the M007B promotion, got {}",
+        counts.automated_safe()
     );
 }
 
@@ -364,26 +382,60 @@ fn authority_bound_flag_is_propagated() {
 
 // Registration-gate direct-global regression tests (M007A §5C)
 // -----------------------------------------------------------------------
-// Representative unsafe libraries — including ones that bypass
-// `gate_then_register()` at their call site and rely on the
-// post-registration scrub (`pop3`, `sip`, `tftp`, `smbauth`) plus gated
-// ones (`ftp`, `smb`, `ssh`, `sslcert`) — must be `nil` under automated
-// profiles and present under manual profiles.
+// The M007B promotion changed which globals an automated profile sees:
+// the broker-compatible cohort is now registered, and only the residual
+// shapes (unconnected UDP, raw packet, native socket handoff) are
+// removed by the gate. Both directions are asserted here.
 
+/// Still-direct libraries: the gate must remove the global under
+/// automated profiles for both gated call sites and
+/// `scrub_ineligible_globals()`-only libraries.
 const REPRESENTATIVE_UNSAFE_GLOBALS: &[&str] = &[
-    "pop3",
-    "sip",
-    "tftp",
-    "smbauth",
-    "memcached",
-    "netbios",
-    "ftp",
-    "smb",
+    // tftp: ManualOnlyDirectIo, registered then scrubbed/never gated
+    "tftp", // snmp: ManualOnlyAdvisory, gated call site
+    "snmp", // ssh: ManualOnlyAdvisory, native socket handoff
     "ssh",
-    "sslcert",
+    // packet / stun: unregistered-but-classified compatibility modules
+    // keep their placeholder global, which the scrub must also remove
+    "packet", "stun", // smbauth: registered, no provider consultation
+    "smbauth",
 ];
 
-const REPRESENTATIVE_SAFE_GLOBALS: &[&str] = &["http", "stdnse", "base64", "json"];
+/// Promoted M007B cohort members: automated profiles must expose them.
+const PROMOTED_GLOBALS: &[&str] = &[
+    "pop3",
+    "smb",
+    "smb2",
+    "ftp",
+    "sslcert",
+    "tls",
+    "redis",
+    "mysql",
+    "sip",
+    "memcached",
+    "netbios",
+    "target",
+    "openssl",
+    "vnc",
+    "postgres",
+    "mssql",
+    "mongodb",
+    "imap",
+    "rdp",
+    "socks",
+    "xmpp",
+    "oracle",
+    "tns",
+    "ldap",
+    "afp",
+    "ajp",
+    "amqp",
+    "bitcoin",
+    "irc",
+    "radius",
+];
+
+const REPRESENTATIVE_SAFE_GLOBALS: &[&str] = &["http", "stdnse", "base64", "json", "dns"];
 
 #[test]
 fn automated_direct_globals_absent_for_unsafe_libraries() {
@@ -419,6 +471,28 @@ fn automated_direct_globals_absent_for_unsafe_libraries() {
 }
 
 #[test]
+fn automated_profiles_expose_promoted_cohort() {
+    // Regression guard for the M007B promotion: if a promoted library
+    // silently regressed to manual-only, automated scripts would lose it.
+    for profile in [profile_agent_safe(), profile_ci_safe()] {
+        let exec = eggsec_nse::NseExecutor::with_profile(&profile).expect("executor init");
+        for lib in PROMOTED_GLOBALS {
+            let probe = format!("return {lib} == nil");
+            let out = exec
+                .run_script(&probe)
+                .unwrap_or_else(|e| panic!("probe for '{lib}' failed: {e:?}"));
+            assert!(
+                out.contains("false"),
+                "automated profile {:?} must expose promoted global '{}': got '{}'",
+                profile.kind,
+                lib,
+                out
+            );
+        }
+    }
+}
+
+#[test]
 fn manual_direct_globals_present_for_same_libraries() {
     let profile = profile_manual_permissive();
     let exec = eggsec_nse::NseExecutor::with_profile(&profile).expect("executor init");
@@ -442,7 +516,7 @@ fn manual_direct_globals_present_for_same_libraries() {
 #[test]
 fn automated_dynamic_require_blocked_for_representative_unsafe() {
     for profile in [profile_agent_safe(), profile_ci_safe()] {
-        for lib in ["pop3", "sip", "smb", "ftp", "unknown_lib_xyz"] {
+        for lib in ["tftp", "snmp", "ssh", "packet", "unknown_lib_xyz"] {
             let exec = eggsec_nse::NseExecutor::with_profile(&profile).expect("executor init");
             let probe = format!("local m = require(\"{lib}\"); return m ~= nil");
             let _ = exec.run_script(&probe);
