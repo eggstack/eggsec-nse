@@ -15,6 +15,13 @@
 //! - promoted TCP cohort — an out-of-scope AgentSafe connect is denied
 //!   before the provider is invoked, and an in-scope connect is
 //!   byte-accounted.
+//!
+//! Known limitation pinned by these tests: `NseCapabilityKind::DnsResolution`
+//! is not charged into `network_operations` (see `after_blocking_operation`),
+//! so a *permitted* brokered DNS lookup is bounded by wall-clock and
+//! instruction budgets rather than the network-operation budget. Pre-existing
+//! M005B behavior shared with the `dns` library; tracked in the M007B closure
+//! as a low finding.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -131,6 +138,47 @@ fn target_resolve_ci_safe_denied_before_host_contact() {
         dns.calls(),
         0,
         "CiSafe must deny DNS before the resolver is touched"
+    );
+}
+
+#[test]
+fn target_resolve_respects_the_ci_safe_zero_network_budget() {
+    // Regression for the M007B high finding: the pre-fix direct
+    // `to_socket_addrs()` call bypassed the capability context entirely,
+    // so neither the network policy nor the operation budget could
+    // constrain it. A brokered lookup must be refused outright under
+    // CiSafe, which is the property the profile promises.
+    let profile = ci_safe();
+    assert_eq!(
+        profile.limits.max_network_operations,
+        Some(0),
+        "CiSafe must carry a zero network-operation budget"
+    );
+    let (services, dns) = dns_services(Default::default());
+    let out = run(
+        &profile,
+        services,
+        "return target.resolve(\"victim.example\")",
+    );
+    assert!(out.contains("victim.example"));
+    assert_eq!(
+        dns.calls(),
+        0,
+        "the denied lookup must not reach the resolver"
+    );
+
+    // Under a profile that permits resolution, the same call reaches the
+    // injected provider instead of the host resolver.
+    let (services, dns) = dns_services(Default::default());
+    let exec = eggsec_nse::NseExecutor::with_profile_and_services(
+        &ResolvedNseExecutionProfile::manual_permissive(Some("127.0.0.1")),
+        services,
+    )
+    .expect("executor init");
+    let _ = exec.run_script("return target.resolve(\"victim.example\")");
+    assert!(
+        dns.calls() >= 1,
+        "an allowed resolution must reach the injected provider"
     );
 }
 
