@@ -4,13 +4,13 @@
 //! Based on Nmap's rdp library: https://nmap.org/nsedoc/lib/rdp.html
 //! Includes both blocking and async implementations with basic RDP protocol support.
 
+use crate::brokered_stream::BrokeredTcpStream;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::NseHostServices;
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::Write;
 use std::time::Duration;
 
-use crate::capabilities::NseCapabilityContext;
-use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 const RDP_HEADER_SIZE: usize = 4;
@@ -45,18 +45,33 @@ fn maybe_denied_rdp(
     Ok(None)
 }
 
-fn rdp_connect(host: &str, port: u16) -> std::io::Result<TcpStream> {
-    let addr = format!("{}:{}", host, port);
-    let socket_addr = addr
-        .parse::<std::net::SocketAddr>()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
-    let stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))?;
+/// Brokered RDP connect: authority-preserving resolve replaces the
+/// literal-parse preamble; timeouts collapse to the provider's single
+/// read/write timeout (10s, as before).
+fn rdp_connect(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    host: &str,
+    port: u16,
+    operation: &'static str,
+) -> std::io::Result<BrokeredTcpStream> {
+    let (mut stream, _endpoint) = BrokeredTcpStream::connect(
+        ctx,
+        services,
+        host,
+        port,
+        Duration::from_secs(10),
+        operation,
+    )
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     Ok(stream)
 }
 
-fn rdp_negotiate_security(stream: &mut TcpStream) -> std::io::Result<(String, bool, bool, bool)> {
+fn rdp_negotiate_security(
+    stream: &mut BrokeredTcpStream,
+) -> std::io::Result<(String, bool, bool, bool)> {
     let mut tpdu = vec![
         0x03, 0x00, 0x01, 0x2e, 0x00, 0x08, 0x00, 0x10, 0x00, 0x01, 0xc0, 0x00, 0x44, 0x75, 0x63,
         0x61, 0x00, 0x00, 0x00, 0x00,
@@ -89,17 +104,25 @@ fn rdp_negotiate_security(stream: &mut TcpStream) -> std::io::Result<(String, bo
     }
 }
 
-pub fn register_rdp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+/// Provider-backed rdp registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_rdp_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let rdp = lua.create_table()?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let connect_fn = lua.create_function(
         move |lua, (host, port): (String, u16)| -> LuaResult<mlua::Table> {
             if let Some(denied) = maybe_denied_rdp(lua, &cap, &host, "rdp.connect")? {
                 return Ok(denied);
             }
-            let result = match rdp_connect(&host, port) {
+            let result = match rdp_connect(&cap, &svc, &host, port, "rdp.connect") {
                 Ok(mut stream) => {
                     let (security, rdp_sec, tls, nla) = rdp_negotiate_security(&mut stream)
                         .unwrap_or(("unknown".to_string(), true, false, true));
@@ -127,6 +150,7 @@ pub fn register_rdp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     rdp.set("connect", connect_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let login_fn = lua.create_function(
         move |lua,
               (host, port, domain, user, _password): (String, u16, String, String, String)|
@@ -134,7 +158,7 @@ pub fn register_rdp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             if let Some(denied) = maybe_denied_rdp(lua, &cap, &host, "rdp.login")? {
                 return Ok(denied);
             }
-            let result = match rdp_connect(&host, port) {
+            let result = match rdp_connect(&cap, &svc, &host, port, "rdp.login") {
                 Ok(_stream) => {
                     let r = lua.create_table()?;
                     r.set("success", true)?;
@@ -156,12 +180,13 @@ pub fn register_rdp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     rdp.set("login", login_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let get_info_fn = lua.create_function(
         move |lua, (host, port): (String, u16)| -> LuaResult<mlua::Table> {
             if let Some(denied) = maybe_denied_rdp(lua, &cap, &host, "rdp.get_info")? {
                 return Ok(denied);
             }
-            let result = match rdp_connect(&host, port) {
+            let result = match rdp_connect(&cap, &svc, &host, port, "rdp.get_info") {
                 Ok(mut stream) => {
                     let (security, rdp_sec, tls, nla) = rdp_negotiate_security(&mut stream)
                         .unwrap_or(("unknown".to_string(), true, false, true));
@@ -186,12 +211,13 @@ pub fn register_rdp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     rdp.set("get_info", get_info_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let check_security_fn = lua.create_function(
         move |lua, (host, port): (String, u16)| -> LuaResult<mlua::Table> {
             if let Some(denied) = maybe_denied_rdp(lua, &cap, &host, "rdp.check_security")? {
                 return Ok(denied);
             }
-            let result = match rdp_connect(&host, port) {
+            let result = match rdp_connect(&cap, &svc, &host, port, "rdp.check_security") {
                 Ok(mut stream) => {
                     let (security, rdp_sec, tls, nla) = rdp_negotiate_security(&mut stream)
                         .unwrap_or(("unknown".to_string(), true, false, true));
@@ -216,6 +242,7 @@ pub fn register_rdp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     rdp.set("check_security", check_security_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let check_creds_fn = lua.create_function(
         move |lua,
               (host, port, domain, user, _password): (String, u16, String, String, String)|
@@ -223,7 +250,7 @@ pub fn register_rdp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             if let Some(denied) = maybe_denied_rdp(lua, &cap, &host, "rdp.check_creds")? {
                 return Ok(denied);
             }
-            let result = match rdp_connect(&host, port) {
+            let result = match rdp_connect(&cap, &svc, &host, port, "rdp.check_creds") {
                 Ok(_stream) => {
                     let r = lua.create_table()?;
                     r.set("valid", true)?;
@@ -271,20 +298,21 @@ pub fn register_rdp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     rdp.set("version", version_fn)?;
 
-    let cap = capability_ctx.clone();
-    let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
-        if let Some(denied) = maybe_denied_rdp(lua, &cap, &host, "rdp.connect_async")? {
-            return Err(mlua::Error::RuntimeError(
-                denied.get::<String>("error").unwrap_or_default(),
-            ));
-        }
-        let host_clone = host.clone();
+    // Async connect alias: previously bridged a `spawn_blocking` sync
+    // connect through the ambient runtime. Rewired to the brokered sync
+    // path (entry name kept for compatibility).
+    let async_connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, u16)| {
+            if let Some(denied) = maybe_denied_rdp(lua, &ctx, &host, "rdp.connect_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
 
-        block_on_async(async move {
-            let result = tokio::task::spawn_blocking(move || rdp_connect(&host_clone, port)).await;
-
-            match result {
-                Ok(Ok(mut stream)) => {
+            match rdp_connect(&ctx, &services, &host, port, "rdp.connect_async") {
+                Ok(mut stream) => {
                     let (security, rdp_sec, tls, nla) = rdp_negotiate_security(&mut stream)
                         .unwrap_or(("unknown".to_string(), true, false, true));
 
@@ -298,12 +326,6 @@ pub fn register_rdp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                     r.set("nla", nla)?;
                     Ok(r)
                 }
-                Ok(Err(e)) => {
-                    let r = lua.create_table()?;
-                    r.set("status", "error")?;
-                    r.set("error", e.to_string())?;
-                    Ok(r)
-                }
                 Err(e) => {
                     let r = lua.create_table()?;
                     r.set("status", "error")?;
@@ -311,7 +333,7 @@ pub fn register_rdp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                     Ok(r)
                 }
             }
-        })
+        }
     })?;
     rdp.set("connect_async", async_connect_fn)?;
 

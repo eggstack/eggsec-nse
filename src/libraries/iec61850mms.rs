@@ -4,13 +4,21 @@
 //! Used for power grid and SCADA systems.
 //! Based on Nmap's iec61850mms library.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::net::TcpStream;
 use std::time::Duration;
 
 const MMS_PORT: u16 = 102;
 
-pub fn register_iec61850mms_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed iec61850mms registration.
+///
+/// `services` backs every TCP connect path.
+pub fn register_iec61850mms_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let iec61850mms = lua.create_table()?;
 
@@ -40,33 +48,31 @@ pub fn register_iec61850mms_library(lua: &Lua) -> LuaResult<()> {
     })?;
     mms.set("decode_identified_rw", decode_identified_rw)?;
 
-    let connect_fn = lua.create_function(|lua, (host, port): (String, Option<u16>)| {
-        let result = lua.create_table()?;
-        let addr = format!("{}:{}", host, port.unwrap_or(MMS_PORT));
+    let connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, Option<u16>)| {
+            let result = lua.create_table()?;
+            let port = port.unwrap_or(MMS_PORT);
+            let timeout = Duration::from_secs(10);
 
-        let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-            Ok(a) => a,
-            Err(e) => {
+            // The broker resolves `host` (authority-preserving) instead of
+            // requiring a literal `SocketAddr` string.
+            if let Err(e) =
+                broker_tcp_connect(&ctx, &services, &host, port, timeout, "iec61850mms.connect")
+            {
                 result.set("status", "error")?;
-                result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
+                result.set("error", e)?;
                 return Ok(result);
             }
-        };
-        let _stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-            Ok(s) => s,
-            Err(e) => {
-                result.set("status", "error")?;
-                result.set("error", e.to_string())?;
-                return Ok(result);
-            }
-        };
 
-        result.set("status", "ok")?;
-        result.set("host", host)?;
-        result.set("port", port.unwrap_or(MMS_PORT))?;
-        result.set("connected", true)?;
+            result.set("status", "ok")?;
+            result.set("host", host)?;
+            result.set("port", port)?;
+            result.set("connected", true)?;
 
-        Ok(result)
+            Ok(result)
+        }
     })?;
     mms.set("connect", connect_fn)?;
 

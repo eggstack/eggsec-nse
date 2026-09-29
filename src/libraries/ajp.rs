@@ -3,12 +3,11 @@
 //! AJP (Apache JServ Protocol) library for Apache mod_proxy_ajp.
 //! Based on Nmap's ajp library concepts.
 
+use crate::brokered_stream::{broker_read_into, broker_write_all};
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult, Table};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream as AsyncTcpStream;
 
 const AJP_PORT: u16 = 8009;
 
@@ -49,7 +48,14 @@ fn build_ajp_request(method: &str, path: &str, headers: &[(&str, &str)], body: &
     packet
 }
 
-pub fn register_ajp_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed ajp registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_ajp_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let ajp = lua.create_table()?;
 
@@ -62,59 +68,67 @@ pub fn register_ajp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ajp.set("new", new_fn)?;
 
-    let connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        let result = lua.create_table()?;
+    let connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, u16)| {
+            let result = lua.create_table()?;
 
-        let addr = format!("{}:{}", host, port);
-
-        match TcpStream::connect_timeout(
-            &addr
-                .parse()
-                .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 8009))),
-            Duration::from_secs(5),
-        ) {
-            Ok(mut stream) => {
-                stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
-                stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
-
-                let request = build_ajp_request("GET", "/", &[], "");
-
-                if let Err(e) = stream.write_all(&request) {
+            // Reachability + banner probe through the broker
+            // (authority-preserving resolve replaces the
+            // literal-parse-plus-loopback-fallback).
+            let (mut handle, _endpoint) = match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port,
+                Duration::from_secs(5),
+                "ajp.connect",
+            ) {
+                Ok(pair) => pair,
+                Err(e) => {
                     result.set("success", false)?;
-                    result.set("error", format!("Send failed: {}", e))?;
+                    result.set("error", format!("Connection failed: {}", e))?;
                     return Ok(result);
                 }
+            };
+            let _ = handle.set_timeouts(Duration::from_secs(5));
 
-                let mut response = [0u8; 4096];
-                match stream.read(&mut response) {
-                    Ok(n) => {
-                        if n > 0 {
-                            result.set("success", true)?;
-                            result.set("status", "connected")?;
-                        } else {
-                            result.set("success", true)?;
-                            result.set("status", "connected")?;
-                        }
-                    }
-                    Err(_) => {
+            let request = build_ajp_request("GET", "/", &[], "");
+
+            if let Err(e) = broker_write_all(&ctx, handle.as_mut(), &request, "ajp.connect") {
+                result.set("success", false)?;
+                result.set("error", format!("Send failed: {}", e))?;
+                return Ok(result);
+            }
+
+            let mut response = [0u8; 4096];
+            match broker_read_into(&ctx, handle.as_mut(), &mut response, "ajp.connect") {
+                Ok(n) => {
+                    if n > 0 {
+                        result.set("success", true)?;
+                        result.set("status", "connected")?;
+                    } else {
                         result.set("success", true)?;
                         result.set("status", "connected")?;
                     }
                 }
+                Err(_) => {
+                    result.set("success", true)?;
+                    result.set("status", "connected")?;
+                }
             }
-            Err(e) => {
-                result.set("success", false)?;
-                result.set("error", format!("Connection failed: {}", e))?;
-            }
-        }
 
-        Ok(result)
+            Ok(result)
+        }
     })?;
     ajp.set("connect", connect_fn)?;
 
-    let request_fn = lua.create_function(
-        |lua,
-         (host, port, method, path, headers, body): (
+    let request_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua,
+              (host, port, method, path, headers, body): (
             String,
             u16,
             String,
@@ -123,8 +137,6 @@ pub fn register_ajp_library(lua: &Lua) -> LuaResult<()> {
             Option<String>,
         )| {
             let result = lua.create_table()?;
-
-            let addr = format!("{}:{}", host, port);
 
             let header_vec: Vec<(String, String)> = if let Some(h) = headers {
                 let mut v = Vec::new();
@@ -143,101 +155,115 @@ pub fn register_ajp_library(lua: &Lua) -> LuaResult<()> {
                 .map(|(k, v)| (k.as_str(), v.as_str()))
                 .collect();
 
-            match TcpStream::connect_timeout(
-                &addr
-                    .parse()
-                    .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 8009))),
+            let (mut handle, _endpoint) = match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port,
                 Duration::from_secs(5),
+                "ajp.request",
             ) {
-                Ok(mut stream) => {
-                    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-                    stream.set_write_timeout(Some(Duration::from_secs(5))).ok();
-
-                    let request = build_ajp_request(&method, &path, &header_refs, &body_str);
-
-                    if let Err(e) = stream.write_all(&request) {
-                        result.set("success", false)?;
-                        result.set("error", format!("Send failed: {}", e))?;
-                        return Ok(result);
-                    }
-
-                    let mut response = [0u8; 8192];
-                    match stream.read(&mut response) {
-                        Ok(n) => {
-                            result.set("success", true)?;
-                            result.set("method", method)?;
-                            result.set("path", path)?;
-                            result.set("bytes", n)?;
-                        }
-                        Err(e) => {
-                            result.set("success", true)?;
-                            result.set("note", format!("Request sent, read failed: {}", e))?;
-                        }
-                    }
-                }
+                Ok(pair) => pair,
                 Err(e) => {
                     result.set("success", false)?;
                     result.set("error", format!("Connection failed: {}", e))?;
+                    return Ok(result);
+                }
+            };
+            let _ = handle.set_timeouts(Duration::from_secs(10));
+
+            let request = build_ajp_request(&method, &path, &header_refs, &body_str);
+
+            if let Err(e) = broker_write_all(&ctx, handle.as_mut(), &request, "ajp.request") {
+                result.set("success", false)?;
+                result.set("error", format!("Send failed: {}", e))?;
+                return Ok(result);
+            }
+
+            let mut response = [0u8; 8192];
+            match broker_read_into(&ctx, handle.as_mut(), &mut response, "ajp.request") {
+                Ok(n) => {
+                    result.set("success", true)?;
+                    result.set("method", method)?;
+                    result.set("path", path)?;
+                    result.set("bytes", n)?;
+                }
+                Err(e) => {
+                    result.set("success", true)?;
+                    result.set("note", format!("Request sent, read failed: {}", e))?;
                 }
             }
 
             Ok(result)
-        },
-    )?;
+        }
+    })?;
     ajp.set("request", request_fn)?;
 
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     ajp.set("version", version_fn)?;
 
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        let runtime = tokio::runtime::Handle::current();
-        let host_clone = host.clone();
-        let port = if port == 0 { AJP_PORT } else { port };
-
-        runtime.block_on(async {
+    // Async connect probe: previously bridged `AsyncTcpStream` through the
+    // ambient runtime. Rewired to the brokered sync probe (entry name kept).
+    let async_connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, u16)| {
             let result = lua.create_table()?;
+            let port = if port == 0 { AJP_PORT } else { port };
 
-            match AsyncTcpStream::connect(format!("{}:{}", host_clone, port)).await {
-                Ok(mut stream) => {
-                    let request = build_ajp_request("GET", "/", &[], "");
-
-                    if let Err(e) = stream.write_all(&request).await {
-                        result.set("success", false)?;
-                        result.set("error", format!("Send failed: {}", e))?;
-                        return Ok(result);
-                    }
-
-                    let mut response = [0u8; 4096];
-                    match stream.read(&mut response).await {
-                        Ok(n) => {
-                            if n > 0 {
-                                result.set("success", true)?;
-                                result.set("status", "connected")?;
-                            } else {
-                                result.set("success", true)?;
-                                result.set("status", "connected")?;
-                            }
-                        }
-                        Err(_) => {
-                            result.set("success", true)?;
-                            result.set("status", "connected")?;
-                        }
-                    }
-                }
+            let (mut handle, _endpoint) = match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port,
+                Duration::from_secs(5),
+                "ajp.connect_async",
+            ) {
+                Ok(pair) => pair,
                 Err(e) => {
                     result.set("success", false)?;
                     result.set("error", format!("Connection failed: {}", e))?;
+                    return Ok(result);
+                }
+            };
+
+            let request = build_ajp_request("GET", "/", &[], "");
+
+            if let Err(e) = broker_write_all(&ctx, handle.as_mut(), &request, "ajp.connect_async") {
+                result.set("success", false)?;
+                result.set("error", format!("Send failed: {}", e))?;
+                return Ok(result);
+            }
+
+            let mut response = [0u8; 4096];
+            match broker_read_into(&ctx, handle.as_mut(), &mut response, "ajp.connect_async") {
+                Ok(n) => {
+                    if n > 0 {
+                        result.set("success", true)?;
+                        result.set("status", "connected")?;
+                    } else {
+                        result.set("success", true)?;
+                        result.set("status", "connected")?;
+                    }
+                }
+                Err(_) => {
+                    result.set("success", true)?;
+                    result.set("status", "connected")?;
                 }
             }
 
             Ok(result)
-        })
+        }
     })?;
     ajp.set("connect_async", async_connect_fn)?;
 
-    let async_request_fn = lua.create_function(
-        |lua,
-         (host, port, method, path, headers, body): (
+    // Async request: previously bridged `AsyncTcpStream` through the ambient
+    // runtime. Rewired to the brokered sync path (entry name kept).
+    let async_request_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua,
+              (host, port, method, path, headers, body): (
             String,
             u16,
             String,
@@ -245,64 +271,67 @@ pub fn register_ajp_library(lua: &Lua) -> LuaResult<()> {
             Option<Table>,
             Option<String>,
         )| {
-            let runtime = tokio::runtime::Handle::current();
-            let host_clone = host.clone();
+            let result = lua.create_table()?;
             let port = if port == 0 { AJP_PORT } else { port };
 
-            runtime.block_on(async {
-                let result = lua.create_table()?;
-
-                let header_vec: Vec<(String, String)> = if let Some(h) = headers {
-                    let mut v = Vec::new();
-                    for (k, val) in h.pairs::<String, String>().flatten() {
-                        v.push((k.clone(), val.clone()));
-                    }
-                    v
-                } else {
-                    vec![(host_clone.clone(), host_clone.clone())]
-                };
-
-                let body_str = body.unwrap_or_default();
-
-                let header_refs: Vec<(&str, &str)> = header_vec
-                    .iter()
-                    .map(|(k, v)| (k.as_str(), v.as_str()))
-                    .collect();
-
-                match AsyncTcpStream::connect(format!("{}:{}", host_clone, port)).await {
-                    Ok(mut stream) => {
-                        let request = build_ajp_request(&method, &path, &header_refs, &body_str);
-
-                        if let Err(e) = stream.write_all(&request).await {
-                            result.set("success", false)?;
-                            result.set("error", format!("Send failed: {}", e))?;
-                            return Ok(result);
-                        }
-
-                        let mut response = [0u8; 8192];
-                        match stream.read(&mut response).await {
-                            Ok(n) => {
-                                result.set("success", true)?;
-                                result.set("method", method)?;
-                                result.set("path", path)?;
-                                result.set("bytes", n)?;
-                            }
-                            Err(e) => {
-                                result.set("success", true)?;
-                                result.set("note", format!("Request sent, read failed: {}", e))?;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        result.set("success", false)?;
-                        result.set("error", format!("Connection failed: {}", e))?;
-                    }
+            let header_vec: Vec<(String, String)> = if let Some(h) = headers {
+                let mut v = Vec::new();
+                for (k, val) in h.pairs::<String, String>().flatten() {
+                    v.push((k.clone(), val.clone()));
                 }
+                v
+            } else {
+                vec![(host.clone(), host.clone())]
+            };
 
-                Ok(result)
-            })
-        },
-    )?;
+            let body_str = body.unwrap_or_default();
+
+            let header_refs: Vec<(&str, &str)> = header_vec
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+
+            let (mut handle, _endpoint) = match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port,
+                Duration::from_secs(5),
+                "ajp.request_async",
+            ) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", format!("Connection failed: {}", e))?;
+                    return Ok(result);
+                }
+            };
+
+            let request = build_ajp_request(&method, &path, &header_refs, &body_str);
+
+            if let Err(e) = broker_write_all(&ctx, handle.as_mut(), &request, "ajp.request_async") {
+                result.set("success", false)?;
+                result.set("error", format!("Send failed: {}", e))?;
+                return Ok(result);
+            }
+
+            let mut response = [0u8; 8192];
+            match broker_read_into(&ctx, handle.as_mut(), &mut response, "ajp.request_async") {
+                Ok(n) => {
+                    result.set("success", true)?;
+                    result.set("method", method)?;
+                    result.set("path", path)?;
+                    result.set("bytes", n)?;
+                }
+                Err(e) => {
+                    result.set("success", true)?;
+                    result.set("note", format!("Request sent, read failed: {}", e))?;
+                }
+            }
+
+            Ok(result)
+        }
+    })?;
     ajp.set("request_async", async_request_fn)?;
 
     globals.set("ajp", ajp)?;

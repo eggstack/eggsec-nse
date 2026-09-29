@@ -3,61 +3,70 @@
 //! JDWP (Java Debug Wire Protocol) support for NSE scripts.
 //! Based on Nmap's jdwp library.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, broker_tcp_receive, broker_tcp_send, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
-pub fn register_jdwp_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed jdwp registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_jdwp_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let jdwp = lua.create_table()?;
 
     jdwp.set(
         "connect",
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            let result = lua.create_table()?;
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, u16)| {
+                let result = lua.create_table()?;
+                let timeout = Duration::from_secs(10);
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
+                let (mut handle, _endpoint) =
+                    match broker_tcp_connect(&ctx, &services, &host, port, timeout, "jdwp.connect")
+                    {
+                        Ok(pair) => pair,
+                        Err(e) => {
+                            result.set("status", "error")?;
+                            result.set("error", e)?;
+                            return Ok(result);
+                        }
+                    };
+
+                // JDWP Handshake
+                let handshake = "JDWP-Handshake";
+                if let Err(e) =
+                    broker_tcp_send(&ctx, handle.as_mut(), handshake.as_bytes(), "jdwp.connect")
+                {
+                    tracing::warn!("Failed to send JDWP handshake: {}", e);
                 }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
+
+                let data = broker_tcp_receive(&ctx, handle.as_mut(), 1024, "jdwp.connect")
+                    .unwrap_or_default();
+                let mut response = [0u8; 1024];
+                let n = data.len().min(response.len());
+                response[..n].copy_from_slice(&data[..n]);
+
+                let response_str = String::from_utf8_lossy(&response[..n]);
+
+                if response_str.starts_with("JDWP-Handshake") {
+                    result.set("status", "ok")?;
+                    result.set("connected", true)?;
+                    result.set("host", host)?;
+                    result.set("port", port)?;
+                } else {
                     result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
+                    result.set("error", "Handshake failed")?;
                 }
-            };
 
-            // JDWP Handshake
-            let handshake = "JDWP-Handshake";
-            stream
-                .write_all(handshake.as_bytes())
-                .unwrap_or_else(|e| tracing::warn!("Failed to send JDWP handshake: {}", e));
-
-            let mut response = [0u8; 1024];
-            let n = stream.read(&mut response).unwrap_or(0);
-
-            let response_str = String::from_utf8_lossy(&response[..n]);
-
-            if response_str.starts_with("JDWP-Handshake") {
-                result.set("status", "ok")?;
-                result.set("connected", true)?;
-                result.set("host", host)?;
-                result.set("port", port)?;
-            } else {
-                result.set("status", "error")?;
-                result.set("error", "Handshake failed")?;
+                Ok(result)
             }
-
-            Ok(result)
         })?,
     )?;
 

@@ -4,13 +4,13 @@
 //! Based on Nmap's postgres library: https://nmap.org/nsedoc/lib/postgres.html
 //! Includes both blocking and async implementations with real PostgreSQL protocol support.
 
+use crate::brokered_stream::BrokeredTcpStream;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::NseHostServices;
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::Write;
 use std::time::Duration;
 
-use crate::capabilities::NseCapabilityContext;
-use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 fn maybe_denied_postgres(
@@ -43,17 +43,29 @@ const PG_AUTHENTICATION_GSS: i32 = 7;
 const PG_AUTHENTICATION_SSPI: i32 = 9;
 
 struct PgConnection {
-    stream: TcpStream,
+    stream: BrokeredTcpStream,
     server_version: String,
     backend_key: Option<(u32, u32)>,
 }
 
-fn pg_connect(host: &str, port: u16) -> std::io::Result<PgConnection> {
-    let addr = format!("{}:{}", host, port);
-    let socket_addr = addr
-        .parse::<std::net::SocketAddr>()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
-    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))?;
+/// Brokered PostgreSQL connect: authority-preserving resolve replaces the
+/// literal `addr` parse; stream timeouts bound the startup read (30s/10s).
+fn pg_connect(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    host: &str,
+    port: u16,
+    operation: &'static str,
+) -> std::io::Result<PgConnection> {
+    let (mut stream, _endpoint) = BrokeredTcpStream::connect(
+        ctx,
+        services,
+        host,
+        port,
+        Duration::from_secs(10),
+        operation,
+    )
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
 
@@ -253,19 +265,24 @@ fn pg_query(conn: &mut PgConnection, query: &str) -> std::io::Result<String> {
     Ok(result.trim().to_string())
 }
 
-pub fn register_postgres_library(
+/// Provider-backed postgres registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_postgres_library_with_services(
     lua: &Lua,
     capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
 ) -> LuaResult<()> {
     let globals = lua.globals();
     let postgres = lua.create_table()?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(denied) = maybe_denied_postgres(lua, &cap, &host, "postgres.connect")? {
             return Ok(denied);
         }
-        match pg_connect(&host, port) {
+        match pg_connect(&cap, &svc, &host, port, "postgres.connect") {
             Ok(conn) => {
                 let result = lua.create_table()?;
                 result.set("host", host)?;
@@ -285,13 +302,14 @@ pub fn register_postgres_library(
     postgres.set("connect", connect_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let login_fn = lua.create_function(
         move |lua, (host, port, user, password): (String, u16, String, String)| {
             if let Some(denied) = maybe_denied_postgres(lua, &cap, &host, "postgres.login")? {
                 return Ok(denied);
             }
             let db = "postgres".to_string();
-            match pg_connect(&host, port) {
+            match pg_connect(&cap, &svc, &host, port, "postgres.login") {
                 Ok(mut conn) => match pg_login(&mut conn, &user, &password, &db) {
                     Ok(success) => {
                         let result = lua.create_table()?;
@@ -318,12 +336,13 @@ pub fn register_postgres_library(
     postgres.set("login", login_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let login_ex_fn = lua.create_function(
         move |lua, (host, port, user, password, database): (String, u16, String, String, String)| {
             if let Some(denied) = maybe_denied_postgres(lua, &cap, &host, "postgres.login_ex")? {
                 return Ok(denied);
             }
-            match pg_connect(&host, port) {
+            match pg_connect(&cap, &svc, &host, port, "postgres.login_ex") {
                 Ok(mut conn) => match pg_login(&mut conn, &user, &password, &database) {
                     Ok(success) => {
                         let result = lua.create_table()?;
@@ -351,12 +370,13 @@ pub fn register_postgres_library(
     postgres.set("login_ex", login_ex_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let query_fn =
         lua.create_function(move |lua, (host, port, query): (String, u16, String)| {
             if let Some(denied) = maybe_denied_postgres(lua, &cap, &host, "postgres.query")? {
                 return Ok(denied);
             }
-            match pg_connect(&host, port) {
+            match pg_connect(&cap, &svc, &host, port, "postgres.query") {
                 Ok(mut conn) => match pg_query(&mut conn, &query) {
                     Ok(response) => {
                         let result = lua.create_table()?;
@@ -382,44 +402,36 @@ pub fn register_postgres_library(
     postgres.set("query", query_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(denied) = maybe_denied_postgres(lua, &cap, &host, "postgres.connect_async")? {
             return Err(mlua::Error::RuntimeError(
                 denied.get::<String>("error").unwrap_or_default(),
             ));
         }
-        let host_clone = host.clone();
-
-        block_on_async(async move {
-            let result = tokio::task::spawn_blocking(move || pg_connect(&host_clone, port)).await;
-
-            match result {
-                Ok(Ok(conn)) => {
-                    let r = lua.create_table()?;
-                    r.set("host", host)?;
-                    r.set("port", port)?;
-                    r.set("status", "connected")?;
-                    r.set("server_version", conn.server_version)?;
-                    Ok(r)
-                }
-                Ok(Err(e)) => {
-                    let r = lua.create_table()?;
-                    r.set("status", "error")?;
-                    r.set("error", e.to_string())?;
-                    Ok(r)
-                }
-                Err(e) => {
-                    let r = lua.create_table()?;
-                    r.set("status", "error")?;
-                    r.set("error", e.to_string())?;
-                    Ok(r)
-                }
+        // Synchronous brokered connect; the async surface keeps its
+        // name for script compatibility.
+        match pg_connect(&cap, &svc, &host, port, "postgres.connect_async") {
+            Ok(conn) => {
+                let r = lua.create_table()?;
+                r.set("host", host)?;
+                r.set("port", port)?;
+                r.set("status", "connected")?;
+                r.set("server_version", conn.server_version)?;
+                Ok(r)
             }
-        })
+            Err(e) => {
+                let r = lua.create_table()?;
+                r.set("status", "error")?;
+                r.set("error", e.to_string())?;
+                Ok(r)
+            }
+        }
     })?;
     postgres.set("connect_async", async_connect_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_login_fn = lua.create_function(
         move |lua, (host, port, user, password): (String, u16, String, String)| {
             if let Some(denied) = maybe_denied_postgres(lua, &cap, &host, "postgres.login_async")? {
@@ -427,28 +439,15 @@ pub fn register_postgres_library(
                     denied.get::<String>("error").unwrap_or_default(),
                 ));
             }
-            let host_clone = host.clone();
-            let user_clone = user.clone();
+            // Synchronous brokered connect + login; the async surface
+            // keeps its name for script compatibility.
             let db = "postgres".to_string();
-
-            block_on_async(async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    let mut conn = pg_connect(&host_clone, port)?;
-                    pg_login(&mut conn, &user_clone, &password, &db)
-                })
-                .await;
-
-                match result {
-                    Ok(Ok(success)) => {
+            match pg_connect(&cap, &svc, &host, port, "postgres.login_async") {
+                Ok(mut conn) => match pg_login(&mut conn, &user, &password, &db) {
+                    Ok(success) => {
                         let r = lua.create_table()?;
                         r.set("success", success)?;
                         r.set("user", user)?;
-                        Ok(r)
-                    }
-                    Ok(Err(e)) => {
-                        let r = lua.create_table()?;
-                        r.set("success", false)?;
-                        r.set("error", e.to_string())?;
                         Ok(r)
                     }
                     Err(e) => {
@@ -457,13 +456,20 @@ pub fn register_postgres_library(
                         r.set("error", e.to_string())?;
                         Ok(r)
                     }
+                },
+                Err(e) => {
+                    let r = lua.create_table()?;
+                    r.set("success", false)?;
+                    r.set("error", e.to_string())?;
+                    Ok(r)
                 }
-            })
+            }
         },
     )?;
     postgres.set("login_async", async_login_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_query_fn =
         lua.create_function(move |lua, (host, port, query): (String, u16, String)| {
             if let Some(denied) = maybe_denied_postgres(lua, &cap, &host, "postgres.query_async")? {
@@ -471,26 +477,14 @@ pub fn register_postgres_library(
                     denied.get::<String>("error").unwrap_or_default(),
                 ));
             }
-            let host_clone = host.clone();
-
-            block_on_async(async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    let mut conn = pg_connect(&host_clone, port)?;
-                    pg_query(&mut conn, &query)
-                })
-                .await;
-
-                match result {
-                    Ok(Ok(response)) => {
+            // Synchronous brokered connect + query; the async surface
+            // keeps its name for script compatibility.
+            match pg_connect(&cap, &svc, &host, port, "postgres.query_async") {
+                Ok(mut conn) => match pg_query(&mut conn, &query) {
+                    Ok(response) => {
                         let r = lua.create_table()?;
                         r.set("rows", response)?;
                         r.set("status", "ok")?;
-                        Ok(r)
-                    }
-                    Ok(Err(e)) => {
-                        let r = lua.create_table()?;
-                        r.set("status", "error")?;
-                        r.set("error", e.to_string())?;
                         Ok(r)
                     }
                     Err(e) => {
@@ -499,8 +493,14 @@ pub fn register_postgres_library(
                         r.set("error", e.to_string())?;
                         Ok(r)
                     }
+                },
+                Err(e) => {
+                    let r = lua.create_table()?;
+                    r.set("status", "error")?;
+                    r.set("error", e.to_string())?;
+                    Ok(r)
                 }
-            })
+            }
         })?;
     postgres.set("query_async", async_query_fn)?;
 

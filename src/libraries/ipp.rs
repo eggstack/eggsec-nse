@@ -3,9 +3,9 @@
 //! IPP (Internet Printing Protocol) support for NSE scripts.
 //! Based on Nmap's ipp library: https://nmap.org/nsedoc/lib/ipp.html
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, broker_tcp_receive, broker_tcp_send, NseHostServices};
 use mlua::{Lua, Result as LuaResult, Table};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
 const IPP_PORT: u16 = 631;
@@ -119,77 +119,87 @@ fn parse_ipp_response(data: &[u8], lua: &Lua) -> LuaResult<Table> {
     Ok(result)
 }
 
-pub fn register_ipp_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed ipp registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_ipp_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let ipp = lua.create_table()?;
 
     ipp.set(
         "get_attributes",
-        lua.create_function(|lua, (host, port): (String, Option<u16>)| {
-            let port = port.unwrap_or(IPP_PORT);
-            let result = lua.create_table()?;
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, Option<u16>)| {
+                let port = port.unwrap_or(IPP_PORT);
+                let result = lua.create_table()?;
+                let timeout = Duration::from_secs(10);
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr: std::net::SocketAddr = match addr.parse() {
-                Ok(a) => a,
-                Err(e) => {
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    timeout,
+                    "ipp.get_attributes",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
+
+                // Preserve the original 10s read/write timeout behavior via
+                // the provider handle (failures here were ignored before).
+                let _ = handle.set_timeouts(Duration::from_secs(10));
+
+                let printer_uri = format!("ipp://{}:{}/ipp/print", host, port);
+                let ipp_request = build_ipp_request(0x0B, &printer_uri);
+
+                if let Err(e) =
+                    broker_tcp_send(&ctx, handle.as_mut(), &ipp_request, "ipp.get_attributes")
+                {
                     result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
+                    result.set("error", format!("Failed to send request: {}", e))?;
                     return Ok(result);
                 }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
+
+                match broker_tcp_receive(&ctx, handle.as_mut(), 4096, "ipp.get_attributes") {
+                    Ok(response) => {
+                        let parsed = parse_ipp_response(&response, lua)?;
+
+                        result.set("status", "ok")?;
+                        result.set("host", host)?;
+                        result.set("port", port)?;
+                        result.set("printer_uri", printer_uri)?;
+
+                        if let Ok(attrs) = parsed.get::<Table>("attributes") {
+                            result.set("attributes", attrs)?;
+                        }
+
+                        if let Ok(version) = parsed.get::<String>("version") {
+                            result.set("version", version)?;
+                        }
+
+                        if let Ok(status_code) = parsed.get::<u16>("status_code") {
+                            result.set("status_code", status_code)?;
+                        }
+                    }
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", format!("Failed to read response: {}", e))?;
+                    }
                 }
-            };
 
-            stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
-
-            let printer_uri = format!("ipp://{}:{}/ipp/print", host, port);
-            let ipp_request = build_ipp_request(0x0B, &printer_uri);
-
-            if let Err(e) = stream.write_all(&ipp_request) {
-                result.set("status", "error")?;
-                result.set("error", format!("Failed to send request: {}", e))?;
-                return Ok(result);
+                Ok(result)
             }
-
-            let mut response = vec![0u8; 4096];
-            match stream.read(&mut response) {
-                Ok(n) => {
-                    response.truncate(n);
-                    let parsed = parse_ipp_response(&response, lua)?;
-
-                    result.set("status", "ok")?;
-                    result.set("host", host)?;
-                    result.set("port", port)?;
-                    result.set("printer_uri", printer_uri)?;
-
-                    if let Ok(attrs) = parsed.get::<Table>("attributes") {
-                        result.set("attributes", attrs)?;
-                    }
-
-                    if let Ok(version) = parsed.get::<String>("version") {
-                        result.set("version", version)?;
-                    }
-
-                    if let Ok(status_code) = parsed.get::<u16>("status_code") {
-                        result.set("status_code", status_code)?;
-                    }
-                }
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Failed to read response: {}", e))?;
-                }
-            }
-
-            Ok(result)
         })?,
     )?;
 

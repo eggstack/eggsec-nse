@@ -3,11 +3,19 @@
 //! WebSocket protocol support for NSE scripts.
 //! Includes both blocking and async implementations.
 
-use crate::libraries::runtime_bridge::block_on_async;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use tokio::net::TcpStream as AsyncTcpStream;
+use std::time::Duration;
 
-pub fn register_websocket_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed websocket registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_websocket_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let websocket = lua.create_table()?;
 
@@ -60,29 +68,36 @@ pub fn register_websocket_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     websocket.set("version", version_fn)?;
 
-    // Async connect
-    let async_connect_fn =
-        lua.create_function(|lua, (host, port, path): (String, u16, String)| {
-            let addr = format!("{}:{}", host, port);
-
-            block_on_async(async {
-                match AsyncTcpStream::connect(&addr).await {
-                    Ok(_stream) => {
-                        let r = lua.create_table()?;
-                        r.set("host", host)?;
-                        r.set("port", port)?;
-                        r.set("path", path)?;
-                        r.set("status", "connected")?;
-                        Ok(r)
-                    }
-                    Err(e) => {
-                        let r = lua.create_table()?;
-                        r.set("error", e.to_string())?;
-                        Ok(r)
-                    }
-                }
-            })
-        })?;
+    // Async connect probe: previously bridged `AsyncTcpStream` through a
+    // throwaway runtime. Rewired to the brokered sync probe — Lua-visible
+    // behavior is unchanged (the entry always blocked), and the entry name
+    // is kept for script compatibility.
+    let async_connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port, path): (String, u16, String)| match broker_tcp_connect(
+            &ctx,
+            &services,
+            &host,
+            port,
+            Duration::from_secs(10),
+            "websocket.connect_async",
+        ) {
+            Ok(_) => {
+                let r = lua.create_table()?;
+                r.set("host", host)?;
+                r.set("port", port)?;
+                r.set("path", path)?;
+                r.set("status", "connected")?;
+                Ok(r)
+            }
+            Err(e) => {
+                let r = lua.create_table()?;
+                r.set("error", e)?;
+                Ok(r)
+            }
+        }
+    })?;
     websocket.set("connect_async", async_connect_fn)?;
 
     globals.set("websocket", websocket)?;

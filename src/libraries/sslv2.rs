@@ -3,140 +3,167 @@
 //! SSLv2 protocol detection for NSE scripts.
 //! Based on Nmap's sslv2 library.
 
+use crate::brokered_stream::{broker_read_into, broker_write_all};
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
-pub fn register_sslv2_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed sslv2 registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_sslv2_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let sslv2 = lua.create_table()?;
 
     sslv2.set(
         "detect",
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            let result = lua.create_table()?;
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, u16)| {
+                let result = lua.create_table()?;
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
+                // The broker resolves `host` (authority-preserving);
+                // unresolvable or refused hosts keep the error-table shape.
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "sslv2.detect",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
 
-            // SSLv2 client hello
-            let client_hello = [
-                0x01, 0x00, 0x00, 0x02, 0x00, 0x00, // Record header
-                0x00, 0x00, // Client version (SSLv2)
-                0x00, 0x00, 0x00, 0x00, // Cipher specs length
-                0x00, 0x00, // Session ID length
-                0x00, 0x00, // Challenge length
-                0x01, 0x00, 0x80, // Cipher specs (SSL_RSA_WITH_RC4_128_MD5)
-                0x02, 0x00, 0x80, // SSL_RSA_WITH_RC4_128_SHA
-                0x03, 0x00, 0x80, // SSL_RSA_WITH_DES_CBC_SHA
-                0x04, 0x00, 0x80, // SSL_RSA_3DES_EDE_SHA
-                0x05, 0x00, 0x80, // SSL_DH_RSA_WITH_3DES_EDE_SHA
-                0x06, 0x00, 0x40, // SSL_DHE_RSA_WITH_3DES_EDE_SHA
-                0x00, 0x00, 0x00, // Challenge (16 bytes of random)
-            ];
+                // SSLv2 client hello
+                let client_hello = [
+                    0x01, 0x00, 0x00, 0x02, 0x00, 0x00, // Record header
+                    0x00, 0x00, // Client version (SSLv2)
+                    0x00, 0x00, 0x00, 0x00, // Cipher specs length
+                    0x00, 0x00, // Session ID length
+                    0x00, 0x00, // Challenge length
+                    0x01, 0x00, 0x80, // Cipher specs (SSL_RSA_WITH_RC4_128_MD5)
+                    0x02, 0x00, 0x80, // SSL_RSA_WITH_RC4_128_SHA
+                    0x03, 0x00, 0x80, // SSL_RSA_WITH_DES_CBC_SHA
+                    0x04, 0x00, 0x80, // SSL_RSA_3DES_EDE_SHA
+                    0x05, 0x00, 0x80, // SSL_DH_RSA_WITH_3DES_EDE_SHA
+                    0x06, 0x00, 0x40, // SSL_DHE_RSA_WITH_3DES_EDE_SHA
+                    0x00, 0x00, 0x00, // Challenge (16 bytes of random)
+                ];
 
-            stream.write_all(&client_hello).ok();
+                broker_write_all(&ctx, handle.as_mut(), &client_hello, "sslv2.detect").ok();
 
-            let mut response = [0u8; 1024];
-            let n = stream.read(&mut response).unwrap_or(0);
+                let mut response = [0u8; 1024];
+                let n = broker_read_into(&ctx, handle.as_mut(), &mut response, "sslv2.detect")
+                    .unwrap_or(0);
 
-            if n > 0 {
-                result.set("status", "ok")?;
-                result.set("ssl", true)?;
+                if n > 0 {
+                    result.set("status", "ok")?;
+                    result.set("ssl", true)?;
 
-                // Check for SSLv2 server hello
-                if response[0] == 0x04 {
-                    result.set("version", "SSLv2")?;
-                    result.set("supported_versions", "SSLv2,SSLv3,TLSv1")?;
-                    result.set("cipher", "SSL_RSA_WITH_RC4_128_MD5")?;
-                } else if response[0] == 0x02 {
-                    result.set("version", "SSLv2")?;
-                    result.set("supported_versions", "SSLv2")?;
+                    // Check for SSLv2 server hello
+                    if response[0] == 0x04 {
+                        result.set("version", "SSLv2")?;
+                        result.set("supported_versions", "SSLv2,SSLv3,TLSv1")?;
+                        result.set("cipher", "SSL_RSA_WITH_RC4_128_MD5")?;
+                    } else if response[0] == 0x02 {
+                        result.set("version", "SSLv2")?;
+                        result.set("supported_versions", "SSLv2")?;
+                    } else {
+                        result.set("ssl", false)?;
+                    }
                 } else {
+                    result.set("status", "no_response")?;
                     result.set("ssl", false)?;
                 }
-            } else {
-                result.set("status", "no_response")?;
-                result.set("ssl", false)?;
-            }
 
-            Ok(result)
+                Ok(result)
+            }
         })?,
     )?;
 
     sslv2.set(
         "get_supported_methods",
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            let result = lua.create_table()?;
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, u16)| {
+                let result = lua.create_table()?;
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
+                // The broker resolves `host` (authority-preserving);
+                // unresolvable or refused hosts keep the error-table shape.
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "sslv2.get_supported_methods",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
 
-            // Try SSLv2 client hello
-            let client_hello_v2 = [
-                0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-                0x00, 0x00, 0x00, 0x00, 0x00,
-            ];
+                // Try SSLv2 client hello
+                let client_hello_v2 = [
+                    0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                ];
 
-            stream.write_all(&client_hello_v2).ok();
+                broker_write_all(
+                    &ctx,
+                    handle.as_mut(),
+                    &client_hello_v2,
+                    "sslv2.get_supported_methods",
+                )
+                .ok();
 
-            let mut response = [0u8; 1024];
-            let _n = stream.read(&mut response).unwrap_or(0);
+                let mut response = [0u8; 1024];
+                let _n = broker_read_into(
+                    &ctx,
+                    handle.as_mut(),
+                    &mut response,
+                    "sslv2.get_supported_methods",
+                )
+                .unwrap_or(0);
 
-            // Try SSLv3/TLS client hello
-            let _client_hello_v3 = [
-                0x16, // Handshake
-                0x03, 0x00, // Version TLS 1.0
-                0x00, 0x5c, // Length
-                0x01, // Client hello
-                0x00, 0x00, 0x58, // Hello length
-                0x03, 0x00, // Client version TLS 1.0
-            ];
+                // Try SSLv3/TLS client hello
+                let _client_hello_v3 = [
+                    0x16, // Handshake
+                    0x03, 0x00, // Version TLS 1.0
+                    0x00, 0x5c, // Length
+                    0x01, // Client hello
+                    0x00, 0x00, 0x58, // Hello length
+                    0x03, 0x00, // Client version TLS 1.0
+                ];
 
-            let methods = lua.create_table()?;
-            methods.set(1, "SSLv2")?;
-            methods.set(2, "SSLv3")?;
-            methods.set(3, "TLSv1.0")?;
-            methods.set(4, "TLSv1.1")?;
-            methods.set(5, "TLSv1.2")?;
+                let methods = lua.create_table()?;
+                methods.set(1, "SSLv2")?;
+                methods.set(2, "SSLv3")?;
+                methods.set(3, "TLSv1.0")?;
+                methods.set(4, "TLSv1.1")?;
+                methods.set(5, "TLSv1.2")?;
 
-            result.set("status", "ok")?;
-            result.set("methods", methods)?;
+                result.set("status", "ok")?;
+                result.set("methods", methods)?;
 
-            Ok(result)
+                Ok(result)
+            }
         })?,
     )?;
 

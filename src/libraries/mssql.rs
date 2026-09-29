@@ -2,14 +2,13 @@
 //!
 //! Microsoft SQL Server (TDS) protocol support for NSE scripts.
 
-use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream as AsyncTcpStream;
-
+use crate::brokered_stream::BrokeredTcpStream;
 use crate::capabilities::NseCapabilityContext;
+use crate::providers::NseHostServices;
+use mlua::{Lua, Result as LuaResult};
+use std::io::Write;
+use std::time::Duration;
+
 use crate::wrappers;
 
 fn maybe_denied_mssql(
@@ -35,25 +34,61 @@ fn maybe_denied_mssql(
     Ok(None)
 }
 
-pub fn register_mssql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+/// Brokered TDS exchange: authority-preserving resolve replaces the literal
+/// `addr` parse; stream timeouts bound the round-trip (10s).
+fn mssql_exchange(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    host: &str,
+    port: u16,
+    packet: &[u8],
+    operation: &'static str,
+) -> std::io::Result<Vec<u8>> {
+    let (mut stream, _endpoint) = BrokeredTcpStream::connect(
+        ctx,
+        services,
+        host,
+        port,
+        Duration::from_secs(10),
+        operation,
+    )
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    stream.write_all(packet)?;
+    let mut response = vec![0u8; 65536];
+    let n = stream.read(&mut response).unwrap_or(0);
+    Ok(response[..n].to_vec())
+}
+
+/// Provider-backed mssql registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_mssql_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let mssql = lua.create_table()?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(denied) = maybe_denied_mssql(lua, &cap, &host, "mssql.connect")? {
             return Ok(denied);
         }
-        let addr = format!("{}:{}", host, port);
-        let stream = TcpStream::connect_timeout(
-            &addr
-                .parse::<std::net::SocketAddr>()
-                .map_err(|e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()))?,
+        // Brokered reachability probe; authority-preserving resolve
+        // replaces the literal-parse form.
+        let (_stream, _endpoint) = BrokeredTcpStream::connect(
+            &cap,
+            &svc,
+            &host,
+            port,
             Duration::from_secs(10),
+            "mssql.connect",
         )
-        .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
-
-        stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+        .map_err(mlua::Error::RuntimeError)?;
 
         let result = lua.create_table()?;
         result.set("host", host)?;
@@ -65,20 +100,22 @@ pub fn register_mssql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
     mssql.set("connect", connect_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let login_fn = lua.create_function(
         move |lua, (host, port, user, _pass, _db): (String, u16, String, String, String)| {
             if let Some(denied) = maybe_denied_mssql(lua, &cap, &host, "mssql.login")? {
                 return Ok(denied);
             }
-            let addr = format!("{}:{}", host, port);
-            let _stream =
-                TcpStream::connect_timeout(
-                    &addr.parse::<std::net::SocketAddr>().map_err(
-                        |e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()),
-                    )?,
-                    Duration::from_secs(10),
-                )
-                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
+            // Brokered reachability check; the stub result is unchanged.
+            let (_stream, _endpoint) = BrokeredTcpStream::connect(
+                &cap,
+                &svc,
+                &host,
+                port,
+                Duration::from_secs(10),
+                "mssql.login",
+            )
+            .map_err(mlua::Error::RuntimeError)?;
 
             let result = lua.create_table()?;
             result.set("success", true)?;
@@ -90,22 +127,13 @@ pub fn register_mssql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
     mssql.set("login", login_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let query_fn =
         lua.create_function(move |_lua, (host, port, query): (String, u16, String)| {
             if let Some(denied) = maybe_denied_mssql(_lua, &cap, &host, "mssql.query")? {
                 tracing::debug!(denial = ?denied, "mssql.query denied by capability policy");
                 return Ok(String::new());
             }
-            let addr = format!("{}:{}", host, port);
-            let mut stream =
-                TcpStream::connect_timeout(
-                    &addr.parse::<std::net::SocketAddr>().map_err(
-                        |e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()),
-                    )?,
-                    Duration::from_secs(10),
-                )
-                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
-
             let mut packet = vec![b'S', 0x01, 0x00, 0x00];
             let len = (query.len() + 8) as u16;
             packet.extend_from_slice(&len.to_le_bytes());
@@ -113,16 +141,16 @@ pub fn register_mssql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
             packet.extend_from_slice(query.as_bytes());
             packet.push(0);
 
-            stream.write_all(&packet).ok();
+            // Brokered TDS round-trip; empty reply maps to the empty
+            // string exactly like the historical `unwrap_or(0)` path.
+            let response = mssql_exchange(&cap, &svc, &host, port, &packet, "mssql.query")
+                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?;
 
-            let mut response = vec![0u8; 65536];
-            let n = stream.read(&mut response).unwrap_or(0);
-
-            if n == 0 {
+            if response.is_empty() {
                 return Ok(String::new());
             }
 
-            Ok(String::from_utf8_lossy(&response[..n]).to_string())
+            Ok(String::from_utf8_lossy(&response).to_string())
         })?;
     mssql.set("query", query_fn)?;
 
@@ -130,117 +158,134 @@ pub fn register_mssql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
     mssql.set("version", version_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(denied) = maybe_denied_mssql(lua, &cap, &host, "mssql.connect_async")? {
             return Ok(denied);
         }
-        let runtime = tokio::runtime::Handle::current();
-        let host_clone = host.clone();
+        // Synchronous brokered probe; the async surface keeps its
+        // name for script compatibility.
+        let result = lua.create_table()?;
 
-        runtime.block_on(async {
-            let result = lua.create_table()?;
-
-            match AsyncTcpStream::connect(format!("{}:{}", host_clone, port)).await {
-                Ok(_stream) => {
-                    result.set("host", host_clone)?;
-                    result.set("port", port)?;
-                    result.set("status", "connected")?;
-                }
-                Err(e) => {
-                    result.set("status", "failed")?;
-                    result.set("error", format!("Connection failed: {}", e))?;
-                }
+        match BrokeredTcpStream::connect(
+            &cap,
+            &svc,
+            &host,
+            port,
+            Duration::from_secs(10),
+            "mssql.connect_async",
+        ) {
+            Ok((_stream, _endpoint)) => {
+                result.set("host", host)?;
+                result.set("port", port)?;
+                result.set("status", "connected")?;
             }
+            Err(e) => {
+                result.set("status", "failed")?;
+                result.set("error", format!("Connection failed: {}", e))?;
+            }
+        }
 
-            Ok(result)
-        })
+        Ok(result)
     })?;
     mssql.set("connect_async", async_connect_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_login_fn = lua.create_function(
         move |lua, (host, port, user, _pass, _db): (String, u16, String, String, String)| {
             if let Some(denied) = maybe_denied_mssql(lua, &cap, &host, "mssql.login_async")? {
                 return Ok(denied);
             }
-            let runtime = tokio::runtime::Handle::current();
-            let host_clone = host.clone();
+            // Synchronous brokered probe; the async surface keeps its
+            // name for script compatibility.
+            let result = lua.create_table()?;
 
-            runtime.block_on(async {
-                let result = lua.create_table()?;
-
-                match AsyncTcpStream::connect(format!("{}:{}", host_clone, port)).await {
-                    Ok(_stream) => {
-                        result.set("success", true)?;
-                        result.set("user", user)?;
-                    }
-                    Err(e) => {
-                        result.set("success", false)?;
-                        result.set("error", format!("Connection failed: {}", e))?;
-                    }
+            match BrokeredTcpStream::connect(
+                &cap,
+                &svc,
+                &host,
+                port,
+                Duration::from_secs(10),
+                "mssql.login_async",
+            ) {
+                Ok((_stream, _endpoint)) => {
+                    result.set("success", true)?;
+                    result.set("user", user)?;
                 }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", format!("Connection failed: {}", e))?;
+                }
+            }
 
-                Ok(result)
-            })
+            Ok(result)
         },
     )?;
     mssql.set("login_async", async_login_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_query_fn =
         lua.create_function(move |lua, (host, port, query): (String, u16, String)| {
             if let Some(denied) = maybe_denied_mssql(lua, &cap, &host, "mssql.query_async")? {
                 return Ok(denied);
             }
-            let runtime = tokio::runtime::Handle::current();
-            let host_clone = host.clone();
+            // Synchronous brokered exchange; the async surface keeps
+            // its name for script compatibility.
+            let result = lua.create_table()?;
 
-            runtime.block_on(async {
-                let result = lua.create_table()?;
+            match BrokeredTcpStream::connect(
+                &cap,
+                &svc,
+                &host,
+                port,
+                Duration::from_secs(10),
+                "mssql.query_async",
+            ) {
+                Ok((mut stream, _endpoint)) => {
+                    stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+                    stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
+                    let mut packet = vec![b'S', 0x01, 0x00, 0x00];
+                    let len = (query.len() + 8) as u16;
+                    packet.extend_from_slice(&len.to_le_bytes());
+                    packet.extend_from_slice(&[0x01, 0x00, 0x00, 0x00, 0x00]);
+                    packet.extend_from_slice(query.as_bytes());
+                    packet.push(0);
 
-                match AsyncTcpStream::connect(format!("{}:{}", host_clone, port)).await {
-                    Ok(mut stream) => {
-                        let mut packet = vec![b'S', 0x01, 0x00, 0x00];
-                        let len = (query.len() + 8) as u16;
-                        packet.extend_from_slice(&len.to_le_bytes());
-                        packet.extend_from_slice(&[0x01, 0x00, 0x00, 0x00, 0x00]);
-                        packet.extend_from_slice(query.as_bytes());
-                        packet.push(0);
-
-                        if let Err(e) = stream.write_all(&packet).await {
-                            result.set("success", false)?;
-                            result.set("error", format!("Send failed: {}", e))?;
-                            return Ok(result);
-                        }
-
-                        let mut response = vec![0u8; 65536];
-                        match stream.read(&mut response).await {
-                            Ok(n) => {
-                                if n == 0 {
-                                    result.set("success", true)?;
-                                    result.set("output", "")?;
-                                } else {
-                                    result.set("success", true)?;
-                                    result.set(
-                                        "output",
-                                        String::from_utf8_lossy(&response[..n]).to_string(),
-                                    )?;
-                                }
-                            }
-                            Err(e) => {
-                                result.set("success", false)?;
-                                result.set("error", format!("Read failed: {}", e))?;
-                            }
-                        }
-                    }
-                    Err(e) => {
+                    if let Err(e) = stream.write_all(&packet) {
                         result.set("success", false)?;
-                        result.set("error", format!("Connection failed: {}", e))?;
+                        result.set("error", format!("Send failed: {}", e))?;
+                        return Ok(result);
+                    }
+
+                    let mut response = vec![0u8; 65536];
+                    match stream.read(&mut response) {
+                        Ok(n) => {
+                            if n == 0 {
+                                result.set("success", true)?;
+                                result.set("output", "")?;
+                            } else {
+                                result.set("success", true)?;
+                                result.set(
+                                    "output",
+                                    String::from_utf8_lossy(&response[..n]).to_string(),
+                                )?;
+                            }
+                        }
+                        Err(e) => {
+                            result.set("success", false)?;
+                            result.set("error", format!("Read failed: {}", e))?;
+                        }
                     }
                 }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", format!("Connection failed: {}", e))?;
+                }
+            }
 
-                Ok(result)
-            })
+            Ok(result)
         })?;
     mssql.set("query_async", async_query_fn)?;
 

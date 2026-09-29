@@ -2,12 +2,19 @@
 //!
 //! NetBIOS protocol support for NSE scripts.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
 use std::time::Duration;
-use tokio::net::TcpStream as AsyncTcpStream;
-use tokio::time::timeout;
 
-pub fn register_netbios_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed netbios registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_netbios_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let netbios = lua.create_table()?;
 
@@ -142,47 +149,50 @@ pub fn register_netbios_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     netbios.set("version", version_fn)?;
 
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        let runtime = tokio::runtime::Handle::current();
-        let host_clone = host.clone();
-
-        runtime.block_on(async {
+    // Async connect probe: previously bridged `AsyncTcpStream` through the
+    // ambient Tokio runtime. Rewired to the brokered sync connect — the
+    // connected/failed/timeout shape is preserved (timeout distinguished via
+    // the broker error text), and the entry name is kept for compatibility.
+    let async_connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, u16)| {
             let result = lua.create_table()?;
-            let connect_result = timeout(
+            match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port,
                 Duration::from_secs(5),
-                AsyncTcpStream::connect(format!("{}:{}", host_clone, port)),
-            )
-            .await;
-
-            match connect_result {
-                Ok(Ok(_stream)) => {
-                    result.set("host", host_clone)?;
+                "netbios.connect_async",
+            ) {
+                Ok(_) => {
+                    result.set("host", host)?;
                     result.set("port", port)?;
                     result.set("status", "connected")?;
                 }
-                Ok(Err(e)) => {
-                    result.set("host", host_clone)?;
+                Err(e) => {
+                    result.set("host", host)?;
                     result.set("port", port)?;
-                    result.set("status", "failed")?;
-                    result.set("error", format!("Connection failed: {}", e))?;
-                }
-                Err(_) => {
-                    result.set("host", host_clone)?;
-                    result.set("port", port)?;
-                    result.set("status", "timeout")?;
-                    result.set("error", "Connection timed out")?;
+                    if e.contains("timed out") || e.contains("timeout") {
+                        result.set("status", "timeout")?;
+                        result.set("error", "Connection timed out")?;
+                    } else {
+                        result.set("status", "failed")?;
+                        result.set("error", format!("Connection failed: {}", e))?;
+                    }
                 }
             }
             Ok(result)
-        })
+        }
     })?;
     netbios.set("connect_async", async_connect_fn)?;
 
     let async_name_query_fn = lua.create_function(|lua, (_host, target): (String, String)| {
-        let runtime = tokio::runtime::Handle::current();
-
-        runtime.block_on(async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        {
+            // Former `tokio::time::sleep` inside a runtime bridge;
+            // blocking sleep preserves the stub timing without Tokio.
+            std::thread::sleep(Duration::from_millis(100));
 
             let result = lua.create_table()?;
             result.set("name", target.clone())?;
@@ -191,31 +201,31 @@ pub fn register_netbios_library(lua: &Lua) -> LuaResult<()> {
             result.set("state", "ACTIVE")?;
 
             Ok(result)
-        })
+        }
     })?;
     netbios.set("name_query_async", async_name_query_fn)?;
 
     let async_session_fn = lua.create_function(|lua, (_host, target): (String, String)| {
-        let runtime = tokio::runtime::Handle::current();
-
-        runtime.block_on(async {
-            tokio::time::sleep(Duration::from_millis(50)).await;
+        {
+            // Former `tokio::time::sleep` inside a runtime bridge;
+            // blocking sleep preserves the stub timing without Tokio.
+            std::thread::sleep(Duration::from_millis(50));
 
             let result = lua.create_table()?;
             result.set("session_id", 1)?;
             result.set("target", target)?;
 
             Ok(result)
-        })
+        }
     })?;
     netbios.set("session_async", async_session_fn)?;
 
     let async_list_shares_fn =
         lua.create_function(|lua, (_host, _session_id): (String, u32)| {
-            let runtime = tokio::runtime::Handle::current();
-
-            runtime.block_on(async {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+            {
+                // Former `tokio::time::sleep` inside a runtime bridge;
+                // blocking sleep preserves the stub timing without Tokio.
+                std::thread::sleep(Duration::from_millis(100));
 
                 let result = lua.create_table()?;
                 let shares = lua.create_table()?;
@@ -233,15 +243,15 @@ pub fn register_netbios_library(lua: &Lua) -> LuaResult<()> {
                 result.set("shares", shares)?;
 
                 Ok(result)
-            })
+            }
         })?;
     netbios.set("list_shares_async", async_list_shares_fn)?;
 
     let async_get_users_fn = lua.create_function(|lua, (_host, _session_id): (String, u32)| {
-        let runtime = tokio::runtime::Handle::current();
-
-        runtime.block_on(async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+        {
+            // Former `tokio::time::sleep` inside a runtime bridge;
+            // blocking sleep preserves the stub timing without Tokio.
+            std::thread::sleep(Duration::from_millis(100));
 
             let result = lua.create_table()?;
             let users = lua.create_table()?;
@@ -259,7 +269,7 @@ pub fn register_netbios_library(lua: &Lua) -> LuaResult<()> {
             result.set("users", users)?;
 
             Ok(result)
-        })
+        }
     })?;
     netbios.set("get_users_async", async_get_users_fn)?;
 

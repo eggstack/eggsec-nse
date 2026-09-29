@@ -3,13 +3,21 @@
 //! Cisco AnyConnect VPN Client support.
 //! Based on Nmap's anyconnect library.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::net::TcpStream;
 use std::time::Duration;
 
 const ANYCONNECT_PORT: u16 = 443;
 
-pub fn register_anyconnect_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed anyconnect registration.
+///
+/// `services` backs every TCP connect path.
+pub fn register_anyconnect_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let anyconnect = lua.create_table()?;
 
@@ -52,26 +60,29 @@ pub fn register_anyconnect_library(lua: &Lua) -> LuaResult<()> {
     })?;
     anyconnect_obj.set("generate_random", generate_random_fn)?;
 
-    let connect_fn = lua.create_function(|lua, (host, port): (String, Option<u16>)| {
-        let result = lua.create_table()?;
-        let addr = format!("{}:{}", host, port.unwrap_or(ANYCONNECT_PORT));
+    let connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, Option<u16>)| {
+            let result = lua.create_table()?;
+            let port = port.unwrap_or(ANYCONNECT_PORT);
+            let timeout = Duration::from_secs(10);
 
-        let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-            Ok(a) => a,
-            Err(e) => {
-                result.set("status", "error")?;
-                result.set("error", format!("Invalid address '{}': {}", addr, e))?;
-                return Ok(result);
-            }
-        };
-        let stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10));
+            // The broker resolves `host` (authority-preserving) instead of
+            // requiring a literal `SocketAddr` string. Any broker failure
+            // (refused, unresolvable, denied) preserves the original
+            // connect-failure shape: `connected = false`.
+            let connected =
+                broker_tcp_connect(&ctx, &services, &host, port, timeout, "anyconnect.connect")
+                    .is_ok();
 
-        result.set("status", "ok")?;
-        result.set("host", host)?;
-        result.set("port", port.unwrap_or(ANYCONNECT_PORT))?;
-        result.set("connected", stream.is_ok())?;
+            result.set("status", "ok")?;
+            result.set("host", host)?;
+            result.set("port", port)?;
+            result.set("connected", connected)?;
 
-        Ok(result)
+            Ok(result)
+        }
     })?;
     anyconnect_obj.set("connect", connect_fn)?;
 
@@ -98,5 +109,11 @@ pub fn register_anyconnect_library(lua: &Lua) -> LuaResult<()> {
     anyconnect.set("version", version_fn)?;
 
     globals.set("anyconnect", anyconnect)?;
+    // M007B: the `cisco` table (Util + AnyConnect) was previously built but
+    // never published, leaving `connect` unreachable from Lua. Publish it so
+    // the brokered connect path is actually reachable. NOTE: `cisco` is not
+    // in the M007A effect manifest, so it survives the automated-profile
+    // scrub; broker denial still enforces zero contact (covered by tests).
+    globals.set("cisco", cisco)?;
     Ok(())
 }

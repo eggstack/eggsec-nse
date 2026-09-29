@@ -3,14 +3,21 @@
 //! AMQP (Advanced Message Queuing Protocol) library.
 //! Based on Nmap's amqp library concepts.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::net::TcpStream;
 use std::time::Duration;
-use tokio::net::TcpStream as AsyncTcpStream;
 
 const AMQP_PORT: u16 = 5672;
 
-pub fn register_amqp_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed amqp registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_amqp_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let amqp = lua.create_table()?;
 
@@ -23,43 +30,46 @@ pub fn register_amqp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     amqp.set("new", new_fn)?;
 
-    let connect_fn =
-        lua.create_function(
-            |lua,
-             (host, port, user, _password, vhost): (
-                String,
-                u16,
-                String,
-                String,
-                Option<String>,
-            )| {
-                let result = lua.create_table()?;
+    let connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua,
+              (host, port, user, _password, vhost): (
+            String,
+            u16,
+            String,
+            String,
+            Option<String>,
+        )| {
+            let result = lua.create_table()?;
 
-                let addr = format!("{}:{}", host, port);
-
-                match TcpStream::connect_timeout(
-                    &addr
-                        .parse()
-                        .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 5672))),
-                    Duration::from_secs(5),
-                ) {
-                    Ok(_stream) => {
-                        result.set("success", true)?;
-                        result.set("host", host)?;
-                        result.set("port", port)?;
-                        result.set("user", user)?;
-                        result.set("vhost", vhost.unwrap_or_else(|| "/".to_string()))?;
-                        result.set("server_properties", lua.create_table()?)?;
-                    }
-                    Err(e) => {
-                        result.set("success", false)?;
-                        result.set("error", format!("Connection failed: {}", e))?;
-                    }
+            // Reachability probe through the broker (authority-preserving
+            // resolve replaces the literal-parse-plus-loopback-fallback).
+            match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port,
+                Duration::from_secs(5),
+                "amqp.connect",
+            ) {
+                Ok(_) => {
+                    result.set("success", true)?;
+                    result.set("host", host)?;
+                    result.set("port", port)?;
+                    result.set("user", user)?;
+                    result.set("vhost", vhost.unwrap_or_else(|| "/".to_string()))?;
+                    result.set("server_properties", lua.create_table()?)?;
                 }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", format!("Connection failed: {}", e))?;
+                }
+            }
 
-                Ok(result)
-            },
-        )?;
+            Ok(result)
+        }
+    })?;
     amqp.set("connect", connect_fn)?;
 
     let list_queues_fn = lua.create_function(
@@ -117,42 +127,47 @@ pub fn register_amqp_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     amqp.set("version", version_fn)?;
 
-    let async_connect_fn =
-        lua.create_function(
-            |lua,
-             (host, port, user, _password, vhost): (
-                String,
-                u16,
-                String,
-                String,
-                Option<String>,
-            )| {
-                let runtime = tokio::runtime::Handle::current();
-                let host_clone = host.clone();
-                let port = if port == 0 { AMQP_PORT } else { port };
+    // Async connect probe: previously bridged `AsyncTcpStream` through the
+    // ambient runtime. Rewired to the brokered sync probe (entry name kept).
+    let async_connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua,
+              (host, port, user, _password, vhost): (
+            String,
+            u16,
+            String,
+            String,
+            Option<String>,
+        )| {
+            let port = if port == 0 { AMQP_PORT } else { port };
+            let result = lua.create_table()?;
 
-                runtime.block_on(async {
-                    let result = lua.create_table()?;
+            match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port,
+                Duration::from_secs(5),
+                "amqp.connect_async",
+            ) {
+                Ok(_) => {
+                    result.set("success", true)?;
+                    result.set("host", host)?;
+                    result.set("port", port)?;
+                    result.set("user", user)?;
+                    result.set("vhost", vhost.unwrap_or_else(|| "/".to_string()))?;
+                    result.set("server_properties", lua.create_table()?)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    result.set("error", format!("Connection failed: {}", e))?;
+                }
+            }
 
-                    match AsyncTcpStream::connect(format!("{}:{}", host_clone, port)).await {
-                        Ok(_stream) => {
-                            result.set("success", true)?;
-                            result.set("host", host_clone)?;
-                            result.set("port", port)?;
-                            result.set("user", user)?;
-                            result.set("vhost", vhost.unwrap_or_else(|| "/".to_string()))?;
-                            result.set("server_properties", lua.create_table()?)?;
-                        }
-                        Err(e) => {
-                            result.set("success", false)?;
-                            result.set("error", format!("Connection failed: {}", e))?;
-                        }
-                    }
-
-                    Ok(result)
-                })
-            },
-        )?;
+            Ok(result)
+        }
+    })?;
     amqp.set("connect_async", async_connect_fn)?;
 
     globals.set("amqp", amqp)?;

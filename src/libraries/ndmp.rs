@@ -3,14 +3,21 @@
 //! NDMP (Network Data Management Protocol) library for backup/restore.
 //! Based on Nmap's ndmp library concepts.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::net::TcpStream;
 use std::time::Duration;
-use tokio::net::TcpStream as AsyncTcpStream;
 
 const NDMP_PORT: u16 = 10000;
 
-pub fn register_ndmp_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed ndmp registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_ndmp_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let ndmp = lua.create_table()?;
 
@@ -23,19 +30,23 @@ pub fn register_ndmp_library(lua: &Lua) -> LuaResult<()> {
     })?;
     ndmp.set("new", new_fn)?;
 
-    let connect_fn = lua.create_function(
-        |lua, (host, port, user, _password): (String, u16, String, String)| {
+    let connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port, user, _password): (String, u16, String, String)| {
             let result = lua.create_table()?;
 
-            let addr = format!("{}:{}", host, port);
-
-            match TcpStream::connect_timeout(
-                &addr
-                    .parse()
-                    .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 10000))),
+            // Reachability probe through the broker (authority-preserving
+            // resolve replaces the literal-parse-plus-loopback-fallback).
+            match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port,
                 Duration::from_secs(5),
+                "ndmp.connect",
             ) {
-                Ok(_stream) => {
+                Ok(_) => {
                     result.set("success", true)?;
                     result.set("host", host)?;
                     result.set("server", "NDMP Server")?;
@@ -49,8 +60,8 @@ pub fn register_ndmp_library(lua: &Lua) -> LuaResult<()> {
             }
 
             Ok(result)
-        },
-    )?;
+        }
+    })?;
     ndmp.set("connect", connect_fn)?;
 
     let get_config_fn = lua.create_function(|lua, (_host, _port): (String, u16)| {
@@ -82,42 +93,45 @@ pub fn register_ndmp_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     ndmp.set("version", version_fn)?;
 
-    let async_connect_fn = lua.create_function(
-        |lua, (host, port, user, _password): (String, u16, String, String)| {
-            let runtime = tokio::runtime::Handle::current();
-            let host_clone = host.clone();
+    // Async connect probe: previously bridged `AsyncTcpStream` through the
+    // ambient runtime. Rewired to the brokered sync probe — the
+    // success/failure/timeout shape is preserved (timeout distinguished via
+    // the broker error text), and the entry name is kept for compatibility.
+    let async_connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port, user, _password): (String, u16, String, String)| {
             let port = if port == 0 { NDMP_PORT } else { port };
+            let result = lua.create_table()?;
 
-            runtime.block_on(async {
-                let result = lua.create_table()?;
-
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(5),
-                    AsyncTcpStream::connect(format!("{}:{}", host_clone, port)),
-                )
-                .await
-                {
-                    Ok(Ok(_stream)) => {
-                        result.set("success", true)?;
-                        result.set("host", host_clone)?;
-                        result.set("server", "NDMP Server")?;
-                        result.set("user", user)?;
-                        result.set("version", 4)?;
-                    }
-                    Ok(Err(e)) => {
-                        result.set("success", false)?;
+            match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port,
+                Duration::from_secs(5),
+                "ndmp.connect_async",
+            ) {
+                Ok(_) => {
+                    result.set("success", true)?;
+                    result.set("host", host)?;
+                    result.set("server", "NDMP Server")?;
+                    result.set("user", user)?;
+                    result.set("version", 4)?;
+                }
+                Err(e) => {
+                    result.set("success", false)?;
+                    if e.contains("timed out") || e.contains("timeout") {
+                        result.set("error", "Connection timed out".to_string())?;
+                    } else {
                         result.set("error", format!("Connection failed: {}", e))?;
                     }
-                    Err(_) => {
-                        result.set("success", false)?;
-                        result.set("error", "Connection timed out".to_string())?;
-                    }
                 }
+            }
 
-                Ok(result)
-            })
-        },
-    )?;
+            Ok(result)
+        }
+    })?;
     ndmp.set("connect_async", async_connect_fn)?;
 
     globals.set("ndmp", ndmp)?;

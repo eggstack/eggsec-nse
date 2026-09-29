@@ -3,11 +3,19 @@
 //! WinRM (Windows Remote Management) protocol support for NSE scripts.
 //! Includes both blocking and async implementations.
 
-use crate::libraries::runtime_bridge::block_on_async;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use tokio::net::TcpStream as AsyncTcpStream;
+use std::time::Duration;
 
-pub fn register_winrm_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed winrm registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_winrm_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let winrm = lua.create_table()?;
 
@@ -125,27 +133,35 @@ pub fn register_winrm_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     winrm.set("version", version_fn)?;
 
-    // Async connect
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        let addr = format!("{}:{}", host, port);
-
-        block_on_async(async {
-            match AsyncTcpStream::connect(&addr).await {
-                Ok(_stream) => {
-                    let r = lua.create_table()?;
-                    r.set("host", host)?;
-                    r.set("port", port)?;
-                    r.set("status", "connected")?;
-                    r.set("transport", "HTTP")?;
-                    Ok(r)
-                }
-                Err(e) => {
-                    let r = lua.create_table()?;
-                    r.set("error", e.to_string())?;
-                    Ok(r)
-                }
+    // Async connect entry: previously bridged `AsyncTcpStream` through a
+    // throwaway runtime. Rewired to the brokered sync connect — Lua-visible
+    // behavior is unchanged (the entry always blocked via `block_on_async`),
+    // and the entry name is preserved for script compatibility.
+    let async_connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, u16)| match broker_tcp_connect(
+            &ctx,
+            &services,
+            &host,
+            port,
+            Duration::from_secs(10),
+            "winrm.connect_async",
+        ) {
+            Ok(_) => {
+                let r = lua.create_table()?;
+                r.set("host", host)?;
+                r.set("port", port)?;
+                r.set("status", "connected")?;
+                r.set("transport", "HTTP")?;
+                Ok(r)
             }
-        })
+            Err(e) => {
+                let r = lua.create_table()?;
+                r.set("error", e)?;
+                Ok(r)
+            }
+        }
     })?;
     winrm.set("connect_async", async_connect_fn)?;
 

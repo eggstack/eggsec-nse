@@ -3,81 +3,100 @@
 //! CVS (Concurrent Versions System) server support.
 //! Based on Nmap's cvs library.
 
+use crate::brokered_stream::broker_send_all;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, broker_tcp_receive, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
-pub fn register_cvs_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed cvs registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_cvs_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let cvs = lua.create_table()?;
 
     cvs.set(
         "connect",
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            let result = lua.create_table()?;
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
-            stream
-                .write_all(b"BEGIN AUTH REQUEST\n/root\nEND AUTH REQUEST\n")
-                .ok();
-            let mut response = [0u8; 1024];
-            let n = stream.read(&mut response).unwrap_or(0);
-            result.set("status", "ok")?;
-            result.set("connected", n > 0)?;
-            Ok(result)
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, u16)| {
+                let result = lua.create_table()?;
+                // The broker resolves `host` (authority-preserving); unresolvable
+                // or refused hosts keep the original `status = "error"` shape.
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "cvs.connect",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
+                let _ = broker_send_all(
+                    &ctx,
+                    handle.as_mut(),
+                    b"BEGIN AUTH REQUEST\n/root\nEND AUTH REQUEST\n",
+                    "cvs.connect",
+                );
+                let data = broker_tcp_receive(&ctx, handle.as_mut(), 1024, "cvs.connect")
+                    .unwrap_or_default();
+                let n = data.len();
+                result.set("status", "ok")?;
+                result.set("connected", n > 0)?;
+                Ok(result)
+            }
         })?,
     )?;
 
     cvs.set(
         "authenticate",
-        lua.create_function(
-            |lua, (host, port, username, password): (String, u16, String, String)| {
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, username, password): (String, u16, String, String)| {
                 let result = lua.create_table()?;
-                let addr = format!("{}:{}", host, port);
-                let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                    Ok(a) => a,
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "cvs.authenticate",
+                ) {
+                    Ok(pair) => pair,
                     Err(e) => {
                         result.set("status", "error")?;
-                        result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
+                        result.set("error", e)?;
                         return Ok(result);
                     }
                 };
-                let mut stream =
-                    match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            result.set("status", "error")?;
-                            result.set("error", e.to_string())?;
-                            return Ok(result);
-                        }
-                    };
 
                 let request = format!(
                     "BEGIN AUTH REQUEST\n{}\n{}\nEND AUTH REQUEST\n",
                     username, password
                 );
-                stream.write_all(request.as_bytes()).ok();
+                let _ = broker_send_all(
+                    &ctx,
+                    handle.as_mut(),
+                    request.as_bytes(),
+                    "cvs.authenticate",
+                );
 
-                let mut response = [0u8; 1024];
-                let n = stream.read(&mut response).unwrap_or(0);
-                let response_str = String::from_utf8_lossy(&response[..n]);
+                let data = broker_tcp_receive(&ctx, handle.as_mut(), 1024, "cvs.authenticate")
+                    .unwrap_or_default();
+                let response_str = String::from_utf8_lossy(&data);
 
                 if response_str.contains("I LOVE YOU") {
                     result.set("status", "ok")?;
@@ -89,91 +108,95 @@ pub fn register_cvs_library(lua: &Lua) -> LuaResult<()> {
                 }
 
                 Ok(result)
-            },
-        )?,
+            }
+        })?,
     )?;
 
     cvs.set(
         "send_request",
-        lua.create_function(|lua, (host, port, request): (String, u16, String)| {
-            let result = lua.create_table()?;
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, request): (String, u16, String)| {
+                let result = lua.create_table()?;
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "cvs.send_request",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
 
-            stream.write_all(request.as_bytes()).ok();
+                let _ = broker_send_all(
+                    &ctx,
+                    handle.as_mut(),
+                    request.as_bytes(),
+                    "cvs.send_request",
+                );
 
-            let mut response = [0u8; 4096];
-            let n = stream.read(&mut response).unwrap_or(0);
+                let data = broker_tcp_receive(&ctx, handle.as_mut(), 4096, "cvs.send_request")
+                    .unwrap_or_default();
 
-            result.set("status", "ok")?;
-            result.set(
-                "response",
-                String::from_utf8_lossy(&response[..n]).to_string(),
-            )?;
+                result.set("status", "ok")?;
+                result.set("response", String::from_utf8_lossy(&data).to_string())?;
 
-            Ok(result)
+                Ok(result)
+            }
         })?,
     )?;
 
     cvs.set(
         "list_modules",
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            let result = lua.create_table()?;
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, u16)| {
+                let result = lua.create_table()?;
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "cvs.list_modules",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
+
+                let _ = broker_send_all(&ctx, handle.as_mut(), b"VALIDATE\n", "cvs.list_modules");
+                let _ = broker_send_all(&ctx, handle.as_mut(), b"REPOSITORY\n", "cvs.list_modules");
+                let _ = broker_send_all(&ctx, handle.as_mut(), b"END\n", "cvs.list_modules");
+
+                let data = broker_tcp_receive(&ctx, handle.as_mut(), 4096, "cvs.list_modules")
+                    .unwrap_or_default();
+
+                let modules = lua.create_table()?;
+                let response_str = String::from_utf8_lossy(&data);
+
+                for (i, line) in response_str.lines().enumerate() {
+                    if !line.is_empty() && !line.starts_with('E') && !line.starts_with('o') {
+                        modules.set(i + 1, line.to_string())?;
+                    }
                 }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
 
-            stream.write_all(b"VALIDATE\n").ok();
-            stream.write_all(b"REPOSITORY\n").ok();
-            stream.write_all(b"END\n").ok();
+                result.set("status", "ok")?;
+                result.set("modules", modules)?;
 
-            let mut response = [0u8; 4096];
-            let n = stream.read(&mut response).unwrap_or(0);
-
-            let modules = lua.create_table()?;
-            let response_str = String::from_utf8_lossy(&response[..n]);
-
-            for (i, line) in response_str.lines().enumerate() {
-                if !line.is_empty() && !line.starts_with('E') && !line.starts_with('o') {
-                    modules.set(i + 1, line.to_string())?;
-                }
+                Ok(result)
             }
-
-            result.set("status", "ok")?;
-            result.set("modules", modules)?;
-
-            Ok(result)
         })?,
     )?;
 

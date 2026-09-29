@@ -4,31 +4,43 @@
 //! Based on Nmap's mysql library: https://nmap.org/nsedoc/lib/mysql.html
 //! Includes both blocking and async implementations with real MySQL protocol support.
 
+use crate::brokered_stream::BrokeredTcpStream;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::NseHostServices;
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::Write;
 use std::time::Duration;
 
-use crate::capabilities::NseCapabilityContext;
-use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 const MYSQL_HANDSHAKE_V10: u8 = 10;
 
 struct MySqlConnection {
-    stream: TcpStream,
+    stream: BrokeredTcpStream,
     server_version: String,
     thread_id: u32,
     server_capabilities: u32,
     server_language: u8,
 }
 
-fn mysql_handshake(host: &str, port: u16) -> std::io::Result<MySqlConnection> {
-    let addr = format!("{}:{}", host, port);
-    let socket_addr = addr
-        .parse::<std::net::SocketAddr>()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
-    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))?;
+/// Brokered MySQL handshake: authority-preserving resolve replaces the
+/// literal `addr` parse; stream timeouts bound the greeting read (10s).
+fn mysql_handshake(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    host: &str,
+    port: u16,
+    operation: &'static str,
+) -> std::io::Result<MySqlConnection> {
+    let (mut stream, _endpoint) = BrokeredTcpStream::connect(
+        ctx,
+        services,
+        host,
+        port,
+        Duration::from_secs(10),
+        operation,
+    )
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
 
@@ -222,16 +234,24 @@ fn maybe_denied_mysql(
     Ok(None)
 }
 
-pub fn register_mysql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+/// Provider-backed mysql registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_mysql_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let mysql = lua.create_table()?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(denied) = maybe_denied_mysql(lua, &cap, &host, "mysql.connect")? {
             return Ok(denied);
         }
-        match mysql_handshake(&host, port) {
+        match mysql_handshake(&cap, &svc, &host, port, "mysql.connect") {
             Ok(conn) => {
                 let result = lua.create_table()?;
                 result.set("host", host)?;
@@ -252,52 +272,43 @@ pub fn register_mysql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
     mysql.set("connect", connect_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(denied) = maybe_denied_mysql(lua, &cap, &host, "mysql.connect_async")? {
             return Err(mlua::Error::RuntimeError(
                 denied.get::<String>("error").unwrap_or_default(),
             ));
         }
-        let host_clone = host.clone();
-
-        block_on_async(async move {
-            let result =
-                tokio::task::spawn_blocking(move || mysql_handshake(&host_clone, port)).await;
-
-            match result {
-                Ok(Ok(conn)) => {
-                    let r = lua.create_table()?;
-                    r.set("host", host)?;
-                    r.set("port", port)?;
-                    r.set("status", "connected")?;
-                    r.set("server_version", conn.server_version)?;
-                    r.set("thread_id", conn.thread_id)?;
-                    Ok(r)
-                }
-                Ok(Err(e)) => {
-                    let r = lua.create_table()?;
-                    r.set("status", "error")?;
-                    r.set("error", e.to_string())?;
-                    Ok(r)
-                }
-                Err(e) => {
-                    let r = lua.create_table()?;
-                    r.set("status", "error")?;
-                    r.set("error", e.to_string())?;
-                    Ok(r)
-                }
+        // Synchronous brokered handshake; the async surface keeps its
+        // name for script compatibility.
+        match mysql_handshake(&cap, &svc, &host, port, "mysql.connect_async") {
+            Ok(conn) => {
+                let r = lua.create_table()?;
+                r.set("host", host)?;
+                r.set("port", port)?;
+                r.set("status", "connected")?;
+                r.set("server_version", conn.server_version)?;
+                r.set("thread_id", conn.thread_id)?;
+                Ok(r)
             }
-        })
+            Err(e) => {
+                let r = lua.create_table()?;
+                r.set("status", "error")?;
+                r.set("error", e.to_string())?;
+                Ok(r)
+            }
+        }
     })?;
     mysql.set("connect_async", async_connect_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let login_fn = lua.create_function(
         move |lua, (host, port, user, pass): (String, u16, String, String)| {
             if let Some(denied) = maybe_denied_mysql(lua, &cap, &host, "mysql.login")? {
                 return Ok(denied);
             }
-            match mysql_handshake(&host, port) {
+            match mysql_handshake(&cap, &svc, &host, port, "mysql.login") {
                 Ok(mut conn) => match mysql_login(&mut conn, &user, &pass) {
                     Ok(success) => {
                         let result = lua.create_table()?;
@@ -324,6 +335,7 @@ pub fn register_mysql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
     mysql.set("login", login_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_login_fn = lua.create_function(
         move |lua, (host, port, user, pass): (String, u16, String, String)| {
             if let Some(denied) = maybe_denied_mysql(lua, &cap, &host, "mysql.login_async")? {
@@ -331,27 +343,14 @@ pub fn register_mysql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
                     denied.get::<String>("error").unwrap_or_default(),
                 ));
             }
-            let host_clone = host.clone();
-            let user_clone = user.clone();
-
-            block_on_async(async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    let mut conn = mysql_handshake(&host_clone, port)?;
-                    mysql_login(&mut conn, &user_clone, &pass)
-                })
-                .await;
-
-                match result {
-                    Ok(Ok(success)) => {
+            // Synchronous brokered handshake + login; the async surface
+            // keeps its name for script compatibility.
+            match mysql_handshake(&cap, &svc, &host, port, "mysql.login_async") {
+                Ok(mut conn) => match mysql_login(&mut conn, &user, &pass) {
+                    Ok(success) => {
                         let r = lua.create_table()?;
                         r.set("success", success)?;
                         r.set("user", user)?;
-                        Ok(r)
-                    }
-                    Ok(Err(e)) => {
-                        let r = lua.create_table()?;
-                        r.set("success", false)?;
-                        r.set("error", e.to_string())?;
                         Ok(r)
                     }
                     Err(e) => {
@@ -360,19 +359,26 @@ pub fn register_mysql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
                         r.set("error", e.to_string())?;
                         Ok(r)
                     }
+                },
+                Err(e) => {
+                    let r = lua.create_table()?;
+                    r.set("success", false)?;
+                    r.set("error", e.to_string())?;
+                    Ok(r)
                 }
-            })
+            }
         },
     )?;
     mysql.set("login_async", async_login_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let send_query_fn =
         lua.create_function(move |lua, (host, port, query): (String, u16, String)| {
             if let Some(denied) = maybe_denied_mysql(lua, &cap, &host, "mysql.send_query")? {
                 return Ok(denied);
             }
-            match mysql_handshake(&host, port) {
+            match mysql_handshake(&cap, &svc, &host, port, "mysql.send_query") {
                 Ok(mut conn) => {
                     let result = mysql_query(&mut conn, &query);
                     match result {
@@ -401,6 +407,7 @@ pub fn register_mysql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
     mysql.set("send_query", send_query_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_send_query_fn =
         lua.create_function(move |lua, (host, port, query): (String, u16, String)| {
             if let Some(denied) = maybe_denied_mysql(lua, &cap, &host, "mysql.send_query_async")? {
@@ -408,26 +415,14 @@ pub fn register_mysql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
                     denied.get::<String>("error").unwrap_or_default(),
                 ));
             }
-            let host_clone = host.clone();
-
-            block_on_async(async move {
-                let result = tokio::task::spawn_blocking(move || {
-                    let mut conn = mysql_handshake(&host_clone, port)?;
-                    mysql_query(&mut conn, &query)
-                })
-                .await;
-
-                match result {
-                    Ok(Ok(response)) => {
+            // Synchronous brokered handshake + query; the async surface
+            // keeps its name for script compatibility.
+            match mysql_handshake(&cap, &svc, &host, port, "mysql.send_query_async") {
+                Ok(mut conn) => match mysql_query(&mut conn, &query) {
+                    Ok(response) => {
                         let r = lua.create_table()?;
                         r.set("rows", response)?;
                         r.set("status", "ok")?;
-                        Ok(r)
-                    }
-                    Ok(Err(e)) => {
-                        let r = lua.create_table()?;
-                        r.set("status", "error")?;
-                        r.set("error", e.to_string())?;
                         Ok(r)
                     }
                     Err(e) => {
@@ -436,8 +431,14 @@ pub fn register_mysql_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
                         r.set("error", e.to_string())?;
                         Ok(r)
                     }
+                },
+                Err(e) => {
+                    let r = lua.create_table()?;
+                    r.set("status", "error")?;
+                    r.set("error", e.to_string())?;
+                    Ok(r)
                 }
-            })
+            }
         })?;
     mysql.set("send_query_async", async_send_query_fn)?;
 

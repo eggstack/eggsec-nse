@@ -3,14 +3,16 @@
 //! Provides SSL/TLS certificate parsing and validation.
 //! Based on Nmap's sslcert library: https://nmap.org/nsedoc/lib/sslcert.html
 
+use crate::brokered_stream::BrokeredTcpStream;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::NseHostServices;
 use mlua::{Lua, Result as LuaResult, Table};
 use openssl::x509::X509;
-use std::net::TcpStream;
+use std::time::Duration;
 
 extern crate base64;
 extern crate hex;
 
-use crate::capabilities::NseCapabilityContext;
 use crate::wrappers;
 
 /// Construct a denied error table for the sslcert library.
@@ -63,23 +65,39 @@ fn maybe_network_denied_response(
 /// `insecure_tls` controls whether cert/hostname validation is bypassed;
 /// callers must derive this from the NSE capability context.
 /// Returns `Ok(TlsStream)` on success, or `Err(error_message)` on failure.
+/// Brokered TLS connect: authority-preserving resolve replaces the
+/// `TcpStream::connect` form; the native-tls handshake runs over the
+/// brokered stream so every handshake byte stays capability-checked.
 fn tls_connect(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
     host: &str,
     port: u16,
     insecure_tls: bool,
-) -> Result<native_tls::TlsStream<TcpStream>, String> {
+    operation: &'static str,
+) -> Result<native_tls::TlsStream<BrokeredTcpStream>, String> {
     let connector = native_tls::TlsConnector::builder()
         .danger_accept_invalid_certs(insecure_tls)
         .danger_accept_invalid_hostnames(insecure_tls)
         .build()
         .map_err(|e| format!("TLS connector error: {}", e))?;
 
-    let stream = TcpStream::connect(format!("{}:{}", host, port))
-        .map_err(|e| format!("Connection error: {}", e))?;
+    let (stream, _endpoint) = BrokeredTcpStream::connect(
+        ctx,
+        services,
+        host,
+        port,
+        Duration::from_secs(10),
+        operation,
+    )
+    .map_err(|e| format!("Connection error: {}", e))?;
 
-    connector
-        .connect(host, stream)
-        .map_err(|e| format!("TLS handshake error: {}", e))
+    connector.connect(host, stream).map_err(|e| match e {
+        native_tls::HandshakeError::Failure(e) => format!("TLS handshake error: {e}"),
+        native_tls::HandshakeError::WouldBlock(_) => {
+            "TLS handshake blocked: retry required".to_string()
+        }
+    })
 }
 
 fn parse_x509_name(name: &openssl::x509::X509NameRef) -> String {
@@ -97,12 +115,20 @@ fn parse_x509_name(name: &openssl::x509::X509NameRef) -> String {
         .join(", ")
 }
 
-pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+/// Provider-backed sslcert registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_sslcert_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
 
     let sslcert = lua.create_table()?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let get_cert_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(resp) = maybe_crypto_denied_response(lua, &cap_ctx, "sslcert.get_certificate")?
         {
@@ -114,7 +140,14 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
             return Ok(resp);
         }
 
-        let stream = match tls_connect(&host, port, cap_ctx.allows_insecure_tls()) {
+        let stream = match tls_connect(
+            &cap_ctx,
+            &svc,
+            &host,
+            port,
+            cap_ctx.allows_insecure_tls(),
+            "sslcert.get_certificate",
+        ) {
             Ok(s) => s,
             Err(e) => {
                 let result = lua.create_table()?;
@@ -148,6 +181,7 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
     sslcert.set("get_certificate", get_cert_fn)?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let get_chain_certs_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(resp) = maybe_crypto_denied_response(lua, &cap_ctx, "sslcert.get_chain_certs")?
         {
@@ -159,7 +193,14 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
             return Ok(resp);
         }
 
-        let tls_stream = match tls_connect(&host, port, cap_ctx.allows_insecure_tls()) {
+        let tls_stream = match tls_connect(
+            &cap_ctx,
+            &svc,
+            &host,
+            port,
+            cap_ctx.allows_insecure_tls(),
+            "sslcert.get_chain_certs",
+        ) {
             Ok(s) => s,
             Err(e) => {
                 let result = lua.create_table()?;
@@ -341,6 +382,7 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
     sslcert.set("is_valid", is_valid_fn)?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let version = lua.create_function(move |_lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "sslcert.version");
         if decision.is_denied() {
@@ -352,7 +394,14 @@ pub fn register_sslcert_library(lua: &Lua, capability_ctx: &NseCapabilityContext
             return Ok(String::new());
         }
 
-        let tls_stream = match tls_connect(&host, port, cap_ctx.allows_insecure_tls()) {
+        let tls_stream = match tls_connect(
+            &cap_ctx,
+            &svc,
+            &host,
+            port,
+            cap_ctx.allows_insecure_tls(),
+            "sslcert.version",
+        ) {
             Ok(s) => s,
             Err(_) => return Ok(String::new()),
         };

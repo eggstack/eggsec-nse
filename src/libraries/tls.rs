@@ -9,14 +9,15 @@ use native_tls::TlsStream;
 use openssl::pkey::PKey;
 use openssl::rsa::Rsa;
 use std::io::{Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
+use crate::brokered_stream::BrokeredTcpStream;
 use crate::capabilities::NseCapabilityContext;
+use crate::providers::NseHostServices;
 use crate::wrappers;
 
 struct TlsConnection {
-    stream: Option<TlsStream<TcpStream>>,
+    stream: Option<TlsStream<BrokeredTcpStream>>,
     host: String,
     port: u16,
     connected: bool,
@@ -36,8 +37,20 @@ impl TlsConnection {
         }
     }
 
-    fn connect(&mut self, ctx: &NseCapabilityContext, host: &str, port: u16) -> Result<(), String> {
-        self.stream = Some(connect_tls_stream(ctx, host, port, "tls.connect")?);
+    fn connect(
+        &mut self,
+        ctx: &NseCapabilityContext,
+        services: &NseHostServices,
+        host: &str,
+        port: u16,
+    ) -> Result<(), String> {
+        self.stream = Some(connect_tls_stream(
+            ctx,
+            services,
+            host,
+            port,
+            "tls.connect",
+        )?);
         self.version = "TLS".to_string();
         self.cipher = "negotiated".to_string();
         self.host = host.to_string();
@@ -80,12 +93,16 @@ impl TlsConnection {
     }
 }
 
+/// Brokered TCP connect: the explicit network gate is kept for the
+/// historical denial message; authority-preserving resolve inside the
+/// broker replaces the `ToSocketAddrs` + `connect_timeout` form.
 fn connect_tcp(
     ctx: &NseCapabilityContext,
+    services: &NseHostServices,
     host: &str,
     port: u16,
     operation: &'static str,
-) -> Result<TcpStream, String> {
+) -> Result<BrokeredTcpStream, String> {
     let decision = wrappers::check_network_tcp(ctx, host, operation);
     if decision.is_denied() {
         return Err(format!(
@@ -93,23 +110,40 @@ fn connect_tcp(
             decision.deny_reason().unwrap_or("policy violation")
         ));
     }
-    let address = (host, port)
-        .to_socket_addrs()
-        .map_err(|e| e.to_string())?
-        .next()
-        .ok_or_else(|| format!("could not resolve {}:{}", host, port))?;
-    TcpStream::connect_timeout(&address, Duration::from_secs(10)).map_err(|e| e.to_string())
+    let (mut stream, _endpoint) = BrokeredTcpStream::connect(
+        ctx,
+        services,
+        host,
+        port,
+        Duration::from_secs(10),
+        operation,
+    )?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| e.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(10)))
+        .map_err(|e| e.to_string())?;
+    Ok(stream)
 }
 
 fn connect_tls_stream(
     ctx: &NseCapabilityContext,
+    services: &NseHostServices,
     host: &str,
     port: u16,
     operation: &'static str,
-) -> Result<TlsStream<TcpStream>, String> {
-    let stream = connect_tcp(ctx, host, port, operation)?;
+) -> Result<TlsStream<BrokeredTcpStream>, String> {
+    let stream = connect_tcp(ctx, services, host, port, operation)?;
     let connector = TlsConnector::builder().build().map_err(|e| e.to_string())?;
-    connector.connect(host, stream).map_err(|e| e.to_string())
+    // The handshake runs over the brokered stream; `HandshakeError` has no
+    // `Display` for a non-`Debug` stream, so match the variants.
+    connector.connect(host, stream).map_err(|e| match e {
+        native_tls::HandshakeError::Failure(e) => format!("TLS handshake failed: {e}"),
+        native_tls::HandshakeError::WouldBlock(_) => {
+            "TLS handshake blocked: retry required".to_string()
+        }
+    })
 }
 
 impl UserData for TlsConnection {
@@ -143,11 +177,19 @@ impl UserData for TlsConnection {
     }
 }
 
-pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+/// Provider-backed tls registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_tls_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let tls = lua.create_table()?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "tls.connect");
         if decision.is_denied() {
@@ -158,7 +200,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
         }
 
         let mut conn = TlsConnection::new();
-        conn.connect(&cap_ctx, &host, port)
+        conn.connect(&cap_ctx, &svc, &host, port)
             .map_err(mlua::Error::RuntimeError)?;
         lua.create_userdata(conn)
     })?;
@@ -229,6 +271,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     tls.set("protocol_to_string", protocol_to_string_fn)?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let get_curve_info_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "tls.get_curve_info");
         if decision.is_denied() {
@@ -253,7 +296,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
+        let stream = match connect_tcp(&cap_ctx, &svc, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -268,7 +311,17 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 result.set("curve", "negotiated")?;
             }
             Err(e) => {
-                result.set("error", format!("TLS handshake error: {}", e))?;
+                result.set(
+                    "error",
+                    match e {
+                        native_tls::HandshakeError::Failure(e) => {
+                            format!("TLS handshake error: {e}")
+                        }
+                        native_tls::HandshakeError::WouldBlock(_) => {
+                            "TLS handshake blocked: retry required".to_string()
+                        }
+                    },
+                )?;
             }
         }
 
@@ -277,6 +330,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     tls.set("get_curve_info", get_curve_info_fn)?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let get_cert_info_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "tls.get_cert_info");
         if decision.is_denied() {
@@ -301,7 +355,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
+        let stream = match connect_tcp(&cap_ctx, &svc, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -360,7 +414,17 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 }
             }
             Err(e) => {
-                result.set("error", format!("TLS handshake error: {}", e))?;
+                result.set(
+                    "error",
+                    match e {
+                        native_tls::HandshakeError::Failure(e) => {
+                            format!("TLS handshake error: {e}")
+                        }
+                        native_tls::HandshakeError::WouldBlock(_) => {
+                            "TLS handshake blocked: retry required".to_string()
+                        }
+                    },
+                )?;
             }
         }
 
@@ -369,6 +433,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     tls.set("get_cert_info", get_cert_info_fn)?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let check_hostname_fn =
         lua.create_function(move |_lua, (host, hostname): (String, String)| {
             let decision = wrappers::check_crypto(&cap_ctx, "tls.check_hostname");
@@ -381,7 +446,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 Err(_) => return Ok(false),
             };
 
-            let stream = match connect_tcp(&cap_ctx, &host, 443, "tls.check_hostname") {
+            let stream = match connect_tcp(&cap_ctx, &svc, &host, 443, "tls.check_hostname") {
                 Ok(s) => s,
                 Err(_) => return Ok(false),
             };
@@ -394,6 +459,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     tls.set("check_hostname", check_hostname_fn)?;
 
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let get_session_info_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "tls.get_session_info");
         if decision.is_denied() {
@@ -418,7 +484,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
+        let stream = match connect_tcp(&cap_ctx, &svc, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -433,7 +499,17 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 result.set("peer_certificate", true)?;
             }
             Err(e) => {
-                result.set("error", format!("TLS handshake error: {}", e))?;
+                result.set(
+                    "error",
+                    match e {
+                        native_tls::HandshakeError::Failure(e) => {
+                            format!("TLS handshake error: {e}")
+                        }
+                        native_tls::HandshakeError::WouldBlock(_) => {
+                            "TLS handshake blocked: retry required".to_string()
+                        }
+                    },
+                )?;
             }
         }
 
@@ -468,6 +544,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
     // tls.parse_certificate() - Parse X.509 certificate
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let parse_certificate_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "tls.parse_certificate");
         if decision.is_denied() {
@@ -492,7 +569,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
+        let stream = match connect_tcp(&cap_ctx, &svc, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -561,7 +638,17 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 result.set("parsed", true)?;
             }
             Err(e) => {
-                result.set("error", format!("TLS handshake error: {}", e))?;
+                result.set(
+                    "error",
+                    match e {
+                        native_tls::HandshakeError::Failure(e) => {
+                            format!("TLS handshake error: {e}")
+                        }
+                        native_tls::HandshakeError::WouldBlock(_) => {
+                            "TLS handshake blocked: retry required".to_string()
+                        }
+                    },
+                )?;
             }
         }
 
@@ -571,6 +658,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
     // tls.verify() - Verify certificate validity
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let verify_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "tls.verify");
         if decision.is_denied() {
@@ -597,7 +685,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.verify") {
+        let stream = match connect_tcp(&cap_ctx, &svc, &host, port, "tls.verify") {
             Ok(s) => s,
             Err(e) => {
                 result.set("valid", false)?;
@@ -610,9 +698,13 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             Ok(_) => {
                 result.set("valid", true)?;
             }
-            Err(e) => {
+            Err(native_tls::HandshakeError::Failure(e)) => {
                 result.set("valid", false)?;
-                result.set("error", format!("Certificate verification failed: {}", e))?;
+                result.set("error", format!("Certificate verification failed: {e}"))?;
+            }
+            Err(native_tls::HandshakeError::WouldBlock(_)) => {
+                result.set("valid", false)?;
+                result.set("error", "TLS handshake blocked: retry required")?;
             }
         }
 
@@ -622,6 +714,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
     // tls.get_fingerprint() - Get certificate fingerprint
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let get_fingerprint_fn = lua.create_function(
         move |lua, (host, port, hash): (String, u16, Option<String>)| {
             let decision = wrappers::check_crypto(&cap_ctx, "tls.get_fingerprint");
@@ -648,7 +741,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 }
             };
 
-            let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
+            let stream = match connect_tcp(&cap_ctx, &svc, &host, port, "tls.network") {
                 Ok(s) => s,
                 Err(e) => {
                     result.set("error", format!("Connection error: {}", e))?;
@@ -671,7 +764,17 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                     }
                 }
                 Err(e) => {
-                    result.set("error", format!("TLS handshake error: {}", e))?;
+                    result.set(
+                        "error",
+                        match e {
+                            native_tls::HandshakeError::Failure(e) => {
+                                format!("TLS handshake error: {e}")
+                            }
+                            native_tls::HandshakeError::WouldBlock(_) => {
+                                "TLS handshake blocked: retry required".to_string()
+                            }
+                        },
+                    )?;
                 }
             }
 
@@ -682,6 +785,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
     // tls.get_altnames() - Get subject alternative names
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let get_altnames_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "tls.get_altnames");
         if decision.is_denied() {
@@ -706,7 +810,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
+        let stream = match connect_tcp(&cap_ctx, &svc, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -734,7 +838,17 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 }
             }
             Err(e) => {
-                result.set("error", format!("TLS handshake error: {}", e))?;
+                result.set(
+                    "error",
+                    match e {
+                        native_tls::HandshakeError::Failure(e) => {
+                            format!("TLS handshake error: {e}")
+                        }
+                        native_tls::HandshakeError::WouldBlock(_) => {
+                            "TLS handshake blocked: retry required".to_string()
+                        }
+                    },
+                )?;
             }
         }
 
@@ -770,6 +884,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
     // tls.get_connection_info() - Get detailed TLS connection information
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let get_connection_info_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "tls.get_connection_info");
         if decision.is_denied() {
@@ -794,7 +909,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
+        let stream = match connect_tcp(&cap_ctx, &svc, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -812,7 +927,17 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 result.set("server_name", host)?;
             }
             Err(e) => {
-                result.set("error", format!("TLS handshake error: {}", e))?;
+                result.set(
+                    "error",
+                    match e {
+                        native_tls::HandshakeError::Failure(e) => {
+                            format!("TLS handshake error: {e}")
+                        }
+                        native_tls::HandshakeError::WouldBlock(_) => {
+                            "TLS handshake blocked: retry required".to_string()
+                        }
+                    },
+                )?;
             }
         }
 
@@ -842,6 +967,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
 
     // tls.get_cert_chain() - Get certificate chain
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let get_cert_chain_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "tls.get_cert_chain");
         if decision.is_denied() {
@@ -866,7 +992,7 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
             }
         };
 
-        let stream = match connect_tcp(&cap_ctx, &host, port, "tls.network") {
+        let stream = match connect_tcp(&cap_ctx, &svc, &host, port, "tls.network") {
             Ok(s) => s,
             Err(e) => {
                 result.set("error", format!("Connection error: {}", e))?;
@@ -888,7 +1014,17 @@ pub fn register_tls_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 result.set("length", 1)?;
             }
             Err(e) => {
-                result.set("error", format!("TLS handshake error: {}", e))?;
+                result.set(
+                    "error",
+                    match e {
+                        native_tls::HandshakeError::Failure(e) => {
+                            format!("TLS handshake error: {e}")
+                        }
+                        native_tls::HandshakeError::WouldBlock(_) => {
+                            "TLS handshake blocked: retry required".to_string()
+                        }
+                    },
+                )?;
             }
         }
 

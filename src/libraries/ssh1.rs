@@ -3,103 +3,119 @@
 //! SSH1 protocol support for NSE scripts.
 //! Based on Nmap's ssh1 library.
 
+use crate::brokered_stream::broker_read_into;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::io::Read;
-use std::net::TcpStream;
 use std::time::Duration;
 
-pub fn register_ssh1_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed ssh1 registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_ssh1_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let ssh1 = lua.create_table()?;
 
     ssh1.set(
         "connect",
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            let result = lua.create_table()?;
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, u16)| {
+                let result = lua.create_table()?;
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let _stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
+                // Reachability probe through the broker (authority-preserving
+                // resolve replaces the literal-parse requirement).
+                match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "ssh1.connect",
+                ) {
+                    Ok(_) => {
+                        result.set("host", host)?;
+                        result.set("port", port)?;
+                        result.set("status", "connected")?;
+                        result.set("server_version", "SSH-1.99-OpenSSH_8.0")?;
+                    }
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
 
-            result.set("host", host)?;
-            result.set("port", port)?;
-            result.set("status", "connected")?;
-            result.set("server_version", "SSH-1.99-OpenSSH_8.0")?;
-
-            Ok(result)
+                Ok(result)
+            }
         })?,
     )?;
 
     ssh1.set(
         "identify",
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            let result = lua.create_table()?;
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, u16)| {
+                let result = lua.create_table()?;
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
+                // The broker resolves `host` (authority-preserving);
+                // unresolvable or refused hosts keep the error-table shape.
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "ssh1.identify",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
+
+                // Read server version string
+                let mut buffer = [0u8; 256];
+                let n = broker_read_into(&ctx, handle.as_mut(), &mut buffer, "ssh1.identify")
+                    .unwrap_or(0);
+                let server_version = String::from_utf8_lossy(&buffer[..n]).trim().to_string();
+
+                result.set("status", "ok")?;
+                result.set("banner", server_version.clone())?;
+
+                // Check version
+                if server_version.contains("SSH-1.") {
+                    result.set("version", 1)?;
+                } else if server_version.contains("SSH-2.") {
+                    result.set("version", 2)?;
+                } else {
+                    result.set("version", 0)?;
                 }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
+
+                // Check for OpenSSH
+                if server_version.contains("OpenSSH") {
+                    result.set("type", "OpenSSH")?;
+                    if server_version.contains("OpenSSH_8") {
+                        result.set("major", 8)?;
+                    } else if server_version.contains("OpenSSH_7") {
+                        result.set("major", 7)?;
+                    }
+                } else if server_version.contains("dropbear") {
+                    result.set("type", "Dropbear")?;
+                } else {
+                    result.set("type", "unknown")?;
                 }
-            };
 
-            // Read server version string
-            let mut buffer = [0u8; 256];
-            let n = stream.read(&mut buffer).unwrap_or(0);
-            let server_version = String::from_utf8_lossy(&buffer[..n]).trim().to_string();
-
-            result.set("status", "ok")?;
-            result.set("banner", server_version.clone())?;
-
-            // Check version
-            if server_version.contains("SSH-1.") {
-                result.set("version", 1)?;
-            } else if server_version.contains("SSH-2.") {
-                result.set("version", 2)?;
-            } else {
-                result.set("version", 0)?;
+                Ok(result)
             }
-
-            // Check for OpenSSH
-            if server_version.contains("OpenSSH") {
-                result.set("type", "OpenSSH")?;
-                if server_version.contains("OpenSSH_8") {
-                    result.set("major", 8)?;
-                } else if server_version.contains("OpenSSH_7") {
-                    result.set("major", 7)?;
-                }
-            } else if server_version.contains("dropbear") {
-                result.set("type", "Dropbear")?;
-            } else {
-                result.set("type", "unknown")?;
-            }
-
-            Ok(result)
         })?,
     )?;
 

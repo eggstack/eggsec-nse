@@ -3,53 +3,67 @@
 //! iSNS (Internet Storage Name Service) protocol support.
 //! Based on Nmap's isns library.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, broker_tcp_receive, broker_tcp_send, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
 const ISNS_PORT: u16 = 3205;
 
-pub fn register_isns_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed isns registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_isns_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let isns = lua.create_table()?;
 
     isns.set(
         "discover",
-        lua.create_function(|lua, (host, port): (String, Option<u16>)| {
-            let result = lua.create_table()?;
-            let addr = format!("{}:{}", host, port.unwrap_or(ISNS_PORT));
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, Option<u16>)| {
+                let result = lua.create_table()?;
+                let port = port.unwrap_or(ISNS_PORT);
+                let timeout = Duration::from_secs(10);
 
-            let packet = vec![
-                0x00, 0x00, // Version
-                0x00, 0x00, // Function
-                0x00, 0x00, 0x00, 0x00, // Length
-            ];
-            stream.write_all(&packet).ok();
-            let mut response = [0u8; 1024];
-            let n = stream.read(&mut response).unwrap_or(0);
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    timeout,
+                    "isns.discover",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
 
-            result.set("status", "ok")?;
-            result.set("discovered", n > 0)?;
+                let packet = vec![
+                    0x00, 0x00, // Version
+                    0x00, 0x00, // Function
+                    0x00, 0x00, 0x00, 0x00, // Length
+                ];
+                let _ = broker_tcp_send(&ctx, handle.as_mut(), &packet, "isns.discover");
+                let data = broker_tcp_receive(&ctx, handle.as_mut(), 1024, "isns.discover")
+                    .unwrap_or_default();
+                let mut response = [0u8; 1024];
+                let n = data.len().min(response.len());
+                response[..n].copy_from_slice(&data[..n]);
 
-            Ok(result)
+                result.set("status", "ok")?;
+                result.set("discovered", n > 0)?;
+
+                Ok(result)
+            }
         })?,
     )?;
 

@@ -1,0 +1,125 @@
+# M007B migration effect-shape classification (M005E residual: 72 ungated + 25 advisory = 97 entries).
+#
+# Format: `<path> <CLASS> <rationale>`
+#
+# Classes:
+# - BrokerCompatibleTcp: blocking connect-style TCP; plain read/write (or TLS-over-Read/Write,
+#   or internal TcpStream plumbing); tokio use, if any, is bridge-only (block_on/Handle::current/
+#   spawn_blocking around sync logic or `*_async` Lua entries). Migrated in M007B by rewiring to
+#   broker_tcp_connect/send/receive (or BrokeredTcpStream where Read/Write is required).
+# - BrokerCompatibleUdpConnected: connected-UDP semantics fitting NseUdpSocket (bind+connect, no
+#   send_to/recv_from/broadcast). Migrated via broker_udp_connect/send/receive.
+# - AsyncDirectIo: structural async requiring a separate bounded bridge (tokio::spawn, channels,
+#   select!, multi-task pipelines). EMPTY in M007B: audit found no structural async; every tokio
+#   use is bridge-only. Class retained as vocabulary per plan §3.
+# - UnconnectedDatagram: send_to/recv_from/broadcast/multicast semantics not represented by the
+#   connected UDP provider. Explicitly manual-only (out of scope: UDP provider redesign).
+# - NativeHandleEscape: external crate requires concrete std::net::TcpStream (ssh2::Session).
+#   Explicitly manual-only (out of scope: native socket escape).
+# - RawPacketOrInterface: operation outside the TCP/UDP provider contract. Explicitly manual-only.
+# - PublicCompatibilityApi: src/public_api/api.rs public sync surface. Kept manual/native unless
+#   separately redesigned (out of scope per plan §6).
+#
+# Guard: scripts/check-boundaries.sh (M007B section) asserts every M005E pin entry appears exactly
+# once here, and every BrokerCompatible* entry is promoted (no direct socket remains) by closure.
+# Unknown/unlisted classification is a stop condition (plan §3).
+
+# --- ungated residual (72) ---
+src/libraries/afp.rs BrokerCompatibleTcp blocking-TCP + bridge-only async entry (connect_async rewired to brokered sync)
+src/libraries/ajp.rs BrokerCompatibleTcp blocking-TCP + bridge-only async entries (connect_async/request_async rewired)
+src/libraries/amqp.rs BrokerCompatibleTcp blocking-TCP + bridge-only async entry (connect_async rewired)
+src/libraries/anyconnect.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/bitcoin.rs BrokerCompatibleTcp blocking connects + plain read/write
+src/libraries/bittorrent.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/bjnp.rs UnconnectedDatagram UDP broadcast discovery + send_to/recv_from (mixed TCP parts stay gated with file)
+src/libraries/cassandra.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/citrixxml.rs BrokerCompatibleTcp async-only entry, blocking connect-style semantics (rewired to brokered sync)
+src/libraries/coap.rs UnconnectedDatagram send_to/recv_from unconnected UDP
+src/libraries/cvs.rs BrokerCompatibleTcp blocking connects + plain read/write
+src/libraries/dicom.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/drda.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/eigrp.rs UnconnectedDatagram unconnected UDP send_to/recv_from
+src/libraries/finger.rs BrokerCompatibleTcp blocking-TCP + bridge-only async entry (query_async rewired)
+src/libraries/helpers.rs BrokerCompatibleTcp dead direct-connect helpers (tls_connect/tcp_connect_with_timeout + make_addr/parse_socket_addr, zero production callers) REMOVED in M007B; live reqwest builders stay (deferred HTTP scope)
+src/libraries/http2.rs BrokerCompatibleTcp async-only entry, blocking connect-style semantics (rewired to brokered sync)
+src/libraries/iax2.rs UnconnectedDatagram send_to/recv_from unconnected UDP
+src/libraries/iec61850mms.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/ike.rs UnconnectedDatagram send_to/recv_from unconnected UDP
+src/libraries/informix.rs BrokerCompatibleTcp blocking connects + plain read/write
+src/libraries/ipmi.rs UnconnectedDatagram send_to/recv_from unconnected UDP
+src/libraries/ipp.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/irc.rs BrokerCompatibleTcp blocking connects + plain read/write
+src/libraries/iscsi.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/isns.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/jdwp.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/kafka.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/knx.rs UnconnectedDatagram send_to/recv_from unconnected UDP
+src/libraries/libssh2_utility.rs BrokerCompatibleTcp blocking connects + plain read/write (no ssh2-crate stream handoff; banner/probe helpers)
+src/libraries/membase.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/memcached.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/mqtt.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/msrpc.rs BrokerCompatibleTcp blocking connects + plain read/write
+src/libraries/msrpcperformance.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/natpmp.rs UnconnectedDatagram send_to/recv_from unconnected UDP
+src/libraries/nbd.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/ncp.rs BrokerCompatibleTcp blocking-TCP + bridge-only async entry (connect_async rewired)
+src/libraries/ndmp.rs BrokerCompatibleTcp blocking-TCP + bridge-only async entry (connect_async rewired)
+src/libraries/netbios.rs BrokerCompatibleTcp async-only entries, blocking connect-style TCP semantics (rewired to brokered sync)
+src/libraries/nrpc.rs BrokerCompatibleTcp blocking-TCP + bridge-only async entry (connect_async rewired)
+src/libraries/omp2.rs BrokerCompatibleTcp blocking connect + TLS-over-Read/Write via BrokeredTcpStream
+src/libraries/oops.rs BrokerCompatibleTcp blocking connects + plain read/write
+src/libraries/oracle.rs BrokerCompatibleTcp async-only entries, blocking connect-style TCP semantics (rewired to brokered sync)
+src/libraries/packet.rs RawPacketOrInterface raw-packet facilities outside TCP/UDP contract (plus unconnected UDP parts)
+src/libraries/pgsql.rs BrokerCompatibleTcp blocking connects + plain read/write
+src/libraries/pop3.rs BrokerCompatibleTcp blocking connects + plain read/write
+src/libraries/proxy.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/radius.rs BrokerCompatibleUdpConnected sync entries are no-I/O stubs; connect_async is bind+connected-UDP with no datagram transfer (rewired to broker_udp_connect)
+src/libraries/rmi.rs BrokerCompatibleTcp blocking connects + plain read/write
+src/libraries/rpcap.rs BrokerCompatibleTcp blocking connects + plain read/write (remote-pcap control protocol over TCP)
+src/libraries/rsync.rs BrokerCompatibleTcp blocking connects + plain read/write
+src/libraries/rtsp.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/sftp.rs BrokerCompatibleTcp async-only entry, blocking connect-style TCP semantics, no ssh2-crate handoff (rewired to brokered sync)
+src/libraries/sip.rs BrokerCompatibleTcp blocking-TCP + bridge-only async entries (options_async/invite_async rewired)
+src/libraries/socks.rs BrokerCompatibleTcp blocking connects + plain read/write
+src/libraries/srvloc.rs UnconnectedDatagram send_to/recv_from + broadcast SLP discovery
+src/libraries/ssh1.rs BrokerCompatibleTcp blocking connects + plain read/write (protocol implemented inline, no ssh2-crate handoff)
+src/libraries/ssh2.rs NativeHandleEscape hands concrete TcpStream to ssh2::Session (set_tcp_stream/handshake)
+src/libraries/sslv2.rs BrokerCompatibleTcp blocking connects + plain read/write
+src/libraries/stun.rs UnconnectedDatagram send_to/recv_from unconnected UDP (tokio bridge over datagrams)
+src/libraries/telnet.rs BrokerCompatibleTcp blocking-TCP + bridge-only async entry (connect_async rewired)
+src/libraries/tftp.rs UnconnectedDatagram send_to/recv_from unconnected UDP (tokio bridge over datagrams)
+src/libraries/tn3270.rs BrokerCompatibleTcp single blocking connect + exchange
+src/libraries/tns.rs BrokerCompatibleTcp blocking-TCP + bridge-only async entries (connect_async/execute_async rewired)
+src/libraries/versant.rs BrokerCompatibleTcp blocking connects + plain read/write
+src/libraries/websocket.rs BrokerCompatibleTcp async-only entry, blocking connect-style TCP semantics (rewired to brokered sync)
+src/libraries/whois.rs BrokerCompatibleTcp blocking-TCP + bridge-only async entry (whois_async rewired)
+src/libraries/winrm.rs BrokerCompatibleTcp async-only entry, blocking connect-style TCP semantics (rewired to brokered sync)
+src/libraries/wsdd.rs UnconnectedDatagram send_to/recv_from + broadcast WS-Discovery
+src/libraries/xmpp.rs BrokerCompatibleTcp single blocking connect + exchange
+src/public_api/api.rs PublicCompatibilityApi public sync compatibility surface; manual/native unless separately redesigned
+# --- advisory residual (25) ---
+src/libraries/brute.rs BrokerCompatibleTcp blocking TCP entries + HTTP-auth entries already brokered (per-entry audit: TCP helpers rewired, mixed notes kept)
+src/libraries/dhcp.rs UnconnectedDatagram UDP broadcast discovery (send_to/recv_from)
+src/libraries/dhcp6.rs UnconnectedDatagram UDP broadcast/multicast (send_to/recv_from)
+src/libraries/ftp.rs BrokerCompatibleTcp blocking TCP core (25 sites) + spawn_blocking async aliases (per-entry audit; PASV data listener stays loopback-bound)
+src/libraries/imap.rs BrokerCompatibleTcp single blocking connect + exchange (per-entry audit)
+src/libraries/ldap.rs BrokerCompatibleTcp single blocking connect + exchange (per-entry audit)
+src/libraries/libssh2.rs NativeHandleEscape hands concrete TcpStream to ssh2::Session
+src/libraries/mongodb.rs BrokerCompatibleTcp blocking TCP core + spawn_blocking async aliases (per-entry audit)
+src/libraries/mssql.rs BrokerCompatibleTcp blocking TCP core + bridge-only async entries (per-entry audit)
+src/libraries/mysql.rs BrokerCompatibleTcp blocking TCP core + spawn_blocking async aliases (per-entry audit)
+src/libraries/ntp.rs UnconnectedDatagram send_to/recv_from unconnected UDP
+src/libraries/openssl.rs BrokerCompatibleTcp blocking connects + TLS-over-Read/Write via BrokeredTcpStream (per-entry audit; mixed gating noted)
+src/libraries/postgres.rs BrokerCompatibleTcp struct-held stream + blocking connect (per-entry audit; spawn_blocking async aliases)
+src/libraries/rdp.rs BrokerCompatibleTcp blocking connect + plain read/write (per-entry audit; spawn_blocking async alias)
+src/libraries/redis.rs BrokerCompatibleTcp blocking TCP core + spawn_blocking async aliases (per-entry audit)
+src/libraries/smb.rs BrokerCompatibleTcp internal TcpStream plumbing (negotiate/session helpers) + spawn_blocking async aliases (per-entry audit)
+src/libraries/smb2.rs BrokerCompatibleTcp single blocking connect + exchange (per-entry audit)
+src/libraries/smtp.rs BrokerCompatibleTcp blocking TCP core + spawn_blocking async aliases (per-entry audit)
+src/libraries/snmp.rs UnconnectedDatagram send_to/recv_from unconnected UDP
+src/libraries/ssh.rs NativeHandleEscape hands concrete TcpStream to ssh2::Session (12 sites)
+src/libraries/sslcert.rs BrokerCompatibleTcp blocking connect + TLS-over-Read/Write via BrokeredTcpStream (per-entry audit)
+src/libraries/tls.rs BrokerCompatibleTcp blocking connect + TLS-over-Read/Write via BrokeredTcpStream (per-entry audit; gated connect_tcp)
+src/libraries/upnp.rs BrokerCompatibleTcp blocking TCP core + bridge-only async entries (per-entry audit; SSDP multicast discovery stays manual-only-gated with file)
+src/libraries/vnc.rs BrokerCompatibleTcp struct-held streams + blocking connects + spawn_blocking async aliases (per-entry audit)
+src/libraries/xdmcp.rs UnconnectedDatagram XDMCP is UDP-based (send_to/recv_from + broadcast; mixed TCP parts stay gated with file)

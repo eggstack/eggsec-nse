@@ -3,39 +3,46 @@
 //! BitTorrent protocol support for NSE scripts.
 //! Based on Nmap's bittorrent library.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, broker_tcp_receive, broker_tcp_send, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
-pub fn register_bittorrent_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed bittorrent registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_bittorrent_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let bittorrent = lua.create_table()?;
 
     bittorrent.set(
         "handshake",
-        lua.create_function(
-            |lua, (host, port, _info_hash): (String, u16, Option<String>)| {
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, _info_hash): (String, u16, Option<String>)| {
                 let result = lua.create_table()?;
+                let timeout = Duration::from_secs(10);
 
-                let addr = format!("{}:{}", host, port);
-                let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                    Ok(a) => a,
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    timeout,
+                    "bittorrent.handshake",
+                ) {
+                    Ok(pair) => pair,
                     Err(e) => {
                         result.set("status", "error")?;
-                        result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
+                        result.set("error", e)?;
                         return Ok(result);
                     }
                 };
-                let mut stream =
-                    match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            result.set("status", "error")?;
-                            result.set("error", e.to_string())?;
-                            return Ok(result);
-                        }
-                    };
 
                 // BitTorrent handshake
                 let mut handshake = vec![0x13]; // Protocol length (19)
@@ -44,12 +51,17 @@ pub fn register_bittorrent_library(lua: &Lua) -> LuaResult<()> {
                 handshake.extend_from_slice(&[0u8; 20]); // Info hash (20 bytes)
                 handshake.extend_from_slice(&[0u8; 20]); // Peer ID
 
-                stream.write_all(&handshake).unwrap_or_else(|e| {
-                    tracing::warn!("Failed to send BitTorrent handshake: {}", e)
-                });
+                if let Err(e) =
+                    broker_tcp_send(&ctx, handle.as_mut(), &handshake, "bittorrent.handshake")
+                {
+                    tracing::warn!("Failed to send BitTorrent handshake: {}", e);
+                }
 
+                let data = broker_tcp_receive(&ctx, handle.as_mut(), 68, "bittorrent.handshake")
+                    .unwrap_or_default();
                 let mut response = [0u8; 68];
-                let n = stream.read(&mut response).unwrap_or(0);
+                let n = data.len().min(response.len());
+                response[..n].copy_from_slice(&data[..n]);
 
                 if n >= 68 {
                     result.set("status", "ok")?;
@@ -60,8 +72,8 @@ pub fn register_bittorrent_library(lua: &Lua) -> LuaResult<()> {
                 }
 
                 Ok(result)
-            },
-        )?,
+            }
+        })?,
     )?;
 
     bittorrent.set(

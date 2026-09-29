@@ -4,7 +4,6 @@
 
 use mlua::{Lua, Result as LuaResult, Table};
 use native_tls::TlsConnector;
-use std::net::TcpStream;
 use std::time::Duration;
 
 pub use mlua::Table as LuaTable;
@@ -58,45 +57,12 @@ pub fn create_tls_connector(
         .map_err(|e| e.to_string())
 }
 
-pub fn tls_connect(
-    host: &str,
-    port: u16,
-    accept_invalid_certs: bool,
-    accept_invalid_hostnames: bool,
-) -> Result<(TcpStream, TlsConnector), String> {
-    let connector = create_tls_connector(accept_invalid_certs, accept_invalid_hostnames)?;
-    let addr = make_addr(host, port);
-    let socket_addr = parse_socket_addr(&addr)?;
-    let stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-        .map_err(|e| e.to_string())?;
-    Ok((stream, connector))
-}
-
-pub fn make_addr(host: &str, port: u16) -> String {
-    format!("{}:{}", host, port)
-}
-
-pub fn tcp_connect_with_timeout(
-    host: &str,
-    port: u16,
-    timeout_secs: u64,
-) -> std::io::Result<TcpStream> {
-    let addr = make_addr(host, port);
-    let socket_addr = addr
-        .parse::<std::net::SocketAddr>()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
-
-    let stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(timeout_secs))?;
-    stream.set_read_timeout(Some(Duration::from_secs(timeout_secs)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(timeout_secs)))?;
-
-    Ok(stream)
-}
-
-pub fn parse_socket_addr(addr: &str) -> Result<std::net::SocketAddr, String> {
-    addr.parse::<std::net::SocketAddr>()
-        .map_err(|e| e.to_string())
-}
+// M007B: the dead direct-connect helpers (`tls_connect`,
+// `tcp_connect_with_timeout` and their `make_addr`/`parse_socket_addr`
+// plumbing) were removed. They had zero production callers and kept this
+// file in the direct-socket residual pin; provider-backed callers use the
+// broker fns (or `BrokeredTcpStream` where `Read`/`Write` is required).
+// Removal is recorded for the M007C compatibility gate.
 
 #[inline]
 pub fn parse_response_code(response: &str, expected: &[&str]) -> bool {

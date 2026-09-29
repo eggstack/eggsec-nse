@@ -3,9 +3,9 @@
 //! LDAP (Lightweight Directory Access Protocol) support for NSE scripts.
 //! Includes LDAPv3 implementations with actual protocol handling.
 
+use crate::brokered_stream::{broker_read_into, broker_write_all};
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult, Table};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
 use crate::capabilities::NseCapabilityContext;
@@ -366,24 +366,36 @@ fn build_moddn_request(message_id: i32, dn: &str, new_rdn: &str, delete_old: boo
     msg
 }
 
-fn send_ldap_request(host: &str, port: u16, data: &[u8]) -> Result<Vec<u8>, String> {
-    let addr = format!("{}:{}", host, port);
-    let mut stream = TcpStream::connect_timeout(
-        &addr
-            .parse()
-            .map_err(|e: std::net::AddrParseError| e.to_string())?,
+/// Single-request LDAP exchange over a brokered connection.
+///
+/// The broker resolves `host` (authority-preserving); timeouts collapse to
+/// the provider's single read/write timeout (30s, as before).
+fn send_ldap_request(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    host: &str,
+    port: u16,
+    data: &[u8],
+    operation: &'static str,
+) -> Result<Vec<u8>, String> {
+    let (mut handle, _endpoint) = broker_tcp_connect(
+        ctx,
+        services,
+        host,
+        port,
         Duration::from_secs(10),
-    )
-    .map_err(|e| e.to_string())?;
+        operation,
+    )?;
 
-    stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
+    handle
+        .set_timeouts(Duration::from_secs(30))
         .map_err(|e| e.to_string())?;
 
-    stream.write_all(data).map_err(|e| e.to_string())?;
+    broker_write_all(ctx, handle.as_mut(), data, operation).map_err(|e| e.to_string())?;
 
     let mut response = vec![0u8; 65535];
-    let n = stream.read(&mut response).map_err(|e| e.to_string())?;
+    let n = broker_read_into(ctx, handle.as_mut(), &mut response, operation)
+        .map_err(|e| e.to_string())?;
 
     if n == 0 {
         return Err("No response received".to_string());
@@ -577,11 +589,19 @@ fn maybe_denied_ldap(
     Ok(None)
 }
 
-pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+/// Provider-backed ldap registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_ldap_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let ldap = lua.create_table()?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let connect_fn = lua.create_function(move |lua, (host, port): (String, Option<u16>)| {
         if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.connect")? {
             return Ok(denied);
@@ -595,7 +615,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
         let request = build_bind_request(1, "", "");
 
-        match send_ldap_request(&host, port, &request) {
+        match send_ldap_request(&cap, &svc, &host, port, &request, "ldap.connect") {
             Ok(_) => {
                 result.set("status", "connected")?;
             }
@@ -610,6 +630,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     ldap.set("connect", connect_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let simple_bind_fn = lua.create_function(
         move |lua, (host, port, dn, password): (String, Option<u16>, String, String)| {
             if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.simple_bind")? {
@@ -619,7 +640,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
             let request = build_bind_request(1, &dn, &password);
 
-            match send_ldap_request(&host, port, &request) {
+            match send_ldap_request(&cap, &svc, &host, port, &request, "ldap.simple_bind") {
                 Ok(response) => {
                     let result = lua.create_table()?;
 
@@ -652,6 +673,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     ldap.set("simple_bind", simple_bind_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let search_fn = lua.create_function(
         move |lua,
               (host, port, base_dn, filter, attrs, scope): (
@@ -674,7 +696,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
             let request = build_search_request(1, &base_dn, &scope, &filter, &attributes);
 
-            match send_ldap_request(&host, port, &request) {
+            match send_ldap_request(&cap, &svc, &host, port, &request, "ldap.search") {
                 Ok(response) => {
                     let result = lua.create_table()?;
 
@@ -725,6 +747,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     ldap.set("search", search_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let add_fn = lua.create_function(
         move |lua, (host, port, dn, attrs): (String, Option<u16>, String, Option<String>)| {
             if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.add")? {
@@ -749,7 +772,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
             let request = build_add_request(1, &dn, &attributes);
 
-            match send_ldap_request(&host, port, &request) {
+            match send_ldap_request(&cap, &svc, &host, port, &request, "ldap.add") {
                 Ok(_) => {
                     let result = lua.create_table()?;
                     result.set("success", true)?;
@@ -768,6 +791,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     ldap.set("add", add_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let delete_fn = lua.create_function(
         move |lua, (host, port, dn): (String, Option<u16>, String)| {
             if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.delete")? {
@@ -777,7 +801,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
             let request = build_delete_request(1, &dn);
 
-            match send_ldap_request(&host, port, &request) {
+            match send_ldap_request(&cap, &svc, &host, port, &request, "ldap.delete") {
                 Ok(_) => {
                     let result = lua.create_table()?;
                     result.set("success", true)?;
@@ -796,6 +820,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     ldap.set("delete", delete_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let compare_fn = lua.create_function(
         move |lua, (host, port, dn, attr, value): (String, Option<u16>, String, String, String)| {
             if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.compare")? {
@@ -805,7 +830,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
             let request = build_compare_request(1, &dn, &attr, &value);
 
-            match send_ldap_request(&host, port, &request) {
+            match send_ldap_request(&cap, &svc, &host, port, &request, "ldap.compare") {
                 Ok(response) => {
                     let result = lua.create_table()?;
 
@@ -832,6 +857,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     ldap.set("compare", compare_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let whoami_fn = lua.create_function(move |lua, (host, port): (String, Option<u16>)| {
         if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.whoami")? {
             return Ok(denied);
@@ -840,7 +866,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
         let request = build_bind_request(1, "", "");
 
-        match send_ldap_request(&host, port, &request) {
+        match send_ldap_request(&cap, &svc, &host, port, &request, "ldap.whoami") {
             Ok(_) => {
                 let result = lua.create_table()?;
                 result.set("dn", "anonymous".to_string())?;
@@ -869,6 +895,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     ldap.set("connect_async", async_connect_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_simple_bind_fn = lua.create_function(
         move |lua, (host, port, dn, password): (String, Option<u16>, String, String)| {
             if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.simple_bind_async")? {
@@ -878,7 +905,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
             let request = build_bind_request(1, &dn, &password);
 
-            match send_ldap_request(&host, port, &request) {
+            match send_ldap_request(&cap, &svc, &host, port, &request, "ldap.simple_bind_async") {
                 Ok(_) => {
                     let result = lua.create_table()?;
                     result.set("success", true)?;
@@ -897,6 +924,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     ldap.set("simple_bind_async", async_simple_bind_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_search_fn = lua.create_function(
         move |lua,
               (host, port, base_dn, filter, attrs): (
@@ -917,7 +945,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
             let request = build_search_request(1, &base_dn, "sub", &filter, &attributes);
 
-            match send_ldap_request(&host, port, &request) {
+            match send_ldap_request(&cap, &svc, &host, port, &request, "ldap.search_async") {
                 Ok(response) => {
                     let result = lua.create_table()?;
 
@@ -968,6 +996,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     ldap.set("search_async", async_search_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let modify_fn = lua.create_function(
         move |lua, (host, port, dn, modifications): (String, Option<u16>, String, Table)| {
             if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.modify")? {
@@ -1015,7 +1044,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
             let request = build_modify_request(1, &dn, &mod_list);
 
-            match send_ldap_request(&host, port, &request) {
+            match send_ldap_request(&cap, &svc, &host, port, &request, "ldap.modify") {
                 Ok(_) => {
                     let result = lua.create_table()?;
                     result.set("success", true)?;
@@ -1034,6 +1063,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     ldap.set("modify", modify_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let modify_async_fn = lua.create_function(
         move |lua, (host, port, dn, modifications): (String, Option<u16>, String, Table)| {
             if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.modify_async")? {
@@ -1082,7 +1112,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
             let request = build_modify_request(1, &dn, &mod_list);
 
             let result = lua.create_table()?;
-            match send_ldap_request(&host, port, &request) {
+            match send_ldap_request(&cap, &svc, &host, port, &request, "ldap.modify_async") {
                 Ok(_) => {
                     result.set("success", true)?;
                     result.set("dn", dn)?;
@@ -1099,6 +1129,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     ldap.set("modify_async", modify_async_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let rename_fn = lua.create_function(
         move |lua,
               (host, port, dn, new_rdn, delete_old_rdn): (
@@ -1115,7 +1146,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
             let request = build_moddn_request(1, &dn, &new_rdn, delete_old_rdn);
 
-            match send_ldap_request(&host, port, &request) {
+            match send_ldap_request(&cap, &svc, &host, port, &request, "ldap.rename") {
                 Ok(_) => {
                     let result = lua.create_table()?;
                     result.set("success", true)?;
@@ -1135,6 +1166,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     ldap.set("rename", rename_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let get_root_dse_fn =
         lua.create_function(move |lua, (host, port): (String, Option<u16>)| {
             if let Some(denied) = maybe_denied_ldap(lua, &cap, &host, "ldap.get_root_dse")? {
@@ -1145,7 +1177,7 @@ pub fn register_ldap_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
             let attrs = vec!["*".to_string()];
             let request = build_search_request(1, "", "base", "objectClass=*", &attrs);
 
-            match send_ldap_request(&host, port, &request) {
+            match send_ldap_request(&cap, &svc, &host, port, &request, "ldap.get_root_dse") {
                 Ok(_) => {
                     let result = lua.create_table()?;
                     result.set("success", true)?;

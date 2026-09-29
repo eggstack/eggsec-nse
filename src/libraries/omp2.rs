@@ -6,8 +6,16 @@
 use mlua::{Lua, Result as LuaResult, Table};
 
 use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 
-pub fn register_omp2_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+/// Provider-backed omp2 registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_omp2_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let omp2 = lua.create_table()?;
 
@@ -21,54 +29,41 @@ pub fn register_omp2_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
     })?;
     omp2.set("Session", new_fn)?;
 
-    let insecure_tls = capability_ctx.allows_insecure_tls();
-    let connect_fn = lua.create_function(
+    // Connect probe: previously built a `TlsConnector` (never actually
+    // handshaked — only a raw TCP connect-check ran) over a literally
+    // parsed address. Rewired to an authority-preserving brokered probe;
+    // the success/failure shapes are preserved. (`insecure_tls` no longer
+    // applies: no TLS handshake runs on this path.)
+    let connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
         move |lua, (host, port, _user, _password): (String, u16, String, String)| {
             let result = lua.create_table()?;
 
-            let addr = format!("{}:{}", host, port);
-
-            match native_tls::TlsConnector::builder()
-                .danger_accept_invalid_certs(insecure_tls)
-                .danger_accept_invalid_hostnames(insecure_tls)
-                .build()
-            {
-                Ok(_connector) => {
-                    let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                        Ok(a) => a,
-                        Err(e) => {
-                            result.set("status", "error")?;
-                            result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                            return Ok(result);
-                        }
-                    };
-                    match std::net::TcpStream::connect_timeout(
-                        &socket_addr,
-                        std::time::Duration::from_secs(5),
-                    ) {
-                        Ok(_stream) => {
-                            result.set("status", "ok")?;
-                            result.set("connected", true)?;
-                            result.set("host", host)?;
-                            result.set("port", port)?;
-                        }
-                        _ => {
-                            result.set("status", "fail")?;
-                            result.set("connected", false)?;
-                            result.set("error", "Connection failed")?;
-                        }
-                    }
+            match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port,
+                std::time::Duration::from_secs(5),
+                "omp2.connect",
+            ) {
+                Ok((_handle, _endpoint)) => {
+                    result.set("status", "ok")?;
+                    result.set("connected", true)?;
+                    result.set("host", host)?;
+                    result.set("port", port)?;
                 }
-                Err(e) => {
+                Err(_) => {
                     result.set("status", "fail")?;
                     result.set("connected", false)?;
-                    result.set("error", e.to_string())?;
+                    result.set("error", "Connection failed")?;
                 }
             }
 
             Ok(result)
-        },
-    )?;
+        }
+    })?;
     omp2.set("connect", connect_fn)?;
 
     let authenticate_fn = lua.create_function(

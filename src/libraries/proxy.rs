@@ -3,50 +3,62 @@
 //! Proxy protocol detection and handling.
 //! Based on Nmap's proxy library.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, broker_tcp_receive, broker_tcp_send, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
-pub fn register_proxy_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed proxy registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_proxy_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let proxy = lua.create_table()?;
 
     proxy.set(
         "connect",
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            let result = lua.create_table()?;
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, u16)| {
+                let result = lua.create_table()?;
+                let timeout = Duration::from_secs(10);
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    timeout,
+                    "proxy.connect",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
 
-            // HTTP CONNECT
-            let connect = format!("CONNECT {}:{} HTTP/1.1\r\n\r\n", host, port);
-            stream.write_all(connect.as_bytes()).ok();
+                // HTTP CONNECT
+                let connect = format!("CONNECT {}:{} HTTP/1.1\r\n\r\n", host, port);
+                let _ = broker_tcp_send(&ctx, handle.as_mut(), connect.as_bytes(), "proxy.connect");
 
-            let mut response = [0u8; 1024];
-            let n = stream.read(&mut response).unwrap_or(0);
+                let data = broker_tcp_receive(&ctx, handle.as_mut(), 1024, "proxy.connect")
+                    .unwrap_or_default();
+                let mut response = [0u8; 1024];
+                let n = data.len().min(response.len());
+                response[..n].copy_from_slice(&data[..n]);
 
-            result.set("status", "ok")?;
-            result.set("connected", n > 0)?;
+                result.set("status", "ok")?;
+                result.set("connected", n > 0)?;
 
-            Ok(result)
+                Ok(result)
+            }
         })?,
     )?;
 

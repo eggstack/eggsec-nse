@@ -3,12 +3,12 @@
 //! SMB2 (Server Message Block 2) protocol support for NSE scripts.
 //! Based on Nmap's smb2 library.
 
+use crate::brokered_stream::{broker_read_into, broker_write_all};
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
-use crate::capabilities::NseCapabilityContext;
 use crate::wrappers;
 
 const SMB2_NEGOTIATE: u16 = 0x0000;
@@ -45,77 +45,88 @@ fn maybe_denied_smb2(
     Ok(None)
 }
 
-pub fn register_smb2_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+/// Provider-backed smb2 registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_smb2_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let smb2 = lua.create_table()?;
 
     let cap = capability_ctx.clone();
     smb2.set(
         "negotiate",
-        lua.create_function(move |lua, (host, port): (String, u16)| {
-            if let Some(denied) = maybe_denied_smb2(lua, &cap, &host, "smb2.negotiate")? {
-                return Ok(denied);
-            }
-            let result = lua.create_table()?;
-
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, u16)| {
+                if let Some(denied) = maybe_denied_smb2(lua, &cap, &host, "smb2.negotiate")? {
+                    return Ok(denied);
                 }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
+                let result = lua.create_table()?;
+
+                // The broker resolves `host` (authority-preserving);
+                // unresolvable or refused hosts keep the error-table shape.
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "smb2.negotiate",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
+
+                // SMB2 negotiate request
+                let mut request = vec![
+                    0x00, 0x00, // Structure size
+                    0x00, 0x00, // Dialect count
+                    0x00, 0x00, 0x00, 0x00, // Security mode
+                    0x00, 0x00, // Capabilities
+                    0x00, 0x00, 0x00, 0x00, // Client GUID
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Dialects
+                    0x02, 0x02, // SMB 2.0.2
+                    0x10, 0x02, // SMB 2.1
+                    0x20, 0x02, // SMB 2.2
+                    0x21, 0x02, // SMB 2.2.2
+                    0x30, 0x02, // SMB 3.0
+                    0x31, 0x02, // SMB 3.0.2
+                    0x02, 0x00, // SMB 3.1.1
+                ];
+
+                // Fill in structure size
+                request[0] = 0x36;
+                request[2] = 0x06; // Dialect count
+
+                broker_write_all(&ctx, handle.as_mut(), &request, "smb2.negotiate").ok();
+
+                let mut response = vec![0u8; 1024];
+                if broker_read_into(&ctx, handle.as_mut(), &mut response, "smb2.negotiate").is_err()
+                {
+                    tracing::warn!("Failed to read SMB2 negotiate response");
                 }
-            };
 
-            // SMB2 negotiate request
-            let mut request = vec![
-                0x00, 0x00, // Structure size
-                0x00, 0x00, // Dialect count
-                0x00, 0x00, 0x00, 0x00, // Security mode
-                0x00, 0x00, // Capabilities
-                0x00, 0x00, 0x00, 0x00, // Client GUID
-                0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Dialects
-                0x02, 0x02, // SMB 2.0.2
-                0x10, 0x02, // SMB 2.1
-                0x20, 0x02, // SMB 2.2
-                0x21, 0x02, // SMB 2.2.2
-                0x30, 0x02, // SMB 3.0
-                0x31, 0x02, // SMB 3.0.2
-                0x02, 0x00, // SMB 3.1.1
-            ];
+                if !response.is_empty() {
+                    result.set("status", "ok")?;
+                    result.set("dialect", "SMB 2.1")?;
+                    result.set("security_mode", "signing_enabled")?;
+                    result.set("guid", "00000000-0000-0000-0000-000000000000")?;
+                } else {
+                    result.set("status", "error")?;
+                    result.set("error", "no response")?;
+                }
 
-            // Fill in structure size
-            request[0] = 0x36;
-            request[2] = 0x06; // Dialect count
-
-            stream.write_all(&request).ok();
-
-            let mut response = vec![0u8; 1024];
-            if stream.read(&mut response).is_err() {
-                tracing::warn!("Failed to read SMB2 negotiate response");
+                Ok(result)
             }
-
-            if !response.is_empty() {
-                result.set("status", "ok")?;
-                result.set("dialect", "SMB 2.1")?;
-                result.set("security_mode", "signing_enabled")?;
-                result.set("guid", "00000000-0000-0000-0000-000000000000")?;
-            } else {
-                result.set("status", "error")?;
-                result.set("error", "no response")?;
-            }
-
-            Ok(result)
         })?,
     )?;
 

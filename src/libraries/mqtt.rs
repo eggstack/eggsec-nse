@@ -3,11 +3,14 @@
 //! MQTT (Message Queuing Telemetry Transport) protocol support for NSE scripts.
 //! Implements MQTT 3.1.1/5.0 protocol.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{
+    broker_tcp_connect, broker_tcp_receive, broker_tcp_send, NseHostServices, NseTcpConnection,
+};
 use mlua::{Lua, Result as LuaResult, Table};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
+#[allow(dead_code)]
 const MQTT_PROTOCOL_LEVEL: u8 = 4;
 
 const CONNECT: u8 = 1;
@@ -25,7 +28,9 @@ const PASSWORD_FLAG: u8 = 0x40;
 const USER_NAME_FLAG: u8 = 0x80;
 
 struct MqttConnection {
-    stream: TcpStream,
+    handle: Box<dyn NseTcpConnection>,
+    ctx: NseCapabilityContext,
+    operation: &'static str,
     host: String,
     port: u16,
     client_id: String,
@@ -34,21 +39,34 @@ struct MqttConnection {
 }
 
 impl MqttConnection {
-    fn new(host: &str, port: u16, client_id: &str, keepalive: u16) -> Result<Self, String> {
-        let addr = format!("{}:{}", host, port);
-        let stream = TcpStream::connect_timeout(
-            &addr
-                .parse()
-                .map_err(|e: std::net::AddrParseError| e.to_string())?,
+    fn new(
+        ctx: &NseCapabilityContext,
+        services: &NseHostServices,
+        host: &str,
+        port: u16,
+        client_id: &str,
+        keepalive: u16,
+        operation: &'static str,
+    ) -> Result<Self, String> {
+        // The broker resolves `host` (authority-preserving) instead of
+        // requiring a literal `SocketAddr` string.
+        let (mut handle, _endpoint) = broker_tcp_connect(
+            ctx,
+            services,
+            host,
+            port,
             Duration::from_secs(10),
-        )
-        .map_err(|e| e.to_string())?;
+            operation,
+        )?;
 
-        stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-        stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
+        // Preserve the original 30s read/write timeout behavior via the
+        // provider handle (failures here were ignored before).
+        let _ = handle.set_timeouts(Duration::from_secs(30));
 
         Ok(Self {
-            stream,
+            handle,
+            ctx: ctx.clone(),
+            operation,
             host: host.to_string(),
             port,
             client_id: client_id.to_string(),
@@ -60,6 +78,42 @@ impl MqttConnection {
     fn next_packet_id(&mut self) -> u16 {
         self.packet_id = self.packet_id.wrapping_add(1);
         self.packet_id
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> Result<(), String> {
+        // `broker_tcp_send` may short-write; loop like `write_all`.
+        let mut written = 0;
+        while written < buf.len() {
+            let n = broker_tcp_send(
+                &self.ctx,
+                self.handle.as_mut(),
+                &buf[written..],
+                self.operation,
+            )?;
+            if n == 0 {
+                return Err("MQTT send wrote zero bytes".to_string());
+            }
+            written += n;
+        }
+        Ok(())
+    }
+
+    fn read_exact(&mut self, len: usize) -> Result<Vec<u8>, String> {
+        // `broker_tcp_receive` returns one chunk; loop like `read_exact`.
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            let chunk = broker_tcp_receive(
+                &self.ctx,
+                self.handle.as_mut(),
+                len - out.len(),
+                self.operation,
+            )?;
+            if chunk.is_empty() {
+                return Err("MQTT connection closed mid-packet".to_string());
+            }
+            out.extend_from_slice(&chunk);
+        }
+        Ok(out)
     }
 
     fn connect(
@@ -272,21 +326,17 @@ impl MqttConnection {
 
         buffer.extend_from_slice(payload);
 
-        self.stream.write_all(&buffer).map_err(|e| e.to_string())?;
+        self.write_all(&buffer)?;
         Ok(())
     }
 
     fn read_packet(&mut self) -> Result<Vec<u8>, String> {
-        let mut header = [0u8; 1];
-        self.stream
-            .read_exact(&mut header)
-            .map_err(|e| e.to_string())?;
+        let header = self.read_exact(1)?;
 
         let mut length = 0;
         let mut multiplier = 1;
         loop {
-            let mut b = [0u8; 1];
-            self.stream.read_exact(&mut b).map_err(|e| e.to_string())?;
+            let b = self.read_exact(1)?;
             length += (b[0] as usize & 0x7F) * multiplier;
             multiplier *= 128;
             if b[0] & 0x80 == 0 {
@@ -294,12 +344,11 @@ impl MqttConnection {
             }
         }
 
-        let mut payload = vec![0u8; length];
-        if length > 0 {
-            self.stream
-                .read_exact(&mut payload)
-                .map_err(|e| e.to_string())?;
-        }
+        let payload = if length > 0 {
+            self.read_exact(length)?
+        } else {
+            Vec::new()
+        };
 
         let mut full_packet = vec![header[0]];
         full_packet.extend_from_slice(&payload);
@@ -309,15 +358,33 @@ impl MqttConnection {
 }
 
 const UNSUBSCRIBE: u8 = 10;
+#[allow(dead_code)]
 const UNSUBACK: u8 = 11;
 
-pub fn register_mqtt_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed mqtt registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_mqtt_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let mqtt = lua.create_table()?;
 
-    let connect_fn =
-        lua.create_function(|lua, (host, port, client_id): (String, u16, String)| {
-            let mut conn = match MqttConnection::new(&host, port, &client_id, 60) {
+    let connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port, client_id): (String, u16, String)| {
+            let mut conn = match MqttConnection::new(
+                &ctx,
+                &services,
+                &host,
+                port,
+                &client_id,
+                60,
+                "mqtt.connect",
+            ) {
                 Ok(c) => c,
                 Err(e) => {
                     let result = lua.create_table()?;
@@ -342,19 +409,30 @@ pub fn register_mqtt_library(lua: &Lua) -> LuaResult<()> {
                     Ok(result)
                 }
             }
-        })?;
+        }
+    })?;
     mqtt.set("connect", connect_fn)?;
 
-    let connect_auth_fn = lua.create_function(
-        |lua,
-         (host, port, client_id, username, password): (
+    let connect_auth_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua,
+              (host, port, client_id, username, password): (
             String,
             u16,
             String,
             Option<String>,
             Option<String>,
         )| {
-            let mut conn = match MqttConnection::new(&host, port, &client_id, 60) {
+            let mut conn = match MqttConnection::new(
+                &ctx,
+                &services,
+                &host,
+                port,
+                &client_id,
+                60,
+                "mqtt.connect_auth",
+            ) {
                 Ok(c) => c,
                 Err(e) => {
                     let result = lua.create_table()?;
@@ -379,13 +457,76 @@ pub fn register_mqtt_library(lua: &Lua) -> LuaResult<()> {
                     Ok(result)
                 }
             }
-        },
-    )?;
+        }
+    })?;
     mqtt.set("connect_auth", connect_auth_fn)?;
 
-    let publish_fn = lua.create_function(
-        |lua, (host, port, topic, payload, qos, retain): (String, u16, String, String, u8, bool)| {
-            let mut conn = match MqttConnection::new(&host, port, "eggsec", 60) {
+    let publish_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua,
+                  (host, port, topic, payload, qos, retain): (
+                String,
+                u16,
+                String,
+                String,
+                u8,
+                bool,
+            )| {
+                let mut conn = match MqttConnection::new(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    "eggsec",
+                    60,
+                    "mqtt.publish",
+                ) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let result = lua.create_table()?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
+
+                if let Err(e) = conn.connect(None, None, true) {
+                    let result = lua.create_table()?;
+                    result.set("error", e)?;
+                    return Ok(result);
+                }
+
+                match conn.publish(&topic, payload.as_bytes(), qos, retain) {
+                    Ok((packet_id, published)) => {
+                        let result = lua.create_table()?;
+                        result.set("published", published)?;
+                        result.set("packet_id", packet_id)?;
+                        result.set("topic", topic)?;
+                        Ok(result)
+                    }
+                    Err(e) => {
+                        let result = lua.create_table()?;
+                        result.set("error", e)?;
+                        Ok(result)
+                    }
+                }
+            }
+    })?;
+    mqtt.set("publish", publish_fn)?;
+
+    let subscribe_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port, topics): (String, u16, Table)| {
+            let mut conn = match MqttConnection::new(
+                &ctx,
+                &services,
+                &host,
+                port,
+                "eggsec",
+                60,
+                "mqtt.subscribe",
+            ) {
                 Ok(c) => c,
                 Err(e) => {
                     let result = lua.create_table()?;
@@ -400,12 +541,27 @@ pub fn register_mqtt_library(lua: &Lua) -> LuaResult<()> {
                 return Ok(result);
             }
 
-            match conn.publish(&topic, payload.as_bytes(), qos, retain) {
-                Ok((packet_id, published)) => {
+            let mut topic_list: Vec<(String, u8)> = Vec::new();
+            for (topic, qos) in topics.pairs::<String, u8>().flatten() {
+                topic_list.push((topic, qos));
+            }
+
+            let topic_refs: Vec<(&str, u8)> =
+                topic_list.iter().map(|(t, q)| (t.as_str(), *q)).collect();
+
+            match conn.subscribe(&topic_refs) {
+                Ok(results) => {
                     let result = lua.create_table()?;
-                    result.set("published", published)?;
-                    result.set("packet_id", packet_id)?;
-                    result.set("topic", topic)?;
+                    let subscribed = lua.create_table()?;
+
+                    for (i, (topic, qos)) in results.iter().enumerate() {
+                        let entry = lua.create_table()?;
+                        entry.set("topic", topic.as_str())?;
+                        entry.set("qos", *qos)?;
+                        subscribed.set(i + 1, entry)?;
+                    }
+
+                    result.set("subscribed", subscribed)?;
                     Ok(result)
                 }
                 Err(e) => {
@@ -414,61 +570,23 @@ pub fn register_mqtt_library(lua: &Lua) -> LuaResult<()> {
                     Ok(result)
                 }
             }
-        },
-    )?;
-    mqtt.set("publish", publish_fn)?;
-
-    let subscribe_fn = lua.create_function(|lua, (host, port, topics): (String, u16, Table)| {
-        let mut conn = match MqttConnection::new(&host, port, "eggsec", 60) {
-            Ok(c) => c,
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e)?;
-                return Ok(result);
-            }
-        };
-
-        if let Err(e) = conn.connect(None, None, true) {
-            let result = lua.create_table()?;
-            result.set("error", e)?;
-            return Ok(result);
-        }
-
-        let mut topic_list: Vec<(String, u8)> = Vec::new();
-        for (topic, qos) in topics.pairs::<String, u8>().flatten() {
-            topic_list.push((topic, qos));
-        }
-
-        let topic_refs: Vec<(&str, u8)> =
-            topic_list.iter().map(|(t, q)| (t.as_str(), *q)).collect();
-
-        match conn.subscribe(&topic_refs) {
-            Ok(results) => {
-                let result = lua.create_table()?;
-                let subscribed = lua.create_table()?;
-
-                for (i, (topic, qos)) in results.iter().enumerate() {
-                    let entry = lua.create_table()?;
-                    entry.set("topic", topic.as_str())?;
-                    entry.set("qos", *qos)?;
-                    subscribed.set(i + 1, entry)?;
-                }
-
-                result.set("subscribed", subscribed)?;
-                Ok(result)
-            }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e)?;
-                Ok(result)
-            }
         }
     })?;
     mqtt.set("subscribe", subscribe_fn)?;
 
-    let unsubscribe_fn =
-        lua.create_function(|lua, (host, port, topics): (String, u16, Table)| {
-            let mut conn = match MqttConnection::new(&host, port, "eggsec", 60) {
+    let unsubscribe_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port, topics): (String, u16, Table)| {
+            let mut conn = match MqttConnection::new(
+                &ctx,
+                &services,
+                &host,
+                port,
+                "eggsec",
+                60,
+                "mqtt.unsubscribe",
+            ) {
                 Ok(c) => c,
                 Err(e) => {
                     let result = lua.create_table()?;
@@ -500,60 +618,85 @@ pub fn register_mqtt_library(lua: &Lua) -> LuaResult<()> {
                     Ok(result)
                 }
             }
-        })?;
+        }
+    })?;
     mqtt.set("unsubscribe", unsubscribe_fn)?;
 
-    let disconnect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        let mut conn = match MqttConnection::new(&host, port, "eggsec", 60) {
-            Ok(c) => c,
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e)?;
-                return Ok(result);
-            }
-        };
+    let disconnect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, u16)| {
+            let mut conn = match MqttConnection::new(
+                &ctx,
+                &services,
+                &host,
+                port,
+                "eggsec",
+                60,
+                "mqtt.disconnect",
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("error", e)?;
+                    return Ok(result);
+                }
+            };
 
-        match conn.disconnect() {
-            Ok(_) => {
-                let result = lua.create_table()?;
-                result.set("disconnected", true)?;
-                Ok(result)
-            }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e)?;
-                Ok(result)
+            match conn.disconnect() {
+                Ok(_) => {
+                    let result = lua.create_table()?;
+                    result.set("disconnected", true)?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("error", e)?;
+                    Ok(result)
+                }
             }
         }
     })?;
     mqtt.set("disconnect", disconnect_fn)?;
 
-    let ping_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        let mut conn = match MqttConnection::new(&host, port, "eggsec", 60) {
-            Ok(c) => c,
-            Err(e) => {
+    let ping_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, u16)| {
+            let mut conn = match MqttConnection::new(
+                &ctx,
+                &services,
+                &host,
+                port,
+                "eggsec",
+                60,
+                "mqtt.ping",
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("error", e)?;
+                    return Ok(result);
+                }
+            };
+
+            if let Err(e) = conn.connect(None, None, true) {
                 let result = lua.create_table()?;
                 result.set("error", e)?;
                 return Ok(result);
             }
-        };
 
-        if let Err(e) = conn.connect(None, None, true) {
-            let result = lua.create_table()?;
-            result.set("error", e)?;
-            return Ok(result);
-        }
-
-        match conn.ping() {
-            Ok(pong) => {
-                let result = lua.create_table()?;
-                result.set("pong", pong)?;
-                Ok(result)
-            }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e)?;
-                Ok(result)
+            match conn.ping() {
+                Ok(pong) => {
+                    let result = lua.create_table()?;
+                    result.set("pong", pong)?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("error", e)?;
+                    Ok(result)
+                }
             }
         }
     })?;
@@ -562,9 +705,19 @@ pub fn register_mqtt_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("3.1.1"))?;
     mqtt.set("version", version_fn)?;
 
-    let async_connect_fn =
-        lua.create_function(|lua, (host, port, client_id): (String, u16, String)| {
-            let mut conn = match MqttConnection::new(&host, port, &client_id, 60) {
+    let async_connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port, client_id): (String, u16, String)| {
+            let mut conn = match MqttConnection::new(
+                &ctx,
+                &services,
+                &host,
+                port,
+                &client_id,
+                60,
+                "mqtt.connect_async",
+            ) {
                 Ok(c) => c,
                 Err(e) => {
                     let r = lua.create_table()?;
@@ -588,7 +741,8 @@ pub fn register_mqtt_library(lua: &Lua) -> LuaResult<()> {
                     Ok(r)
                 }
             }
-        })?;
+        }
+    })?;
     mqtt.set("connect_async", async_connect_fn)?;
 
     globals.set("mqtt", mqtt)?;

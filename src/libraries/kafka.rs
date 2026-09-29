@@ -3,37 +3,53 @@
 //! Apache Kafka protocol support for NSE scripts.
 //! Implements the Kafka Wire Protocol (0.9 - 2.x).
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{
+    broker_tcp_connect, broker_tcp_receive, broker_tcp_send, NseHostServices, NseTcpConnection,
+};
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
+#[allow(dead_code)]
 const API_VERSION: i16 = 1;
 const CLIENT_ID: &str = "eggsec-nse";
 
 struct KafkaConnection {
-    stream: TcpStream,
+    handle: Box<dyn NseTcpConnection>,
+    ctx: NseCapabilityContext,
+    operation: &'static str,
     host: String,
     port: u16,
     correlation_id: i32,
 }
 
 impl KafkaConnection {
-    fn new(host: &str, port: u16) -> Result<Self, String> {
-        let addr = format!("{}:{}", host, port);
-        let stream = TcpStream::connect_timeout(
-            &addr
-                .parse()
-                .map_err(|e: std::net::AddrParseError| e.to_string())?,
+    fn new(
+        ctx: &NseCapabilityContext,
+        services: &NseHostServices,
+        host: &str,
+        port: u16,
+        operation: &'static str,
+    ) -> Result<Self, String> {
+        // The broker resolves `host` (authority-preserving) instead of
+        // requiring a literal `SocketAddr` string.
+        let (mut handle, _endpoint) = broker_tcp_connect(
+            ctx,
+            services,
+            host,
+            port,
             Duration::from_secs(10),
-        )
-        .map_err(|e| e.to_string())?;
+            operation,
+        )?;
 
-        stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
-        stream.set_write_timeout(Some(Duration::from_secs(30))).ok();
+        // Preserve the original 30s read/write timeout behavior via the
+        // provider handle (failures here were ignored before).
+        let _ = handle.set_timeouts(Duration::from_secs(30));
 
         Ok(Self {
-            stream,
+            handle,
+            ctx: ctx.clone(),
+            operation,
             host: host.to_string(),
             port,
             correlation_id: 0,
@@ -43,6 +59,42 @@ impl KafkaConnection {
     fn next_correlation_id(&mut self) -> i32 {
         self.correlation_id += 1;
         self.correlation_id
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> Result<(), String> {
+        // `broker_tcp_send` may short-write; loop like `write_all`.
+        let mut written = 0;
+        while written < buf.len() {
+            let n = broker_tcp_send(
+                &self.ctx,
+                self.handle.as_mut(),
+                &buf[written..],
+                self.operation,
+            )?;
+            if n == 0 {
+                return Err("Kafka send wrote zero bytes".to_string());
+            }
+            written += n;
+        }
+        Ok(())
+    }
+
+    fn read_exact(&mut self, len: usize) -> Result<Vec<u8>, String> {
+        // `broker_tcp_receive` returns one chunk; loop like `read_exact`.
+        let mut out = Vec::with_capacity(len);
+        while out.len() < len {
+            let chunk = broker_tcp_receive(
+                &self.ctx,
+                self.handle.as_mut(),
+                len - out.len(),
+                self.operation,
+            )?;
+            if chunk.is_empty() {
+                return Err("Kafka connection closed mid-response".to_string());
+            }
+            out.extend_from_slice(&chunk);
+        }
+        Ok(out)
     }
 
     fn send_request(
@@ -69,13 +121,10 @@ impl KafkaConnection {
 
         buffer.extend_from_slice(request);
 
-        self.stream.write_all(&buffer).map_err(|e| e.to_string())?;
+        self.write_all(&buffer)?;
 
-        let mut len_buf = [0u8; 4];
-        self.stream
-            .read_exact(&mut len_buf)
-            .map_err(|e| e.to_string())?;
-        let response_len_raw = i32::from_be_bytes(len_buf);
+        let len_buf = self.read_exact(4)?;
+        let response_len_raw = i32::from_be_bytes([len_buf[0], len_buf[1], len_buf[2], len_buf[3]]);
         if response_len_raw < 0 || response_len_raw as usize > 64 * 1024 * 1024 {
             return Err(format!(
                 "Invalid Kafka response length: {}",
@@ -84,12 +133,7 @@ impl KafkaConnection {
         }
         let response_len = response_len_raw as usize;
 
-        let mut response_buf = vec![0u8; response_len];
-        self.stream
-            .read_exact(&mut response_buf)
-            .map_err(|e| e.to_string())?;
-
-        Ok(response_buf)
+        self.read_exact(response_len)
     }
 
     fn get_metadata(&mut self) -> Result<Vec<u8>, String> {
@@ -202,12 +246,27 @@ impl KafkaConnection {
     }
 }
 
-pub fn register_kafka_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed kafka registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_kafka_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let kafka = lua.create_table()?;
 
-    let connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        match KafkaConnection::new(&host, port) {
+    let connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, u16)| match KafkaConnection::new(
+            &ctx,
+            &services,
+            &host,
+            port,
+            "kafka.connect",
+        ) {
             Ok(conn) => {
                 let result = lua.create_table()?;
                 result.set("host", conn.host)?;
@@ -225,26 +284,31 @@ pub fn register_kafka_library(lua: &Lua) -> LuaResult<()> {
     })?;
     kafka.set("connect", connect_fn)?;
 
-    let list_topics_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        let mut conn = match KafkaConnection::new(&host, port) {
-            Ok(c) => c,
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e)?;
-                return Ok(result);
-            }
-        };
+    let list_topics_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, u16)| {
+            let mut conn =
+                match KafkaConnection::new(&ctx, &services, &host, port, "kafka.list_topics") {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let result = lua.create_table()?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
 
-        match conn.get_metadata() {
-            Ok(_) => {
-                let result = lua.create_table()?;
-                result.set("connected", true)?;
-                Ok(result)
-            }
-            Err(e) => {
-                let result = lua.create_table()?;
-                result.set("error", e)?;
-                Ok(result)
+            match conn.get_metadata() {
+                Ok(_) => {
+                    let result = lua.create_table()?;
+                    result.set("connected", true)?;
+                    Ok(result)
+                }
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("error", e)?;
+                    Ok(result)
+                }
             }
         }
     })?;
@@ -261,9 +325,12 @@ pub fn register_kafka_library(lua: &Lua) -> LuaResult<()> {
     )?;
     kafka.set("create_topic", create_topic_fn)?;
 
-    let produce_fn = lua.create_function(
-        |lua, (host, port, topic, key, value): (String, u16, String, String, String)| {
-            let mut conn = match KafkaConnection::new(&host, port) {
+    let produce_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port, topic, key, value): (String, u16, String, String, String)| {
+            let mut conn = match KafkaConnection::new(&ctx, &services, &host, port, "kafka.produce")
+            {
                 Ok(c) => c,
                 Err(e) => {
                     let result = lua.create_table()?;
@@ -286,13 +353,16 @@ pub fn register_kafka_library(lua: &Lua) -> LuaResult<()> {
                     Ok(result)
                 }
             }
-        },
-    )?;
+        }
+    })?;
     kafka.set("produce", produce_fn)?;
 
-    let consume_fn = lua.create_function(
-        |lua, (host, port, topic, partition, offset): (String, u16, String, i32, i64)| {
-            let mut conn = match KafkaConnection::new(&host, port) {
+    let consume_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port, topic, partition, offset): (String, u16, String, i32, i64)| {
+            let mut conn = match KafkaConnection::new(&ctx, &services, &host, port, "kafka.consume")
+            {
                 Ok(c) => c,
                 Err(e) => {
                     let result = lua.create_table()?;
@@ -313,20 +383,23 @@ pub fn register_kafka_library(lua: &Lua) -> LuaResult<()> {
                     Ok(result)
                 }
             }
-        },
-    )?;
+        }
+    })?;
     kafka.set("consume", consume_fn)?;
 
-    let get_offsets_fn = lua.create_function(
-        |lua, (host, port, topic, partition, time): (String, u16, String, i32, i64)| {
-            let mut conn = match KafkaConnection::new(&host, port) {
-                Ok(c) => c,
-                Err(e) => {
-                    let result = lua.create_table()?;
-                    result.set("error", e)?;
-                    return Ok(result);
-                }
-            };
+    let get_offsets_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port, topic, partition, time): (String, u16, String, i32, i64)| {
+            let mut conn =
+                match KafkaConnection::new(&ctx, &services, &host, port, "kafka.get_offsets") {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let result = lua.create_table()?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
 
             match conn.get_offsets(&topic, partition, time) {
                 Ok(_) => {
@@ -347,15 +420,23 @@ pub fn register_kafka_library(lua: &Lua) -> LuaResult<()> {
                     Ok(result)
                 }
             }
-        },
-    )?;
+        }
+    })?;
     kafka.set("get_offsets", get_offsets_fn)?;
 
     let version_fn = lua.create_function(|_lua, _: ()| Ok("2.8.0"))?;
     kafka.set("version", version_fn)?;
 
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        match KafkaConnection::new(&host, port) {
+    let async_connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, u16)| match KafkaConnection::new(
+            &ctx,
+            &services,
+            &host,
+            port,
+            "kafka.connect_async",
+        ) {
             Ok(conn) => {
                 let r = lua.create_table()?;
                 r.set("host", conn.host)?;

@@ -3,14 +3,12 @@
 //! UPnP (Universal Plug and Play) discovery library.
 //! Based on Nmap's upnp library concepts.
 
-use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream as AsyncTcpStream;
-
+use crate::brokered_stream::{broker_read_into, broker_write_all};
 use crate::capabilities::NseCapabilityContext;
+use crate::providers::broker_tcp_connect;
+use mlua::{Lua, Result as LuaResult};
+use std::time::Duration;
+
 use crate::wrappers;
 
 const SSDP_ADDR: &str = "239.255.255.250";
@@ -50,8 +48,37 @@ pub fn register_upnp_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -
 
 /// Provider-backed UPnP registration.
 ///
-/// Only the HTTP description fetch (`get_devices`) is brokered; SSDP
-/// multicast discovery stays on direct sockets (specialized, inventoried).
+/// Every TCP path (SSDP discovery, SOAP external-IP, async aliases) resolves
+/// and connects through the broker (authority-preserving); the
+/// `maybe_denied_upnp` gates stay in front of each entry. The description
+/// fetch (`get_devices`) was already on the HTTP provider broker (M005C).
+/// Read-until-EOF for the SSDP/SOAP exchanges (1MB cap).
+///
+/// Replaces the unbounded `read_to_string` loops: the originals only
+/// terminated on a read timeout (EOF yields `Ok(0)` forever), so this keeps
+/// the timeout-driven semantics while bounding memory.
+fn upnp_read_all(
+    ctx: &NseCapabilityContext,
+    handle: &mut dyn crate::providers::NseTcpConnection,
+    operation: &'static str,
+) -> String {
+    let mut out = String::new();
+    loop {
+        let mut chunk = vec![0u8; 8192];
+        match broker_read_into(ctx, handle, &mut chunk, operation) {
+            Ok(0) => break,
+            Ok(n) => {
+                out.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                if out.len() > 1024 * 1024 {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    out
+}
+
 pub fn register_upnp_library_with_services(
     lua: &Lua,
     capability_ctx: &NseCapabilityContext,
@@ -61,6 +88,7 @@ pub fn register_upnp_library_with_services(
     let upnp = lua.create_table()?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let discover_fn = lua.create_function(move |lua, search_target: Option<String>| {
         if let Some(denied) = maybe_denied_upnp(lua, &cap, SSDP_ADDR, "upnp.discover")? {
             return Ok(denied);
@@ -79,82 +107,95 @@ pub fn register_upnp_library_with_services(
             SSDP_ADDR, SSDP_PORT, target
         );
 
-        match TcpStream::connect_timeout(
-            &format!("{}:{}", SSDP_ADDR, SSDP_PORT)
-                .parse()
-                .unwrap_or_else(|_| std::net::SocketAddr::from(([239, 255, 255, 250], 1900))),
+        // The broker resolves the SSDP group address (authority-preserving);
+        // the old literal-parse-plus-multicast-fallback form is gone.
+        match broker_tcp_connect(
+            &cap,
+            &svc,
+            SSDP_ADDR,
+            SSDP_PORT,
             Duration::from_secs(3),
+            "upnp.discover",
         ) {
-            Ok(mut stream) => {
-                stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
+            Ok((mut handle, _endpoint)) => {
+                let _ = handle.set_timeouts(Duration::from_secs(10));
 
-                if let Err(e) = stream.write_all(request.as_bytes()) {
+                if let Err(e) =
+                    broker_write_all(&cap, handle.as_mut(), request.as_bytes(), "upnp.discover")
+                {
                     result.set("success", false)?;
                     result.set("error", format!("Send failed: {}", e))?;
                     return Ok(result);
                 }
 
-                let mut response = String::new();
+                let response = upnp_read_all(&cap, handle.as_mut(), "upnp.discover");
                 let devices = lua.create_table()?;
                 let mut i = 1;
 
                 let mut current_device = String::new();
-                while stream.read_to_string(&mut response).is_ok() && !response.is_empty() {
-                    if response.contains("HTTP/") || response.contains("NOTIFY") {
-                        if !current_device.is_empty() {
+                // Single pass over the full response: the old loop re-read
+                // until a read timeout (bounded reads now live in
+                // `upnp_read_all`). Each response block becomes one device
+                // entry, capped at 10 like the old `i > 10` break.
+                if !response.is_empty() {
+                    for line in response.lines() {
+                        let trimmed = line.trim();
+                        if (trimmed.starts_with("HTTP/") || trimmed.starts_with("NOTIFY"))
+                            && !current_device.is_empty()
+                        {
                             let entry = lua.create_table()?;
-
-                            for line in current_device.lines() {
-                                if line.to_lowercase().starts_with("location:") {
+                            for entry_line in current_device.lines() {
+                                if entry_line.to_lowercase().starts_with("location:") {
                                     entry.set(
                                         "location",
-                                        line.split(':').nth(1).unwrap_or("").trim(),
+                                        entry_line.split(':').nth(1).unwrap_or("").trim(),
                                     )?;
-                                } else if line.to_lowercase().starts_with("st:") {
-                                    entry.set("st", line.split(':').nth(1).unwrap_or("").trim())?;
-                                } else if line.to_lowercase().starts_with("server:") {
+                                } else if entry_line.to_lowercase().starts_with("st:") {
+                                    entry.set(
+                                        "st",
+                                        entry_line.split(':').nth(1).unwrap_or("").trim(),
+                                    )?;
+                                } else if entry_line.to_lowercase().starts_with("server:") {
                                     entry.set(
                                         "server",
-                                        line.split(':').nth(1).unwrap_or("").trim(),
+                                        entry_line.split(':').nth(1).unwrap_or("").trim(),
                                     )?;
-                                } else if line.to_lowercase().starts_with("usn:") {
-                                    entry
-                                        .set("usn", line.split(':').nth(1).unwrap_or("").trim())?;
+                                } else if entry_line.to_lowercase().starts_with("usn:") {
+                                    entry.set(
+                                        "usn",
+                                        entry_line.split(':').nth(1).unwrap_or("").trim(),
+                                    )?;
                                 }
                             }
-
                             if entry.len().unwrap_or(0) > 0 {
                                 devices.set(i, entry)?;
                                 i += 1;
+                                if i > 10 {
+                                    break;
+                                }
+                            }
+                            current_device.clear();
+                        }
+                        current_device.push_str(line);
+                        current_device.push('\n');
+                    }
+                    if i <= 10 && !current_device.is_empty() {
+                        let entry = lua.create_table()?;
+                        for entry_line in current_device.lines() {
+                            if entry_line.to_lowercase().starts_with("location:") {
+                                entry.set(
+                                    "location",
+                                    entry_line.split(':').nth(1).unwrap_or("").trim(),
+                                )?;
+                            } else if entry_line.to_lowercase().starts_with("st:") {
+                                entry
+                                    .set("st", entry_line.split(':').nth(1).unwrap_or("").trim())?;
                             }
                         }
-                        current_device.clear();
-                    }
-                    current_device.push_str(&response);
-                    current_device.push('\n');
-
-                    if current_device.contains("HTTP/1.1 200 OK")
-                        || current_device.contains("NOTIFY *")
-                    {
-                        break;
-                    }
-
-                    if i > 10 {
-                        break;
-                    }
-                }
-
-                if !current_device.is_empty() {
-                    let entry = lua.create_table()?;
-                    for line in current_device.lines() {
-                        if line.to_lowercase().starts_with("location:") {
-                            entry.set("location", line.split(':').nth(1).unwrap_or("").trim())?;
-                        } else if line.to_lowercase().starts_with("st:") {
-                            entry.set("st", line.split(':').nth(1).unwrap_or("").trim())?;
+                        if entry.len().unwrap_or(0) > 0 {
+                            devices.set(i, entry)?;
+                            i += 1;
                         }
-                    }
-                    if entry.len().unwrap_or(0) > 0 {
-                        devices.set(i, entry)?;
                     }
                 }
 
@@ -242,6 +283,7 @@ pub fn register_upnp_library_with_services(
     upnp.set("get_devices", get_devices_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let get_external_ip_fn = lua.create_function(move |lua, location: Option<String>| {
         let result = lua.create_table()?;
 
@@ -278,23 +320,30 @@ pub fn register_upnp_library_with_services(
             path, host, soap_request.len(), soap_request
         );
 
-        let addr = format!("{}:80", host.split(':').next().unwrap_or(host));
+        // Port 80 is hardcoded as before (any URL-embedded port was
+        // already ignored by the `split(':')` below); the broker resolves
+        // the host part authority-preservingly.
+        let soap_host = host.split(':').next().unwrap_or(host);
 
-        match TcpStream::connect_timeout(
-            &addr.parse().unwrap_or_else(|_| std::net::SocketAddr::from(([192,168,1,1], 80))),
+        match broker_tcp_connect(
+            &cap,
+            &svc,
+            soap_host,
+            80,
             Duration::from_secs(5),
+            "upnp.get_external_ip",
         ) {
-            Ok(mut stream) => {
-                stream.set_read_timeout(Some(Duration::from_secs(5))).ok();
+            Ok((mut handle, _endpoint)) => {
+                let _ = handle.set_timeouts(Duration::from_secs(5));
 
-                if let Err(e) = stream.write_all(request.as_bytes()) {
+                if let Err(e) = broker_write_all(&cap, handle.as_mut(), request.as_bytes(), "upnp.get_external_ip") {
                     result.set("success", false)?;
                     result.set("error", format!("Send failed: {}", e))?;
                     return Ok(result);
                 }
 
-                let mut response = String::new();
-                if stream.read_to_string(&mut response).is_ok() {
+                let response = upnp_read_all(&cap, handle.as_mut(), "upnp.get_external_ip");
+                if !response.is_empty() {
                     if response.contains("200 OK") {
                         for line in response.lines() {
                             if line.contains("<NewExternalIPAddress>") {
@@ -329,18 +378,20 @@ pub fn register_upnp_library_with_services(
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     upnp.set("version", version_fn)?;
 
-    let cap = capability_ctx.clone();
-    let async_discover_fn = lua.create_function(move |lua, search_target: Option<String>| {
-        if let Some(denied) = maybe_denied_upnp(lua, &cap, SSDP_ADDR, "upnp.discover_async")? {
-            return Err(mlua::Error::RuntimeError(
-                denied.get::<String>("error").unwrap_or_default(),
-            ));
-        }
-        let runtime = tokio::runtime::Handle::current();
-        let target = search_target.unwrap_or_else(|| "ssdp:all".to_string());
-
-        runtime.block_on(async {
+    // Async discovery: previously bridged `AsyncTcpStream` through the
+    // ambient runtime. Rewired to the brokered sync path (entry name kept);
+    // reads are bounded in `upnp_read_all` like the sync entry.
+    let async_discover_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, search_target: Option<String>| {
+            if let Some(denied) = maybe_denied_upnp(lua, &ctx, SSDP_ADDR, "upnp.discover_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
             let result = lua.create_table()?;
+            let target = search_target.unwrap_or_else(|| "ssdp:all".to_string());
 
             let request = format!(
                 "M-SEARCH * HTTP/1.1\r\n\
@@ -353,44 +404,42 @@ pub fn register_upnp_library_with_services(
                 SSDP_ADDR, SSDP_PORT, target
             );
 
-            match AsyncTcpStream::connect(format!("{}:{}", SSDP_ADDR, SSDP_PORT)).await {
-                Ok(mut stream) => {
-                    if let Err(e) = stream.write_all(request.as_bytes()).await {
+            match broker_tcp_connect(
+                &ctx,
+                &services,
+                SSDP_ADDR,
+                SSDP_PORT,
+                Duration::from_secs(3),
+                "upnp.discover_async",
+            ) {
+                Ok((mut handle, _endpoint)) => {
+                    if let Err(e) = broker_write_all(
+                        &ctx,
+                        handle.as_mut(),
+                        request.as_bytes(),
+                        "upnp.discover_async",
+                    ) {
                         result.set("success", false)?;
                         result.set("error", format!("Send failed: {}", e))?;
                         return Ok(result);
                     }
 
-                    let mut response = String::new();
+                    let response = upnp_read_all(&ctx, handle.as_mut(), "upnp.discover_async");
                     let devices = lua.create_table()?;
                     let i = 1;
 
-                    match stream.read_to_string(&mut response).await {
-                        Ok(_) => {
-                            if response.contains("HTTP/") || response.contains("NOTIFY") {
-                                let entry = lua.create_table()?;
-                                for line in response.lines() {
-                                    if line.to_lowercase().starts_with("location:") {
-                                        entry.set(
-                                            "location",
-                                            line.split(':').nth(1).unwrap_or("").trim(),
-                                        )?;
-                                    } else if line.to_lowercase().starts_with("st:") {
-                                        entry.set(
-                                            "st",
-                                            line.split(':').nth(1).unwrap_or("").trim(),
-                                        )?;
-                                    }
-                                }
-                                if entry.len().unwrap_or(0) > 0 {
-                                    devices.set(i, entry)?;
-                                }
+                    if response.contains("HTTP/") || response.contains("NOTIFY") {
+                        let entry = lua.create_table()?;
+                        for line in response.lines() {
+                            if line.to_lowercase().starts_with("location:") {
+                                entry
+                                    .set("location", line.split(':').nth(1).unwrap_or("").trim())?;
+                            } else if line.to_lowercase().starts_with("st:") {
+                                entry.set("st", line.split(':').nth(1).unwrap_or("").trim())?;
                             }
                         }
-                        Err(e) => {
-                            result.set("success", false)?;
-                            result.set("error", format!("Read failed: {}", e))?;
-                            return Ok(result);
+                        if entry.len().unwrap_or(0) > 0 {
+                            devices.set(i, entry)?;
                         }
                     }
 
@@ -405,32 +454,33 @@ pub fn register_upnp_library_with_services(
             }
 
             Ok(result)
-        })
+        }
     })?;
     upnp.set("discover_async", async_discover_fn)?;
 
-    let cap = capability_ctx.clone();
-    let async_get_external_ip_fn = lua.create_function(move |lua, location: Option<String>| {
-        let loc_preview = location.clone().unwrap_or_else(|| {
-            "http://192.168.1.1:1900/ipc".to_string()
-        });
-        let check_host = loc_preview
-            .split('/')
-            .nth(2)
-            .unwrap_or("192.168.1.1")
-            .split(':')
-            .next()
-            .unwrap_or("192.168.1.1");
-        if let Some(denied) =
-            maybe_denied_upnp(lua, &cap, check_host, "upnp.get_external_ip_async")?
-        {
-            return Err(mlua::Error::RuntimeError(
-                denied.get::<String>("error").unwrap_or_default(),
-            ));
-        }
-        let runtime = tokio::runtime::Handle::current();
-
-        runtime.block_on(async {
+    // Async external-IP: previously bridged `AsyncTcpStream` through the
+    // ambient runtime. Rewired to the brokered sync path (entry name kept).
+    let async_get_external_ip_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, location: Option<String>| {
+            let loc_preview = location.clone().unwrap_or_else(|| {
+                "http://192.168.1.1:1900/ipc".to_string()
+            });
+            let check_host = loc_preview
+                .split('/')
+                .nth(2)
+                .unwrap_or("192.168.1.1")
+                .split(':')
+                .next()
+                .unwrap_or("192.168.1.1");
+            if let Some(denied) =
+                maybe_denied_upnp(lua, &ctx, check_host, "upnp.get_external_ip_async")?
+            {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
             let result = lua.create_table()?;
 
             let loc = location.unwrap_or_else(|| "http://192.168.1.1:1900/ipc".to_string());
@@ -457,18 +507,28 @@ pub fn register_upnp_library_with_services(
                 path, host, soap_request.len(), soap_request
             );
 
-            let addr = format!("{}:80", host.split(':').next().unwrap_or(host));
+            // Port 80 hardcoded as before (URL-embedded ports were ignored).
+            let soap_host = host.split(':').next().unwrap_or(host);
 
-            match AsyncTcpStream::connect(&addr).await {
-                Ok(mut stream) => {
-                    if let Err(e) = stream.write_all(request.as_bytes()).await {
+            match broker_tcp_connect(
+                &ctx,
+                &services,
+                soap_host,
+                80,
+                Duration::from_secs(5),
+                "upnp.get_external_ip_async",
+            ) {
+                Ok((mut handle, _endpoint)) => {
+                    let _ = handle.set_timeouts(Duration::from_secs(5));
+
+                    if let Err(e) = broker_write_all(&ctx, handle.as_mut(), request.as_bytes(), "upnp.get_external_ip_async") {
                         result.set("success", false)?;
                         result.set("error", format!("Send failed: {}", e))?;
                         return Ok(result);
                     }
 
-                    let mut response = String::new();
-                    if stream.read_to_string(&mut response).await.is_ok() {
+                    let response = upnp_read_all(&ctx, handle.as_mut(), "upnp.get_external_ip_async");
+                    if !response.is_empty() {
                         if response.contains("200 OK") {
                             for line in response.lines() {
                                 if line.contains("<NewExternalIPAddress>") {
@@ -497,7 +557,7 @@ pub fn register_upnp_library_with_services(
             }
 
             Ok(result)
-        })
+        }
     })?;
     upnp.set("get_external_ip_async", async_get_external_ip_fn)?;
 

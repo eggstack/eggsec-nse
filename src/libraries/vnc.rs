@@ -4,13 +4,13 @@
 //! Based on Nmap's vnc library: https://nmap.org/nsedoc/lib/vnc.html
 //! Includes both blocking and async implementations with real RFB protocol support.
 
+use crate::brokered_stream::BrokeredTcpStream;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::NseHostServices;
 use mlua::{Lua, Result as LuaResult};
 use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
-use crate::capabilities::NseCapabilityContext;
-use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 fn maybe_denied_vnc(
@@ -49,19 +49,31 @@ const SECURITY_TYPE_NONE: u8 = 1;
 const SECURITY_TYPE_VNC_AUTH: u8 = 2;
 
 struct VncConnection {
-    stream: TcpStream,
+    stream: BrokeredTcpStream,
     width: u16,
     height: u16,
     server_name: String,
     desktop_name: String,
 }
 
-fn vnc_connect(host: &str, port: u16) -> std::io::Result<VncConnection> {
-    let addr = format!("{}:{}", host, port);
-    let socket_addr = addr
-        .parse::<std::net::SocketAddr>()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
-    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))?;
+/// Brokered VNC connect: authority-preserving resolve replaces the literal
+/// `addr` parse; stream timeouts bound the RFB version exchange (10s).
+fn vnc_connect(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    host: &str,
+    port: u16,
+    operation: &'static str,
+) -> std::io::Result<VncConnection> {
+    let (mut stream, _endpoint) = BrokeredTcpStream::connect(
+        ctx,
+        services,
+        host,
+        port,
+        Duration::from_secs(10),
+        operation,
+    )
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
 
@@ -88,12 +100,23 @@ fn vnc_connect(host: &str, port: u16) -> std::io::Result<VncConnection> {
     })
 }
 
-fn vnc_login(host: &str, port: u16, password: &str) -> std::io::Result<VncConnection> {
-    let addr = format!("{}:{}", host, port);
-    let socket_addr = addr
-        .parse::<std::net::SocketAddr>()
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
-    let mut stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))?;
+fn vnc_login(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    host: &str,
+    port: u16,
+    password: &str,
+    operation: &'static str,
+) -> std::io::Result<VncConnection> {
+    let (mut stream, _endpoint) = BrokeredTcpStream::connect(
+        ctx,
+        services,
+        host,
+        port,
+        Duration::from_secs(10),
+        operation,
+    )
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
 
@@ -172,16 +195,24 @@ fn vnc_login(host: &str, port: u16, password: &str) -> std::io::Result<VncConnec
     })
 }
 
-pub fn register_vnc_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+/// Provider-backed vnc registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_vnc_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let vnc = lua.create_table()?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.connect")? {
             return Ok(denied);
         }
-        match vnc_connect(&host, port) {
+        match vnc_connect(&cap, &svc, &host, port, "vnc.connect") {
             Ok(conn) => {
                 let result = lua.create_table()?;
                 result.set("host", host)?;
@@ -204,18 +235,22 @@ pub fn register_vnc_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     vnc.set("connect", connect_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let handshake_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.handshake")? {
             return Ok(denied);
         }
-        let addr = format!("{}:{}", host, port);
-        match TcpStream::connect_timeout(
-            &addr
-                .parse::<std::net::SocketAddr>()
-                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
+        // Brokered version handshake; authority-preserving resolve
+        // replaces the literal-parse form.
+        match BrokeredTcpStream::connect(
+            &cap,
+            &svc,
+            &host,
+            port,
             Duration::from_secs(10),
+            "vnc.handshake",
         ) {
-            Ok(mut stream) => {
+            Ok((mut stream, _endpoint)) => {
                 if stream.write_all(RFB_VERSION_3_8).is_err() {
                     tracing::warn!("VNC: Failed to send version");
                 }
@@ -244,12 +279,13 @@ pub fn register_vnc_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     vnc.set("handshake", handshake_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let login_fn =
         lua.create_function(move |lua, (host, port, password): (String, u16, String)| {
             if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.login")? {
                 return Ok(denied);
             }
-            match vnc_login(&host, port, &password) {
+            match vnc_login(&cap, &svc, &host, port, &password, "vnc.login") {
                 Ok(conn) => {
                     let result = lua.create_table()?;
                     result.set("success", true)?;
@@ -269,11 +305,12 @@ pub fn register_vnc_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     vnc.set("login", login_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let get_desktop_info_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.get_desktop_info")? {
             return Ok(denied);
         }
-        match vnc_connect(&host, port) {
+        match vnc_connect(&cap, &svc, &host, port, "vnc.get_desktop_info") {
             Ok(conn) => {
                 let result = lua.create_table()?;
                 result.set("width", conn.width)?;
@@ -305,20 +342,23 @@ pub fn register_vnc_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     vnc.set("read_screen", read_screen_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let read_screen_raw_fn =
         lua.create_function(move |lua, (host, port, password): (String, u16, String)| {
             if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.read_screen_raw")? {
                 return Ok(denied);
             }
-            let addr = format!("{}:{}", host, port);
-
-            match TcpStream::connect_timeout(
-                &addr
-                    .parse::<std::net::SocketAddr>()
-                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
+            // Brokered connect for the raw screen path; timeouts
+            // bound the version/auth exchange.
+            match BrokeredTcpStream::connect(
+                &cap,
+                &svc,
+                &host,
+                port,
                 Duration::from_secs(10),
+                "vnc.read_screen_raw",
             ) {
-                Ok(mut stream) => {
+                Ok((mut stream, _endpoint)) => {
                     stream
                         .set_read_timeout(Some(Duration::from_secs(10)))
                         .unwrap_or_else(|e| {
@@ -489,19 +529,23 @@ pub fn register_vnc_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     vnc.set("read_screen_raw", read_screen_raw_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let send_key_fn = lua.create_function(
         move |lua, (host, port, key, down_flag): (String, u16, i32, bool)| {
             if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.send_key")? {
                 return Ok(denied);
             }
-            let addr = format!("{}:{}", host, port);
-            match TcpStream::connect_timeout(
-                &addr
-                    .parse::<std::net::SocketAddr>()
-                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
+            // Brokered version ping; authority-preserving resolve
+            // replaces the literal-parse form.
+            match BrokeredTcpStream::connect(
+                &cap,
+                &svc,
+                &host,
+                port,
                 Duration::from_secs(10),
+                "vnc.send_key",
             ) {
-                Ok(mut stream) => {
+                Ok((mut stream, _endpoint)) => {
                     stream.write_all(RFB_VERSION_3_8).ok();
                     stream.flush().ok();
 
@@ -523,19 +567,23 @@ pub fn register_vnc_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     vnc.set("send_key", send_key_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let send_mouse_fn = lua.create_function(
         move |lua, (host, port, x, y, button_mask): (String, u16, u16, u16, u8)| {
             if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.send_mouse")? {
                 return Ok(denied);
             }
-            let addr = format!("{}:{}", host, port);
-            match TcpStream::connect_timeout(
-                &addr
-                    .parse::<std::net::SocketAddr>()
-                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
+            // Brokered version ping; authority-preserving resolve
+            // replaces the literal-parse form.
+            match BrokeredTcpStream::connect(
+                &cap,
+                &svc,
+                &host,
+                port,
                 Duration::from_secs(10),
+                "vnc.send_mouse",
             ) {
-                Ok(mut stream) => {
+                Ok((mut stream, _endpoint)) => {
                     stream.write_all(RFB_VERSION_3_8).ok();
                     stream.flush().ok();
 
@@ -558,19 +606,23 @@ pub fn register_vnc_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     vnc.set("send_mouse", send_mouse_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let send_cut_text_fn =
         lua.create_function(move |lua, (host, port, text): (String, u16, String)| {
             if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.send_cut_text")? {
                 return Ok(denied);
             }
-            let addr = format!("{}:{}", host, port);
-            match TcpStream::connect_timeout(
-                &addr
-                    .parse::<std::net::SocketAddr>()
-                    .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
+            // Brokered version ping; authority-preserving resolve
+            // replaces the literal-parse form.
+            match BrokeredTcpStream::connect(
+                &cap,
+                &svc,
+                &host,
+                port,
                 Duration::from_secs(10),
+                "vnc.send_cut_text",
             ) {
-                Ok(mut stream) => {
+                Ok((mut stream, _endpoint)) => {
                     stream.write_all(RFB_VERSION_3_8).ok();
                     stream.flush().ok();
 
@@ -606,46 +658,38 @@ pub fn register_vnc_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     vnc.set("version", version_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.connect_async")? {
             return Err(mlua::Error::RuntimeError(
                 denied.get::<String>("error").unwrap_or_default(),
             ));
         }
-        let host_clone = host.clone();
-
-        block_on_async(async move {
-            let result = tokio::task::spawn_blocking(move || vnc_connect(&host_clone, port)).await;
-
-            match result {
-                Ok(Ok(_conn)) => {
-                    let r = lua.create_table()?;
-                    r.set("host", host)?;
-                    r.set("port", port)?;
-                    r.set("status", "connected")?;
-                    r.set("protocol_version", "RFB 003.008")?;
-                    r.set("width", _conn.width)?;
-                    r.set("height", _conn.height)?;
-                    Ok(r)
-                }
-                Ok(Err(e)) => {
-                    let r = lua.create_table()?;
-                    r.set("status", "error")?;
-                    r.set("error", e.to_string())?;
-                    Ok(r)
-                }
-                Err(e) => {
-                    let r = lua.create_table()?;
-                    r.set("status", "error")?;
-                    r.set("error", e.to_string())?;
-                    Ok(r)
-                }
+        // Synchronous brokered connect; the async surface keeps its
+        // name for script compatibility.
+        match vnc_connect(&cap, &svc, &host, port, "vnc.connect_async") {
+            Ok(conn) => {
+                let r = lua.create_table()?;
+                r.set("host", host)?;
+                r.set("port", port)?;
+                r.set("status", "connected")?;
+                r.set("protocol_version", "RFB 003.008")?;
+                r.set("width", conn.width)?;
+                r.set("height", conn.height)?;
+                Ok(r)
             }
-        })
+            Err(e) => {
+                let r = lua.create_table()?;
+                r.set("status", "error")?;
+                r.set("error", e.to_string())?;
+                Ok(r)
+            }
+        }
     })?;
     vnc.set("connect_async", async_connect_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_login_fn =
         lua.create_function(move |lua, (host, port, password): (String, u16, String)| {
             if let Some(denied) = maybe_denied_vnc(lua, &cap, &host, "vnc.login_async")? {
@@ -653,35 +697,23 @@ pub fn register_vnc_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                     denied.get::<String>("error").unwrap_or_default(),
                 ));
             }
-            let host_clone = host.clone();
-
-            block_on_async(async move {
-                let result =
-                    tokio::task::spawn_blocking(move || vnc_login(&host_clone, port, &password))
-                        .await;
-
-                match result {
-                    Ok(Ok(_conn)) => {
-                        let r = lua.create_table()?;
-                        r.set("success", true)?;
-                        r.set("host", host)?;
-                        r.set("port", port)?;
-                        Ok(r)
-                    }
-                    Ok(Err(e)) => {
-                        let r = lua.create_table()?;
-                        r.set("success", false)?;
-                        r.set("error", e.to_string())?;
-                        Ok(r)
-                    }
-                    Err(e) => {
-                        let r = lua.create_table()?;
-                        r.set("success", false)?;
-                        r.set("error", e.to_string())?;
-                        Ok(r)
-                    }
+            // Synchronous brokered login; the async surface keeps its
+            // name for script compatibility.
+            match vnc_login(&cap, &svc, &host, port, &password, "vnc.login_async") {
+                Ok(_conn) => {
+                    let r = lua.create_table()?;
+                    r.set("success", true)?;
+                    r.set("host", host)?;
+                    r.set("port", port)?;
+                    Ok(r)
                 }
-            })
+                Err(e) => {
+                    let r = lua.create_table()?;
+                    r.set("success", false)?;
+                    r.set("error", e.to_string())?;
+                    Ok(r)
+                }
+            }
         })?;
     vnc.set("login_async", async_login_fn)?;
 

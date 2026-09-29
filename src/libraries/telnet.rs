@@ -4,35 +4,70 @@
 //! Includes both blocking and async implementations.
 
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::io::Read;
-use std::net::TcpStream;
+use crate::brokered_stream::BrokeredTcpStream;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::NseHostServices;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream as AsyncTcpStream;
-use crate::libraries::runtime_bridge::block_on_async;
 
-pub fn register_telnet_library(lua: &Lua) -> LuaResult<()> {
+use crate::wrappers;
+
+fn maybe_denied_telnet(
+    lua: &Lua,
+    ctx: &NseCapabilityContext,
+    host: &str,
+    operation: &'static str,
+) -> LuaResult<Option<mlua::Table>> {
+    let decision = wrappers::check_network_tcp(ctx, host, operation);
+    if !decision.is_allowed() {
+        let result = lua.create_table()?;
+        result.set("status", "error")?;
+        result.set(
+            "error",
+            decision
+                .deny_reason()
+                .unwrap_or("network access denied")
+                .to_string(),
+        )?;
+        result.set("reason", "denied")?;
+        return Ok(Some(result));
+    }
+    Ok(None)
+}
+
+/// Provider-backed telnet registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_telnet_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let telnet = lua.create_table()?;
 
-    let connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        let addr = format!("{}:{}", host, port);
-        let mut stream = match TcpStream::connect_timeout(
-            &addr
-                .parse::<std::net::SocketAddr>()
-                .map_err(|e: std::net::AddrParseError| mlua::Error::RuntimeError(e.to_string()))?,
+    let cap = capability_ctx.clone();
+    let svc = services.clone();
+    let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_telnet(lua, &cap, &host, "telnet.connect")? {
+            return Ok(denied);
+        }
+        // Brokered banner probe; authority-preserving resolve replaces
+        // the literal-parse form.
+        let mut stream = match BrokeredTcpStream::connect(
+            &cap,
+            &svc,
+            &host,
+            port,
             Duration::from_secs(10),
+            "telnet.connect",
         ) {
-            Ok(s) => s,
+            Ok((s, _endpoint)) => s,
             Err(_) => {
                 let result = lua.create_table()?;
                 result.set("error", "Connection failed")?;
                 return Ok(result);
             }
         };
-
-        stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
 
         let mut buffer = vec![0u8; 4096];
         let n = stream.read(&mut buffer).unwrap_or(0);
@@ -132,29 +167,40 @@ pub fn register_telnet_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     telnet.set("version", version_fn)?;
 
-    // Async connect
-    let async_connect_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        let addr = format!("{}:{}", host, port);
+    // Async connect: synchronous brokered probe; the async surface keeps
+    // its name for script compatibility.
+    let cap = capability_ctx.clone();
+    let svc = services.clone();
+    let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
+        if let Some(denied) = maybe_denied_telnet(lua, &cap, &host, "telnet.connect_async")? {
+            return Err(mlua::Error::RuntimeError(
+                denied.get::<String>("error").unwrap_or_default(),
+            ));
+        }
+        match BrokeredTcpStream::connect(
+            &cap,
+            &svc,
+            &host,
+            port,
+            Duration::from_secs(10),
+            "telnet.connect_async",
+        ) {
+            Ok((mut stream, _endpoint)) => {
+                let mut buffer = vec![0u8; 4096];
+                let n = stream.read(&mut buffer).unwrap_or(0);
 
-        block_on_async(async {
-            match AsyncTcpStream::connect(&addr).await {
-                Ok(mut stream) => {
-                    let mut buffer = vec![0u8; 4096];
-                    let n = stream.read(&mut buffer).await.unwrap_or(0);
-
-                    let r = lua.create_table()?;
-                    r.set("host", host)?;
-                    r.set("port", port)?;
-                    r.set("status", if n > 0 { "connected" } else { "timeout" })?;
-                    Ok(r)
-                }
-                Err(e) => {
-                    let r = lua.create_table()?;
-                    r.set("error", e.to_string())?;
-                    Ok(r)
-                }
+                let r = lua.create_table()?;
+                r.set("host", host)?;
+                r.set("port", port)?;
+                r.set("status", if n > 0 { "connected" } else { "timeout" })?;
+                Ok(r)
             }
-        })
+            Err(e) => {
+                let r = lua.create_table()?;
+                r.set("error", e)?;
+                Ok(r)
+            }
+        }
     })?;
     telnet.set("connect_async", async_connect_fn)?;
 

@@ -3,14 +3,22 @@
 //! Utility functions for libssh2.
 //! Based on Nmap's libssh2-utility library.
 
+use crate::brokered_stream::broker_read_into;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult, Table};
-use std::io::Read;
-use std::net::TcpStream;
 use std::time::Duration;
 
 const SSH_PORT: u16 = 22;
 
-pub fn register_libssh2_utility_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed libssh2_utility registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_libssh2_utility_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let libssh2_utility = lua.create_table()?;
 
@@ -26,30 +34,32 @@ pub fn register_libssh2_utility_library(lua: &Lua) -> LuaResult<()> {
     })?;
     connection.set("new", new_fn)?;
 
-    let connect_fn = lua.create_function(
-        |lua, (host, port, username): (String, Option<u16>, String)| {
+    let connect_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port, username): (String, Option<u16>, String)| {
             let result = lua.create_table()?;
-            let addr = format!("{}:{}", host, port.unwrap_or(SSH_PORT));
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
+            // The broker resolves `host` (authority-preserving);
+            // unresolvable or refused hosts keep the error-table shape.
+            let (mut handle, _endpoint) = match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port.unwrap_or(SSH_PORT),
+                Duration::from_secs(10),
+                "libssh2_utility.new",
+            ) {
+                Ok(pair) => pair,
                 Err(e) => {
                     result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
+                    result.set("error", e)?;
                     return Ok(result);
                 }
             };
 
             let mut banner = [0u8; 1024];
-            let n = stream.read(&mut banner).unwrap_or(0);
+            let n = broker_read_into(&ctx, handle.as_mut(), &mut banner, "libssh2_utility.new")
+                .unwrap_or(0);
 
             result.set("status", "ok")?;
             result.set("host", host)?;
@@ -58,8 +68,8 @@ pub fn register_libssh2_utility_library(lua: &Lua) -> LuaResult<()> {
             result.set("connected", n > 0)?;
 
             Ok(result)
-        },
-    )?;
+        }
+    })?;
     connection.set("connect", connect_fn)?;
 
     let close_fn = lua.create_function(|_lua, conn: Table| {
@@ -69,81 +79,84 @@ pub fn register_libssh2_utility_library(lua: &Lua) -> LuaResult<()> {
     })?;
     connection.set("close", close_fn)?;
 
-    let exec_fn =
-        lua.create_function(
-            |lua,
-             (host, port, _username, _password, cmd): (
-                String,
-                Option<u16>,
-                String,
-                String,
-                String,
-            )| {
-                let result = lua.create_table()?;
-                let addr = format!("{}:{}", host, port.unwrap_or(SSH_PORT));
-                let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                    Ok(a) => a,
-                    Err(e) => {
-                        result.set("status", "error")?;
-                        result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                        return Ok(result);
-                    }
-                };
-                let mut stream =
-                    match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            result.set("status", "error")?;
-                            result.set("error", e.to_string())?;
-                            return Ok(result);
-                        }
-                    };
-
-                let mut banner = [0u8; 1024];
-                let _n = stream.read(&mut banner).unwrap_or(0);
-
-                result.set("status", "ok")?;
-                result.set("command", cmd.clone())?;
-                result.set("output", format!("Simulated output of: {}", cmd))?;
-                result.set("exit_code", 0)?;
-
-                Ok(result)
-            },
-        )?;
-    connection.set("exec", exec_fn)?;
-
-    let auth_fn = lua.create_function(
-        |lua, (host, port, username, _password): (String, Option<u16>, String, String)| {
+    let exec_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua,
+              (host, port, _username, _password, cmd): (
+            String,
+            Option<u16>,
+            String,
+            String,
+            String,
+        )| {
             let result = lua.create_table()?;
-            let addr = format!("{}:{}", host, port.unwrap_or(SSH_PORT));
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
+            // The broker resolves `host` (authority-preserving);
+            // unresolvable or refused hosts keep the error-table shape.
+            let (mut handle, _endpoint) = match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port.unwrap_or(SSH_PORT),
+                Duration::from_secs(10),
+                "libssh2_utility.close",
+            ) {
+                Ok(pair) => pair,
                 Err(e) => {
                     result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
+                    result.set("error", e)?;
                     return Ok(result);
                 }
             };
 
             let mut banner = [0u8; 1024];
-            let _n = stream.read(&mut banner).unwrap_or(0);
+            let _n = broker_read_into(&ctx, handle.as_mut(), &mut banner, "libssh2_utility.close")
+                .unwrap_or(0);
+
+            result.set("status", "ok")?;
+            result.set("command", cmd.clone())?;
+            result.set("output", format!("Simulated output of: {}", cmd))?;
+            result.set("exit_code", 0)?;
+
+            Ok(result)
+        }
+    })?;
+    connection.set("exec", exec_fn)?;
+
+    let auth_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port, username, _password): (String, Option<u16>, String, String)| {
+            let result = lua.create_table()?;
+            // The broker resolves `host` (authority-preserving);
+            // unresolvable or refused hosts keep the error-table shape.
+            let (mut handle, _endpoint) = match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port.unwrap_or(SSH_PORT),
+                Duration::from_secs(10),
+                "libssh2_utility.exec",
+            ) {
+                Ok(pair) => pair,
+                Err(e) => {
+                    result.set("status", "error")?;
+                    result.set("error", e)?;
+                    return Ok(result);
+                }
+            };
+
+            let mut banner = [0u8; 1024];
+            let _n = broker_read_into(&ctx, handle.as_mut(), &mut banner, "libssh2_utility.exec")
+                .unwrap_or(0);
 
             result.set("status", "ok")?;
             result.set("authenticated", true)?;
             result.set("username", username)?;
 
             Ok(result)
-        },
-    )?;
+        }
+    })?;
     connection.set("auth_password", auth_fn)?;
 
     let auth_key_fn = lua.create_function(

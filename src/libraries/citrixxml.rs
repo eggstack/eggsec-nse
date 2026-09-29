@@ -3,12 +3,21 @@
 //! Citrix XML Service library for XenApp/XenDesktop.
 //! Based on Nmap's citrixxml library concepts.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use tokio::net::TcpStream as AsyncTcpStream;
+use std::time::Duration;
 
 const CITRIX_PORT: u16 = 8080;
 
-pub fn register_citrixxml_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed citrixxml registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_citrixxml_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let citrixxml = lua.create_table()?;
 
@@ -82,56 +91,52 @@ pub fn register_citrixxml_library(lua: &Lua) -> LuaResult<()> {
     let version_fn = lua.create_function(|_lua, _: ()| Ok("1.0.0"))?;
     citrixxml.set("version", version_fn)?;
 
-    let async_enumerate_farms_fn = lua.create_function(|lua, (host, port): (String, u16)| {
-        let runtime = tokio::runtime::Handle::current();
-        let host_clone = host.clone();
-        let port = if port == 0 { CITRIX_PORT } else { port };
-
-        runtime.block_on(async {
+    // Async farm enumeration: previously a reachability probe through a
+    // throwaway Tokio runtime with stub data in every branch. Rewired to the
+    // brokered sync connect probe — Lua-visible shapes preserved (entry name,
+    // stub farms, timeout-vs-error note distinction via the broker error
+    // text, which retains the provider timeout message).
+    let async_enumerate_farms_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, u16)| {
+            let port = if port == 0 { CITRIX_PORT } else { port };
             let result = lua.create_table()?;
 
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                AsyncTcpStream::connect(format!("{}:{}", host_clone, port)),
-            )
-            .await
-            {
-                Ok(Ok(_stream)) => {
-                    let farms = lua.create_table()?;
-                    let farm = lua.create_table()?;
-                    farm.set("name", "Farm1")?;
-                    farm.set("servers", 5)?;
-                    farms.set(1, farm)?;
+            let stub_farms = || -> LuaResult<mlua::Table> {
+                let farms = lua.create_table()?;
+                let farm = lua.create_table()?;
+                farm.set("name", "Farm1")?;
+                farm.set("servers", 5)?;
+                farms.set(1, farm)?;
+                Ok(farms)
+            };
 
+            match broker_tcp_connect(
+                &ctx,
+                &services,
+                &host,
+                port,
+                Duration::from_secs(5),
+                "citrixxml.enumerate_farms_async",
+            ) {
+                Ok(_) => {
                     result.set("success", true)?;
-                    result.set("farms", farms)?;
+                    result.set("farms", stub_farms()?)?;
                 }
-                Ok(Err(e)) => {
-                    let farms = lua.create_table()?;
-                    let farm = lua.create_table()?;
-                    farm.set("name", "Farm1")?;
-                    farm.set("servers", 5)?;
-                    farms.set(1, farm)?;
-
+                Err(e) => {
                     result.set("success", true)?;
-                    result.set("farms", farms)?;
-                    result.set("note", format!("Using stub data: {}", e))?;
-                }
-                Err(_) => {
-                    let farms = lua.create_table()?;
-                    let farm = lua.create_table()?;
-                    farm.set("name", "Farm1")?;
-                    farm.set("servers", 5)?;
-                    farms.set(1, farm)?;
-
-                    result.set("success", true)?;
-                    result.set("farms", farms)?;
-                    result.set("note", "Using stub data: Connection timed out".to_string())?;
+                    result.set("farms", stub_farms()?)?;
+                    if e.contains("timed out") || e.contains("timeout") {
+                        result.set("note", "Using stub data: Connection timed out".to_string())?;
+                    } else {
+                        result.set("note", format!("Using stub data: {}", e))?;
+                    }
                 }
             }
 
             Ok(result)
-        })
+        }
     })?;
     citrixxml.set("enumerate_farms_async", async_enumerate_farms_fn)?;
 

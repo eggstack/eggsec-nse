@@ -989,10 +989,18 @@ impl ExecutorCore {
             &self.host_services,
         )?;
         self.gate_then_register("sslcert", |ctx| {
-            crate::libraries::sslcert::register_sslcert_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::sslcert::register_sslcert_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         self.gate_then_register("tls", |ctx| {
-            crate::libraries::tls::register_tls_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::tls::register_tls_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         crate::libraries::shortport::register_shortport_library(&self.lua)?;
         crate::libraries::socket::register_socket_library_with_services(
@@ -1003,56 +1011,128 @@ impl ExecutorCore {
         )?;
         crate::libraries::ssh2::register_ssh2_library(&self.lua)?;
         self.gate_then_register("ftp", |ctx| {
-            crate::libraries::ftp::register_ftp_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::ftp::register_ftp_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         self.gate_then_register("smtp", |ctx| {
-            crate::libraries::smtp::register_smtp_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::smtp::register_smtp_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         self.gate_then_register("mysql", |ctx| {
-            crate::libraries::mysql::register_mysql_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::mysql::register_mysql_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         self.gate_then_register("postgres", |ctx| {
-            crate::libraries::postgres::register_postgres_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::postgres::register_postgres_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         self.gate_then_register("mssql", |ctx| {
-            crate::libraries::mssql::register_mssql_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::mssql::register_mssql_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         self.gate_then_register("redis", |ctx| {
-            crate::libraries::redis::register_redis_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::redis::register_redis_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         self.gate_then_register("mongodb", |ctx| {
-            crate::libraries::mongodb::register_mongodb_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::mongodb::register_mongodb_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         self.gate_then_register("ldap", |ctx| {
-            crate::libraries::ldap::register_ldap_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::ldap::register_ldap_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         self.gate_then_register("snmp", |ctx| {
             crate::libraries::snmp::register_snmp_library(&ctx.lua, &ctx.capability_context)
         })?;
         self.gate_then_register("smb", |ctx| {
-            crate::libraries::smb::register_smb_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::smb::register_smb_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         self.gate_then_register("smb2", |ctx| {
-            crate::libraries::smb2::register_smb2_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::smb2::register_smb2_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         crate::libraries::smbauth::register_smbauth_library(&self.lua)?;
         self.gate_then_register("rdp", |ctx| {
-            crate::libraries::rdp::register_rdp_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::rdp::register_rdp_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         self.gate_then_register("vnc", |ctx| {
-            crate::libraries::vnc::register_vnc_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::vnc::register_vnc_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         self.gate_then_register("ntp", |ctx| {
             crate::libraries::ntp::register_ntp_library(&ctx.lua, &ctx.capability_context)
         })?;
-        crate::libraries::memcached::register_memcached_library(&self.lua)?;
+        crate::libraries::memcached::register_memcached_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         self.gate_then_register("imap", |ctx| {
-            crate::libraries::imap::register_imap_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::imap::register_imap_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
-        crate::libraries::pop3::register_pop3_library(&self.lua)?;
-        crate::libraries::netbios::register_netbios_library(&self.lua)?;
-        crate::libraries::oracle::register_oracle_library(&self.lua)?;
-        crate::libraries::winrm::register_winrm_library(&self.lua)?;
+        crate::libraries::pop3::register_pop3_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::netbios::register_netbios_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::oracle::register_oracle_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::winrm::register_winrm_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::radius::register_radius_library(&self.lua)?;
         self.gate_then_register("dhcp", |ctx| {
             crate::libraries::dhcp::register_dhcp_library(&ctx.lua, &ctx.capability_context)
@@ -1060,7 +1140,11 @@ impl ExecutorCore {
         self.gate_then_register("dhcp6", |ctx| {
             crate::libraries::dhcp6::register_dhcp6_library(&ctx.lua, &ctx.capability_context)
         })?;
-        crate::libraries::sip::register_sip_library(&self.lua)?;
+        crate::libraries::sip::register_sip_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::tftp::register_tftp_library(&self.lua)?;
         self.gate_then_register("upnp", |ctx| {
             crate::libraries::upnp::register_upnp_library_with_services(
@@ -1069,14 +1153,46 @@ impl ExecutorCore {
                 &ctx.host_services,
             )
         })?;
-        crate::libraries::tns::register_tns_library(&self.lua)?;
-        crate::libraries::afp::register_afp_library(&self.lua)?;
-        crate::libraries::amqp::register_amqp_library(&self.lua)?;
-        crate::libraries::ajp::register_ajp_library(&self.lua)?;
-        crate::libraries::ncp::register_ncp_library(&self.lua)?;
-        crate::libraries::ndmp::register_ndmp_library(&self.lua)?;
-        crate::libraries::nrpc::register_nrpc_library(&self.lua)?;
-        crate::libraries::citrixxml::register_citrixxml_library(&self.lua)?;
+        crate::libraries::tns::register_tns_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::afp::register_afp_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::amqp::register_amqp_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::ajp::register_ajp_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::ncp::register_ncp_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::ndmp::register_ndmp_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::nrpc::register_nrpc_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::citrixxml::register_citrixxml_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::ospf::register_ospf_library(&self.lua)?;
         crate::libraries::asn1::register_asn1_library(&self.lua)?;
         crate::libraries::sasl::register_sasl_library(&self.lua)?;
@@ -1101,7 +1217,11 @@ impl ExecutorCore {
         crate::libraries::url::register_url_library(&self.lua)?;
         crate::libraries::creds::register_creds_library(&self.lua, &self.capability_context)?;
         self.gate_then_register("openssl", |ctx| {
-            crate::libraries::openssl::register_openssl_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::openssl::register_openssl_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         crate::libraries::pcre::register_pcre_library(&self.lua)?;
         crate::libraries::io::register_io_library_with_services(
@@ -1149,7 +1269,11 @@ impl ExecutorCore {
             &self.capability_context,
             &self.host_services,
         )?;
-        crate::libraries::http2::register_http2_library(&self.lua)?;
+        crate::libraries::http2::register_http2_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::httppipeline::register_httppipeline_library_with_services(
             &self.lua,
             &self.capability_context,
@@ -1157,54 +1281,162 @@ impl ExecutorCore {
         )?;
         crate::libraries::geoip::register_geoip_library(&self.lua)?;
         crate::libraries::rpc::register_rpc_library(&self.lua)?;
-        crate::libraries::ssh1::register_ssh1_library(&self.lua)?;
-        crate::libraries::sslv2::register_sslv2_library(&self.lua)?;
-        crate::libraries::msrpc::register_msrpc_library(&self.lua)?;
+        crate::libraries::ssh1::register_ssh1_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::sslv2::register_sslv2_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::msrpc::register_msrpc_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::ike::register_ike_library(&self.lua)?;
-        crate::libraries::ipp::register_ipp_library(&self.lua)?;
+        crate::libraries::ipp::register_ipp_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::coap::register_coap_library(&self.lua)?;
         crate::libraries::idna::register_idna_library(&self.lua)?;
-        crate::libraries::pgsql::register_pgsql_library(&self.lua)?;
+        crate::libraries::pgsql::register_pgsql_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::ipops::register_ipops_library(&self.lua)?;
         crate::libraries::iax2::register_iax2_library(&self.lua)?;
-        crate::libraries::drda::register_drda_library(&self.lua)?;
+        crate::libraries::drda::register_drda_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::eigrp::register_eigrp_library(&self.lua)?;
         crate::libraries::giop::register_giop_library(&self.lua)?;
-        crate::libraries::iscsi::register_iscsi_library(&self.lua)?;
-        crate::libraries::jdwp::register_jdwp_library(&self.lua)?;
-        crate::libraries::rsync::register_rsync_library(&self.lua)?;
-        crate::libraries::socks::register_socks_library(&self.lua)?;
-        crate::libraries::rtsp::register_rtsp_library(&self.lua)?;
-        crate::libraries::tn3270::register_tn3270_library(&self.lua)?;
-        crate::libraries::xmpp::register_xmpp_library(&self.lua)?;
-        crate::libraries::isns::register_isns_library(&self.lua)?;
-        crate::libraries::membase::register_membase_library(&self.lua)?;
-        crate::libraries::bitcoin::register_bitcoin_library(&self.lua)?;
-        crate::libraries::bittorrent::register_bittorrent_library(&self.lua)?;
-        crate::libraries::cassandra::register_cassandra_library(&self.lua)?;
-        crate::libraries::dicom::register_dicom_library(&self.lua)?;
+        crate::libraries::iscsi::register_iscsi_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::jdwp::register_jdwp_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::rsync::register_rsync_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::socks::register_socks_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::rtsp::register_rtsp_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::tn3270::register_tn3270_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::xmpp::register_xmpp_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::isns::register_isns_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::membase::register_membase_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::bitcoin::register_bitcoin_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::bittorrent::register_bittorrent_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::cassandra::register_cassandra_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::dicom::register_dicom_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::knx::register_knx_library(&self.lua)?;
         crate::libraries::multicast::register_multicast_library(&self.lua)?;
-        crate::libraries::nbd::register_nbd_library(&self.lua)?;
+        crate::libraries::nbd::register_nbd_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::natpmp::register_natpmp_library(&self.lua)?;
-        crate::libraries::proxy::register_proxy_library(&self.lua)?;
+        crate::libraries::proxy::register_proxy_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::srvloc::register_srvloc_library(&self.lua)?;
         crate::libraries::wsdd::register_wsdd_library(&self.lua)?;
         self.gate_then_register("xdmcp", |ctx| {
             crate::libraries::xdmcp::register_xdmcp_library(&ctx.lua, &ctx.capability_context)
         })?;
         crate::libraries::bjnp::register_bjnp_library(&self.lua)?;
-        crate::libraries::cvs::register_cvs_library(&self.lua)?;
+        crate::libraries::cvs::register_cvs_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::dnssd::register_dnssd_library(&self.lua)?;
         crate::libraries::eap::register_eap_library(&self.lua)?;
         crate::libraries::pppoe::register_pppoe_library(&self.lua)?;
-        crate::libraries::rpcap::register_rpcap_library(&self.lua)?;
-        crate::libraries::rmi::register_rmi_library(&self.lua)?;
+        crate::libraries::rpcap::register_rpcap_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::rmi::register_rmi_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::ipmi::register_ipmi_library(&self.lua)?;
-        crate::libraries::irc::register_irc_library(&self.lua)?;
-        crate::libraries::versant::register_versant_library(&self.lua)?;
+        crate::libraries::irc::register_irc_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::versant::register_versant_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         self.gate_then_register("omp2", |ctx| {
-            crate::libraries::omp2::register_omp2_library(&ctx.lua, &ctx.capability_context)
+            crate::libraries::omp2::register_omp2_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
         })?;
         crate::libraries::gps::register_gps_library(&self.lua)?;
         crate::libraries::mobileme::register_mobileme_library(&self.lua)?;
@@ -1212,10 +1444,26 @@ impl ExecutorCore {
         crate::libraries::unicode::register_unicode_library(&self.lua)?;
         crate::libraries::bits::register_bits_library(&self.lua)?;
         crate::libraries::formulas::register_formulas_library(&self.lua)?;
-        crate::libraries::anyconnect::register_anyconnect_library(&self.lua)?;
-        crate::libraries::iec61850mms::register_iec61850mms_library(&self.lua)?;
-        crate::libraries::informix::register_informix_library(&self.lua)?;
-        crate::libraries::libssh2_utility::register_libssh2_utility_library(&self.lua)?;
+        crate::libraries::anyconnect::register_anyconnect_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::iec61850mms::register_iec61850mms_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::informix::register_informix_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
+        crate::libraries::libssh2_utility::register_libssh2_utility_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::matchs::register_matchs_library(&self.lua)?;
         crate::libraries::lpeg_utility::register_lpeg_utility_library(&self.lua)?;
         crate::libraries::lpeg::register_lpeg_library(&self.lua)?;
@@ -1228,9 +1476,17 @@ impl ExecutorCore {
         self.gate_then_register("libssh2", |ctx| {
             crate::libraries::libssh2::register_libssh2_library(&ctx.lua, &ctx.capability_context)
         })?;
-        crate::libraries::msrpcperformance::register_msrpcperformance_library(&self.lua)?;
+        crate::libraries::msrpcperformance::register_msrpcperformance_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::msrpctypes::register_msrpctypes_library(&self.lua)?;
-        crate::libraries::oops::register_oops_library(&self.lua)?;
+        crate::libraries::oops::register_oops_library_with_services(
+            &self.lua,
+            &self.capability_context,
+            &self.host_services,
+        )?;
         crate::libraries::outlib::register_outlib_library(&self.lua)?;
         crate::libraries::punycode::register_punycode_library(&self.lua)?;
         crate::libraries::tableaux::register_tableaux_library(&self.lua)?;

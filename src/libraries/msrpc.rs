@@ -3,72 +3,83 @@
 //! Microsoft RPC (MSRPC) protocol support for NSE scripts.
 //! Based on Nmap's msrpc library.
 
+use crate::brokered_stream::{broker_read_into, broker_write_all};
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult, Table};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
-pub fn register_msrpc_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed msrpc registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_msrpc_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let msrpc = lua.create_table()?;
 
     msrpc.set(
         "bind",
-        lua.create_function(|lua, (host, port, uuid): (String, u16, String)| {
-            let result = lua.create_table()?;
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, uuid): (String, u16, String)| {
+                let result = lua.create_table()?;
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
+                // The broker resolves `host` (authority-preserving);
+                // unresolvable or refused hosts keep the error-table shape.
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "msrpc.bind",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
+
+                // MSRPC bind packet
+                let version: u8 = 5;
+                let packet_type: u8 = 0x0B; // bind
+                let packet_flags: u8 = 0x03;
+                let data_representation: u32 = 0x10F0000;
+
+                let mut bind_packet = vec![version, packet_type, packet_flags];
+                bind_packet.extend_from_slice(&data_representation.to_le_bytes());
+
+                // UUID (16 bytes)
+                let uuid_bytes = uuid.as_bytes();
+                bind_packet.extend_from_slice(&uuid_bytes[..16.min(uuid_bytes.len())]);
+                while bind_packet.len() < 26 {
+                    bind_packet.push(0);
                 }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
 
-            // MSRPC bind packet
-            let version: u8 = 5;
-            let packet_type: u8 = 0x0B; // bind
-            let packet_flags: u8 = 0x03;
-            let data_representation: u32 = 0x10F0000;
+                // Interface version
+                bind_packet.extend_from_slice(&1u16.to_le_bytes());
+                bind_packet.extend_from_slice(&1u16.to_le_bytes());
 
-            let mut bind_packet = vec![version, packet_type, packet_flags];
-            bind_packet.extend_from_slice(&data_representation.to_le_bytes());
+                broker_write_all(&ctx, handle.as_mut(), &bind_packet, "msrpc.bind")
+                    .unwrap_or_else(|e| tracing::warn!("Failed to send MSRPC bind packet: {}", e));
 
-            // UUID (16 bytes)
-            let uuid_bytes = uuid.as_bytes();
-            bind_packet.extend_from_slice(&uuid_bytes[..16.min(uuid_bytes.len())]);
-            while bind_packet.len() < 26 {
-                bind_packet.push(0);
+                let mut response = [0u8; 1024];
+                let n = broker_read_into(&ctx, handle.as_mut(), &mut response, "msrpc.bind")
+                    .unwrap_or(0);
+
+                result.set("status", "ok")?;
+                result.set("bound", n > 0)?;
+                result.set("host", host)?;
+                result.set("port", port)?;
+
+                Ok(result)
             }
-
-            // Interface version
-            bind_packet.extend_from_slice(&1u16.to_le_bytes());
-            bind_packet.extend_from_slice(&1u16.to_le_bytes());
-
-            stream
-                .write_all(&bind_packet)
-                .unwrap_or_else(|e| tracing::warn!("Failed to send MSRPC bind packet: {}", e));
-
-            let mut response = [0u8; 1024];
-            let n = stream.read(&mut response).unwrap_or(0);
-
-            result.set("status", "ok")?;
-            result.set("bound", n > 0)?;
-            result.set("host", host)?;
-            result.set("port", port)?;
-
-            Ok(result)
         })?,
     )?;
 

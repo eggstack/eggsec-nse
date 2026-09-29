@@ -4,16 +4,15 @@
 //! Provides real SMB protocol implementation including authentication,
 //! session establishment, and file operations.
 
+use crate::brokered_stream::BrokeredTcpStream;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, NseHostServices};
 use mlua::{Lua, Result as LuaResult, Table};
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::io::Write;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use std::time::Duration;
-use tokio::net::TcpStream as AsyncTcpStream;
 
-use crate::capabilities::NseCapabilityContext;
-use crate::libraries::runtime_bridge::block_on_async;
 use crate::wrappers;
 
 static SMB_SESSIONS: LazyLock<Mutex<Vec<SmbSession>>> = LazyLock::new(|| Mutex::new(Vec::new()));
@@ -62,17 +61,24 @@ const SMB_COMMAND_READ: u8 = 0x2e;
 const SMB_COMMAND_WRITE: u8 = 0x2f;
 const SMB_COMMAND_TRANS2: u8 = 0x32;
 
-fn smb_negotiate(host: &str, port: u16) -> std::io::Result<(TcpStream, Vec<u8>)> {
-    let addr = format!("{}:{}", host, port);
-    let mut stream = TcpStream::connect_timeout(
-        &addr.parse::<std::net::SocketAddr>().map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Invalid address: {}", e),
-            )
-        })?,
+/// Brokered SMB negotiate: authority-preserving resolve replaces the
+/// literal-parse preamble; timeouts use the stream's own setters (10s).
+fn smb_negotiate(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    host: &str,
+    port: u16,
+    operation: &'static str,
+) -> std::io::Result<(BrokeredTcpStream, Vec<u8>)> {
+    let (mut stream, _endpoint) = BrokeredTcpStream::connect(
+        ctx,
+        services,
+        host,
+        port,
         Duration::from_secs(10),
-    )?;
+        operation,
+    )
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
 
@@ -108,10 +114,13 @@ fn smb_negotiate(host: &str, port: u16) -> std::io::Result<(TcpStream, Vec<u8>)>
 fn smb_session_setup(
     host: &str,
     port: u16,
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
     username: &str,
     password: &str,
-) -> std::io::Result<(TcpStream, String)> {
-    let (mut stream, _negotiate_response) = smb_negotiate(host, port)?;
+    operation: &'static str,
+) -> std::io::Result<(BrokeredTcpStream, String)> {
+    let (mut stream, _negotiate_response) = smb_negotiate(ctx, services, host, port, operation)?;
 
     let mut session_setup = vec![
         0x00, 0x00, 0x00, 0x5e, 0xff, 0x53, 0x4d, 0x42, 0x73, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -179,8 +188,15 @@ fn smb_session_setup(
     }
 }
 
-fn smb_tree_connect(host: &str, port: u16, share: &str) -> std::io::Result<u32> {
-    let (mut stream, _negotiate_response) = smb_negotiate(host, port)?;
+fn smb_tree_connect(
+    host: &str,
+    port: u16,
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    share: &str,
+    operation: &'static str,
+) -> std::io::Result<u32> {
+    let (mut stream, _negotiate_response) = smb_negotiate(ctx, services, host, port, operation)?;
 
     let mut tree_connect = vec![
         0x00, 0x00, 0x00, 0x00, 0xff, 0x53, 0x4d, 0x42, 0x75, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -211,8 +227,14 @@ fn smb_tree_connect(host: &str, port: u16, share: &str) -> std::io::Result<u32> 
     }
 }
 
-fn smb_list_shares(host: &str, port: u16) -> std::io::Result<Vec<(String, String, String)>> {
-    let (mut stream, _negotiate_response) = smb_negotiate(host, port)?;
+fn smb_list_shares(
+    host: &str,
+    port: u16,
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    operation: &'static str,
+) -> std::io::Result<Vec<(String, String, String)>> {
+    let (mut stream, _negotiate_response) = smb_negotiate(ctx, services, host, port, operation)?;
 
     let mut trans2 = vec![
         0x00, 0x00, 0x00, 0x00, 0xff, 0x53, 0x4d, 0x42, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -272,10 +294,13 @@ fn smb_list_shares(host: &str, port: u16) -> std::io::Result<Vec<(String, String
 fn smb_open_file(
     host: &str,
     port: u16,
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
     _share: &str,
     path: &str,
-) -> std::io::Result<(TcpStream, u16)> {
-    let (mut stream, _negotiate_response) = smb_negotiate(host, port)?;
+    operation: &'static str,
+) -> std::io::Result<(BrokeredTcpStream, u16)> {
+    let (mut stream, _negotiate_response) = smb_negotiate(ctx, services, host, port, operation)?;
 
     let mut nt_create = vec![
         0x00, 0x00, 0x00, 0x00, 0xff, 0x53, 0x4d, 0x42, 0xa2, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -313,12 +338,15 @@ fn smb_open_file(
 fn smb_read_file(
     host: &str,
     port: u16,
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
     _share: &str,
     _path: &str,
     offset: u64,
     length: u32,
+    operation: &'static str,
 ) -> std::io::Result<Vec<u8>> {
-    let (mut stream, _negotiate_response) = smb_negotiate(host, port)?;
+    let (mut stream, _negotiate_response) = smb_negotiate(ctx, services, host, port, operation)?;
 
     let mut read_cmd = vec![
         0x00, 0x00, 0x00, 0x00, 0xff, 0x53, 0x4d, 0x42, 0x2e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -366,11 +394,14 @@ fn smb_read_file(
 fn smb_write_file(
     host: &str,
     port: u16,
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
     _share: &str,
     _path: &str,
     data: &[u8],
+    operation: &'static str,
 ) -> std::io::Result<u32> {
-    let (mut stream, _negotiate_response) = smb_negotiate(host, port)?;
+    let (mut stream, _negotiate_response) = smb_negotiate(ctx, services, host, port, operation)?;
 
     let mut write_cmd = vec![
         0x00, 0x00, 0x00, 0x00, 0xff, 0x53, 0x4d, 0x42, 0x2f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -399,8 +430,16 @@ fn smb_write_file(
     }
 }
 
-fn smb_delete_file(host: &str, port: u16, _share: &str, path: &str) -> std::io::Result<bool> {
-    let (mut stream, _negotiate_response) = smb_negotiate(host, port)?;
+fn smb_delete_file(
+    host: &str,
+    port: u16,
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    _share: &str,
+    path: &str,
+    operation: &'static str,
+) -> std::io::Result<bool> {
+    let (mut stream, _negotiate_response) = smb_negotiate(ctx, services, host, port, operation)?;
 
     let mut delete_cmd = vec![
         0x00, 0x00, 0x00, 0x00, 0xff, 0x53, 0x4d, 0x42, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -431,10 +470,13 @@ fn smb_delete_file(host: &str, port: u16, _share: &str, path: &str) -> std::io::
 fn smb_list_directory(
     host: &str,
     port: u16,
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
     _share: &str,
     path: &str,
+    operation: &'static str,
 ) -> std::io::Result<Vec<(String, u64, String)>> {
-    let (mut stream, _negotiate_response) = smb_negotiate(host, port)?;
+    let (mut stream, _negotiate_response) = smb_negotiate(ctx, services, host, port, operation)?;
 
     let mut trans2 = vec![
         0x00, 0x00, 0x00, 0x00, 0xff, 0x53, 0x4d, 0x42, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -506,23 +548,34 @@ fn maybe_denied_smb(
     Ok(None)
 }
 
-pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+/// Provider-backed smb registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_smb_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let smb = lua.create_table()?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.connect")? {
             return Ok(denied);
         }
-        let addr = format!("{}:{}", host, port);
-        match TcpStream::connect_timeout(
-            &addr
-                .parse::<std::net::SocketAddr>()
-                .map_err(|e| mlua::Error::RuntimeError(e.to_string()))?,
+        // Reachability probe through the broker (authority-preserving
+        // resolve replaces the literal-parse form).
+        match broker_tcp_connect(
+            &cap,
+            &svc,
+            &host,
+            port,
             Duration::from_secs(10),
+            "smb.connect",
         ) {
-            Ok(_stream) => {
+            Ok((_handle, _endpoint)) => {
                 if let Ok(mut sessions) = SMB_SESSIONS.lock() {
                     let session = SmbSession::new(host.clone(), port);
                     let mut s = session.clone();
@@ -547,12 +600,13 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     smb.set("connect", connect_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let login_fn = lua.create_function(
         move |lua, (host, port, domain, user, password): (String, u16, String, String, String)| {
             if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.login")? {
                 return Ok(denied);
             }
-            match smb_session_setup(&host, port, &user, &password) {
+            match smb_session_setup(&host, port, &cap, &svc, &user, &password, "smb.login") {
                 Ok((_stream, session_key)) => {
                     if let Ok(mut sessions) = SMB_SESSIONS.lock() {
                         let mut session = SmbSession::new(host.clone(), port);
@@ -583,11 +637,12 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     smb.set("login", login_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let list_shares_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.list_shares")? {
             return Ok(denied);
         }
-        match smb_list_shares(&host, port) {
+        match smb_list_shares(&host, port, &cap, &svc, "smb.list_shares") {
             Ok(shares) => {
                 let result = lua.create_table()?;
                 let shares_table = lua.create_table()?;
@@ -614,12 +669,13 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     smb.set("list_shares", list_shares_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let connect_tree_fn =
         lua.create_function(move |lua, (host, port, share): (String, u16, String)| {
             if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.connect_tree")? {
                 return Ok(denied);
             }
-            match smb_tree_connect(&host, port, &share) {
+            match smb_tree_connect(&host, port, &cap, &svc, &share, "smb.connect_tree") {
                 Ok(tree_id) => {
                     let result = lua.create_table()?;
                     result.set("success", true)?;
@@ -648,12 +704,13 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     smb.set("open_file", open_file_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let list_directory_fn =
         lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
             if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.list_directory")? {
                 return Ok(denied);
             }
-            match smb_list_directory(&host, port, "", &path) {
+            match smb_list_directory(&host, port, &cap, &svc, "", &path, "smb.list_directory") {
                 Ok(files) => {
                     let result = lua.create_table()?;
                     let files_table = lua.create_table()?;
@@ -680,12 +737,23 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     smb.set("list_directory", list_directory_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let get_file_fn = lua.create_function(
         move |lua, (host, port, path, offset, length): (String, u16, String, u64, u32)| {
             if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.get_file")? {
                 return Ok(denied);
             }
-            match smb_read_file(&host, port, "", &path, offset, length) {
+            match smb_read_file(
+                &host,
+                port,
+                &cap,
+                &svc,
+                "",
+                &path,
+                offset,
+                length,
+                "smb.get_file",
+            ) {
                 Ok(data) => {
                     let result = lua.create_table()?;
                     result.set("success", true)?;
@@ -707,12 +775,22 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     smb.set("get_file", get_file_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let put_file_fn = lua.create_function(
         move |lua, (host, port, path, data): (String, u16, String, String)| {
             if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.put_file")? {
                 return Ok(denied);
             }
-            match smb_write_file(&host, port, "", &path, data.as_bytes()) {
+            match smb_write_file(
+                &host,
+                port,
+                &cap,
+                &svc,
+                "",
+                &path,
+                data.as_bytes(),
+                "smb.put_file",
+            ) {
                 Ok(bytes_written) => {
                     let result = lua.create_table()?;
                     result.set("success", true)?;
@@ -732,12 +810,13 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     smb.set("put_file", put_file_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let delete_file_fn =
         lua.create_function(move |lua, (host, port, path): (String, u16, String)| {
             if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.delete_file")? {
                 return Ok(denied);
             }
-            match smb_delete_file(&host, port, "", &path) {
+            match smb_delete_file(&host, port, &cap, &svc, "", &path, "smb.delete_file") {
                 Ok(success) => {
                     let result = lua.create_table()?;
                     result.set("success", success)?;
@@ -782,129 +861,115 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     smb.set("get_domain", get_domain_fn)?;
 
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let async_connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.connect_async")? {
             return Err(mlua::Error::RuntimeError(
                 denied.get::<String>("error").unwrap_or_default(),
             ));
         }
-        let addr = format!("{}:{}", host, port);
-
-        block_on_async(async {
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                AsyncTcpStream::connect(&addr),
-            )
-            .await
-            {
-                Ok(Ok(_stream)) => {
-                    if let Ok(mut sessions) = SMB_SESSIONS.lock() {
-                        if sessions.len() >= MAX_SMB_SESSIONS {
-                            sessions.retain(|s| s.connected && s.authenticated);
-                        }
-                        let mut session = SmbSession::new(host.clone(), port);
-                        session.connected = true;
-                        sessions.push(session);
+        // Async probe: previously bridged `AsyncTcpStream` through the ambient
+        // runtime with a distinct timeout arm. Rewired to the brokered sync
+        // probe (entry name kept); timeout detail stays in the broker's
+        // error text ("... failed: connection timed out").
+        match broker_tcp_connect(
+            &cap,
+            &svc,
+            &host,
+            port,
+            std::time::Duration::from_secs(5),
+            "smb.connect_async",
+        ) {
+            Ok((_handle, _endpoint)) => {
+                if let Ok(mut sessions) = SMB_SESSIONS.lock() {
+                    if sessions.len() >= MAX_SMB_SESSIONS {
+                        sessions.retain(|s| s.connected && s.authenticated);
                     }
+                    let mut session = SmbSession::new(host.clone(), port);
+                    session.connected = true;
+                    sessions.push(session);
+                }
 
-                    let r = lua.create_table()?;
-                    r.set("host", host)?;
-                    r.set("port", port)?;
-                    r.set("status", "connected")?;
-                    Ok(r)
-                }
-                Ok(Err(e)) => {
-                    let r = lua.create_table()?;
-                    r.set("status", "error")?;
-                    r.set("error", e.to_string())?;
-                    Ok(r)
-                }
-                Err(_) => {
-                    let r = lua.create_table()?;
-                    r.set("status", "error")?;
-                    r.set("error", "Connection timed out".to_string())?;
-                    Ok(r)
-                }
+                let r = lua.create_table()?;
+                r.set("host", host)?;
+                r.set("port", port)?;
+                r.set("status", "connected")?;
+                Ok(r)
             }
-        })
+            Err(e) => {
+                let r = lua.create_table()?;
+                r.set("status", "error")?;
+                r.set("error", e)?;
+                Ok(r)
+            }
+        }
     })?;
     smb.set("connect_async", async_connect_fn)?;
 
-    let cap = capability_ctx.clone();
-    let async_login_fn = lua.create_function(
+    // Async login: previously bridged `spawn_blocking` through the ambient
+    // runtime. Rewired to the brokered sync path (entry name kept).
+    let async_login_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
         move |lua, (host, port, domain, user, password): (String, u16, String, String, String)| {
-            if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.login_async")? {
+            if let Some(denied) = maybe_denied_smb(lua, &ctx, &host, "smb.login_async")? {
                 return Err(mlua::Error::RuntimeError(
                     denied.get::<String>("error").unwrap_or_default(),
                 ));
             }
-            let host_clone = host.clone();
-            let user_clone = user.clone();
-            let _domain_clone = domain.clone();
-            let password_clone = password.clone();
-            let user_result = user.clone();
-            let domain_result = domain.clone();
-            let host_result = host.clone();
 
-            block_on_async(async move {
-                let host_inner = host_clone.clone();
-                let user_inner = user_clone.clone();
-                let password_inner = password_clone.clone();
+            match smb_session_setup(
+                &host,
+                port,
+                &ctx,
+                &services,
+                &user,
+                &password,
+                "smb.login_async",
+            ) {
+                Ok((_stream, session_key)) => {
+                    if let Ok(mut sessions) = SMB_SESSIONS.lock() {
+                        let mut session = SmbSession::new(host.clone(), port);
+                        session.connected = true;
+                        session.authenticated = true;
+                        session.user = Some(user.clone());
+                        session.domain = Some(domain.clone());
+                        session.session_key = Some(session_key.clone());
+                        sessions.push(session);
+                    }
 
-                match tokio::task::spawn_blocking(move || {
-                    smb_session_setup(&host_inner, port, &user_inner, &password_inner)
-                })
-                .await
-                {
-                    Ok(Ok((_stream, session_key))) => {
-                        let session_key_clone = session_key.clone();
-                        if let Ok(mut sessions) = SMB_SESSIONS.lock() {
-                            let mut session = SmbSession::new(host_result.clone(), port);
-                            session.connected = true;
-                            session.authenticated = true;
-                            session.user = Some(user_result.clone());
-                            session.domain = Some(domain_result.clone());
-                            session.session_key = Some(session_key_clone.clone());
-                            sessions.push(session);
-                        }
-
-                        let result = lua.create_table()?;
-                        result.set("success", true)?;
-                        result.set("user", user_result)?;
-                        result.set("domain", domain_result)?;
-                        result.set("session_key", session_key_clone)?;
-                        Ok(result)
-                    }
-                    Ok(Err(e)) => {
-                        let result = lua.create_table()?;
-                        result.set("success", false)?;
-                        result.set("error", e.to_string())?;
-                        Ok(result)
-                    }
-                    Err(e) => {
-                        let result = lua.create_table()?;
-                        result.set("success", false)?;
-                        result.set("error", e.to_string())?;
-                        Ok(result)
-                    }
+                    let result = lua.create_table()?;
+                    result.set("success", true)?;
+                    result.set("user", user)?;
+                    result.set("domain", domain)?;
+                    result.set("session_key", session_key)?;
+                    Ok(result)
                 }
-            })
-        },
-    )?;
+                Err(e) => {
+                    let result = lua.create_table()?;
+                    result.set("success", false)?;
+                    result.set("error", e.to_string())?;
+                    Ok(result)
+                }
+            }
+        }
+    })?;
     smb.set("login_async", async_login_fn)?;
 
-    let cap = capability_ctx.clone();
-    let async_list_shares_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
-        if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.list_shares_async")? {
-            return Err(mlua::Error::RuntimeError(
-                denied.get::<String>("error").unwrap_or_default(),
-            ));
-        }
-        let host_clone = host.clone();
+    // Async list-shares: previously bridged `spawn_blocking` through the
+    // ambient runtime. Rewired to the brokered sync path (entry name kept).
+    let async_list_shares_fn = lua.create_function({
+        let ctx = capability_ctx.clone();
+        let services = services.clone();
+        move |lua, (host, port): (String, u16)| {
+            if let Some(denied) = maybe_denied_smb(lua, &ctx, &host, "smb.list_shares_async")? {
+                return Err(mlua::Error::RuntimeError(
+                    denied.get::<String>("error").unwrap_or_default(),
+                ));
+            }
 
-        block_on_async(async move {
-            match tokio::task::spawn_blocking(move || smb_list_shares(&host_clone, port)).await {
-                Ok(Ok(shares)) => {
+            match smb_list_shares(&host, port, &ctx, &services, "smb.list_shares_async") {
+                Ok(shares) => {
                     let result = lua.create_table()?;
                     let shares_table = lua.create_table()?;
 
@@ -920,24 +985,20 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                     result.set("count", shares.len())?;
                     Ok(result)
                 }
-                Ok(Err(e)) => {
-                    let result = lua.create_table()?;
-                    result.set("error", e.to_string())?;
-                    Ok(result)
-                }
                 Err(e) => {
                     let result = lua.create_table()?;
                     result.set("error", e.to_string())?;
                     Ok(result)
                 }
             }
-        })
+        }
     })?;
     smb.set("list_shares_async", async_list_shares_fn)?;
 
     // create_directory - Create a directory on the remote share
     // NOTE: Full implementation requires SMB2/SMB3 protocol support
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let create_directory_fn = lua.create_function(
         move |lua, (host, port, _share, path): (String, u16, String, String)| {
             let result = lua.create_table()?;
@@ -953,17 +1014,18 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                     return Ok(denied);
                 }
                 // Attempt basic SMB connection to verify share is accessible
-                let addr = format!("{}:{}", host, port);
-                match std::net::TcpStream::connect_timeout(
-                    &addr.parse::<std::net::SocketAddr>().unwrap_or_else(|_| {
-                        let addr_str = format!("{}:{}", host, 445);
-                        addr_str
-                            .parse()
-                            .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 445)))
-                    }),
+                // Reachability probe through the broker: the old
+                // literal-parse-plus-wildcard-fallback form is gone;
+                // failures keep the `Cannot connect` error-table shape.
+                match broker_tcp_connect(
+                    &cap,
+                    &svc,
+                    &host,
+                    port,
                     std::time::Duration::from_secs(5),
+                    "smb.create_directory",
                 ) {
-                    Ok(_stream) => {
+                    Ok((_handle, _endpoint)) => {
                         // Connection successful - directory creation would need SMB2
                         result.set("success", false)?;
                         result.set("error", "SMB2/SMB3 required for directory creation")?;
@@ -987,6 +1049,7 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     // delete_directory - Delete a directory on the remote share
     // NOTE: Full implementation requires SMB2/SMB3 protocol support
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let delete_directory_fn = lua.create_function(
         move |lua, (host, port, _share, path): (String, u16, String, String)| {
             let result = lua.create_table()?;
@@ -999,17 +1062,18 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                 if let Some(denied) = maybe_denied_smb(lua, &cap, &host, "smb.delete_directory")? {
                     return Ok(denied);
                 }
-                let addr = format!("{}:{}", host, port);
-                match std::net::TcpStream::connect_timeout(
-                    &addr.parse::<std::net::SocketAddr>().unwrap_or_else(|_| {
-                        let addr_str = format!("{}:{}", host, 445);
-                        addr_str
-                            .parse()
-                            .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 445)))
-                    }),
+                // Reachability probe through the broker: the old
+                // literal-parse-plus-wildcard-fallback form is gone;
+                // failures keep the `Cannot connect` error-table shape.
+                match broker_tcp_connect(
+                    &cap,
+                    &svc,
+                    &host,
+                    port,
                     std::time::Duration::from_secs(5),
+                    "smb.delete_directory",
                 ) {
-                    Ok(_stream) => {
+                    Ok((_handle, _endpoint)) => {
                         result.set("success", false)?;
                         result.set("error", "SMB2/SMB3 required for directory deletion")?;
                         result.set(
@@ -1032,6 +1096,7 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
     // get_file_info - Get file/directory information
     // NOTE: Full implementation requires SMB2 QUERY_INFO
     let cap = capability_ctx.clone();
+    let svc = services.clone();
     let get_file_info_fn = lua.create_function(
         move |lua, (host, port, _share, path): (String, u16, String, String)| {
             let result = lua.create_table()?;
@@ -1050,17 +1115,18 @@ pub fn register_smb_library(lua: &Lua, capability_ctx: &NseCapabilityContext) ->
                     return Ok(denied);
                 }
                 // Try to connect and get info
-                let addr = format!("{}:{}", host, port);
-                match std::net::TcpStream::connect_timeout(
-                    &addr.parse::<std::net::SocketAddr>().unwrap_or_else(|_| {
-                        let addr_str = format!("{}:{}", host, 445);
-                        addr_str
-                            .parse()
-                            .unwrap_or_else(|_| std::net::SocketAddr::from(([0, 0, 0, 0], 445)))
-                    }),
+                // Reachability probe through the broker: the old
+                // literal-parse-plus-wildcard-fallback form is gone;
+                // failures keep the `Cannot connect` error-table shape.
+                match broker_tcp_connect(
+                    &cap,
+                    &svc,
+                    &host,
+                    port,
                     std::time::Duration::from_secs(5),
+                    "smb.get_file_info",
                 ) {
-                    Ok(_stream) => {
+                    Ok((_handle, _endpoint)) => {
                         // Connection successful - return path info as best effort
                         // Full implementation would use SMB2 QUERY_INFO request
                         let path_parts: Vec<&str> =

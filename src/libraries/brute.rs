@@ -3,15 +3,15 @@
 //! Provides brute-force authentication utilities for NSE scripts.
 //! Based on Nmap's brute library: https://nmap.org/nsedoc/lib/brute.html
 
+use crate::brokered_stream::{broker_read_into, broker_write_all};
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::broker_tcp_connect;
 use mlua::{Lua, Result as LuaResult, Table};
 use rustc_hash::FxHashMap;
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::sync::Mutex;
 use std::time::Duration;
 
 use super::helpers::fallback_lua_table;
-use crate::capabilities::NseCapabilityContext;
 use crate::wrappers;
 
 static CREDS_STORE: std::sync::LazyLock<Mutex<FxHashMap<String, Vec<(String, String)>>>> =
@@ -41,8 +41,10 @@ pub fn register_brute_library(lua: &Lua, capability_ctx: &NseCapabilityContext) 
 
 /// Provider-backed brute registration.
 ///
-/// Only the HTTP-auth probe is brokered; direct TCP helpers stay native
-/// (deferred protocol surface, inventoried).
+/// Every TCP login helper resolves and connects through the broker
+/// (authority-preserving); the literal-parse preamble is gone and the
+/// `Invalid address '...'` shape is replaced by the broker's
+/// `connection failed: ...` mapping. HTTP-auth probes were already brokered.
 pub fn register_brute_library_with_services(
     lua: &Lua,
     capability_ctx: &NseCapabilityContext,
@@ -393,124 +395,133 @@ pub fn register_brute_library_with_services(
 
     brute.set(
         "smb_login",
-        lua.create_function(
-            |lua,
-             (host, port, domain, username, password): (
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua,
+                  (host, port, domain, username, password): (
                 String,
                 u16,
                 String,
                 String,
                 String,
             )| {
-            let result = lua.create_table()?;
+                let result = lua.create_table()?;
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-                };
-                let mut stream = match TcpStream::connect_timeout(
-                    &socket_addr,
+                // The broker resolves `host` (authority-preserving); the old
+                // literal-parse `Invalid address` shape now surfaces as the
+                // broker-mapped `connection failed: ...` below.
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
                     Duration::from_secs(10),
+                    "brute.smb_login",
                 ) {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("success", false)?;
-                    result.set("status", "error")?;
-                    result.set("error", format!("connection failed: {}", e))?;
-                    return Ok(result);
-                }
-            };
-
-            stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
-
-            let negotiate_request = build_smb_negotiate();
-            if let Err(e) = stream.write_all(&negotiate_request) {
-                result.set("success", false)?;
-                result.set("status", "error")?;
-                result.set("error", format!("negotiate failed: {}", e))?;
-                return Ok(result);
-            }
-
-            let mut response = vec![0u8; 1024];
-            match stream.read(&mut response) {
-                Ok(n) if n >= 32 && response[9] == 0x00 => {}
-                _ => {
-                    result.set("success", false)?;
-                    result.set("status", "error")?;
-                    result.set("error", "negotiate failed")?;
-                    return Ok(result);
-                }
-            }
-
-            let session_setup = build_smb_session_setup(&username, &password, &domain);
-            if let Err(e) = stream.write_all(&session_setup) {
-                result.set("success", false)?;
-                result.set("status", "error")?;
-                result.set("error", format!("session setup failed: {}", e))?;
-                return Ok(result);
-            }
-
-            let mut response = vec![0u8; 1024];
-            match stream.read(&mut response) {
-                Ok(n) if n >= 32 => {
-                    let nt_status = u32::from_le_bytes([response[5], response[6], response[7], response[8]]);
-                    if nt_status == 0 {
-                        result.set("success", true)?;
-                        result.set("status", "ok")?;
-                    } else {
+                    Ok(pair) => pair,
+                    Err(e) => {
                         result.set("success", false)?;
-                        result.set("status", "fail")?;
+                        result.set("status", "error")?;
+                        result.set("error", format!("connection failed: {}", e))?;
+                        return Ok(result);
+                    }
+                };
+
+                let _ = handle.set_timeouts(Duration::from_secs(10));
+
+                let negotiate_request = build_smb_negotiate();
+                if let Err(e) =
+                    broker_write_all(&ctx, handle.as_mut(), &negotiate_request, "brute.smb_login")
+                {
+                    result.set("success", false)?;
+                    result.set("status", "error")?;
+                    result.set("error", format!("negotiate failed: {}", e))?;
+                    return Ok(result);
+                }
+
+                let mut response = vec![0u8; 1024];
+                match broker_read_into(&ctx, handle.as_mut(), &mut response, "brute.smb_login") {
+                    Ok(n) if n >= 32 && response[9] == 0x00 => {}
+                    _ => {
+                        result.set("success", false)?;
+                        result.set("status", "error")?;
+                        result.set("error", "negotiate failed")?;
+                        return Ok(result);
                     }
                 }
-                _ => {
+
+                let session_setup = build_smb_session_setup(&username, &password, &domain);
+                if let Err(e) =
+                    broker_write_all(&ctx, handle.as_mut(), &session_setup, "brute.smb_login")
+                {
                     result.set("success", false)?;
                     result.set("status", "error")?;
-                    result.set("error", "session setup failed")?;
+                    result.set("error", format!("session setup failed: {}", e))?;
+                    return Ok(result);
                 }
-            }
 
-            Ok(result)
-        },
-        )?,
+                let mut response = vec![0u8; 1024];
+                match broker_read_into(&ctx, handle.as_mut(), &mut response, "brute.smb_login") {
+                    Ok(n) if n >= 32 => {
+                        let nt_status = u32::from_le_bytes([
+                            response[5],
+                            response[6],
+                            response[7],
+                            response[8],
+                        ]);
+                        if nt_status == 0 {
+                            result.set("success", true)?;
+                            result.set("status", "ok")?;
+                        } else {
+                            result.set("success", false)?;
+                            result.set("status", "fail")?;
+                        }
+                    }
+                    _ => {
+                        result.set("success", false)?;
+                        result.set("status", "error")?;
+                        result.set("error", "session setup failed")?;
+                    }
+                }
+
+                Ok(result)
+            }
+        })?,
     )?;
 
     brute.set(
         "mysql_login",
-        lua.create_function(
-            |lua, (host, port, username, password): (String, u16, String, String)| {
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, username, password): (String, u16, String, String)| {
                 let result = lua.create_table()?;
 
-                let addr = format!("{}:{}", host, port);
-                let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                    Ok(a) => a,
+                // The broker resolves `host` (authority-preserving); the old
+                // literal-parse `Invalid address` shape now surfaces as the
+                // broker-mapped `connection failed: ...` below.
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "brute.mysql_login",
+                ) {
+                    Ok(pair) => pair,
                     Err(e) => {
+                        result.set("success", false)?;
                         result.set("status", "error")?;
-                        result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
+                        result.set("error", format!("connection failed: {}", e))?;
                         return Ok(result);
                     }
                 };
-                let mut stream =
-                    match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            result.set("success", false)?;
-                            result.set("status", "error")?;
-                            result.set("error", format!("connection failed: {}", e))?;
-                            return Ok(result);
-                        }
-                    };
 
-                stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-                stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
+                let _ = handle.set_timeouts(Duration::from_secs(10));
 
                 let mut handshake = vec![0u8; 256];
-                match stream.read(&mut handshake) {
+                match broker_read_into(&ctx, handle.as_mut(), &mut handshake, "brute.mysql_login") {
                     Ok(n) if n > 0 => {}
                     _ => {
                         result.set("success", false)?;
@@ -532,7 +543,9 @@ pub fn register_brute_library_with_services(
 
                 let response =
                     build_mysql_handshake_response(&username, &password, &salt_1, &salt_2);
-                if let Err(e) = stream.write_all(&response) {
+                if let Err(e) =
+                    broker_write_all(&ctx, handle.as_mut(), &response, "brute.mysql_login")
+                {
                     result.set("success", false)?;
                     result.set("status", "error")?;
                     result.set("error", format!("auth failed: {}", e))?;
@@ -540,7 +553,12 @@ pub fn register_brute_library_with_services(
                 }
 
                 let mut auth_response = vec![0u8; 1024];
-                match stream.read(&mut auth_response) {
+                match broker_read_into(
+                    &ctx,
+                    handle.as_mut(),
+                    &mut auth_response,
+                    "brute.mysql_login",
+                ) {
                     Ok(n) if n >= 4 => {
                         if auth_response[0] == 0x00 || auth_response[0] == 0xff {
                             result.set("success", auth_response[0] == 0x00)?;
@@ -566,41 +584,44 @@ pub fn register_brute_library_with_services(
                 }
 
                 Ok(result)
-            },
-        )?,
+            }
+        })?,
     )?;
 
     brute.set(
         "postgres_login",
-        lua.create_function(
-            |lua, (host, port, username, password): (String, u16, String, String)| {
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, username, password): (String, u16, String, String)| {
                 let result = lua.create_table()?;
 
-                let addr = format!("{}:{}", host, port);
-                let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                    Ok(a) => a,
+                // The broker resolves `host` (authority-preserving); the old
+                // literal-parse `Invalid address` shape now surfaces as the
+                // broker-mapped `connection failed: ...` below.
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "brute.postgres_login",
+                ) {
+                    Ok(pair) => pair,
                     Err(e) => {
+                        result.set("success", false)?;
                         result.set("status", "error")?;
-                        result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
+                        result.set("error", format!("connection failed: {}", e))?;
                         return Ok(result);
                     }
                 };
-                let mut stream =
-                    match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            result.set("success", false)?;
-                            result.set("status", "error")?;
-                            result.set("error", format!("connection failed: {}", e))?;
-                            return Ok(result);
-                        }
-                    };
 
-                stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-                stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
+                let _ = handle.set_timeouts(Duration::from_secs(10));
 
                 let startup = build_postgres_startup(&username);
-                if let Err(e) = stream.write_all(&startup) {
+                if let Err(e) =
+                    broker_write_all(&ctx, handle.as_mut(), &startup, "brute.postgres_login")
+                {
                     result.set("success", false)?;
                     result.set("status", "error")?;
                     result.set("error", format!("startup failed: {}", e))?;
@@ -608,7 +629,8 @@ pub fn register_brute_library_with_services(
                 }
 
                 let mut response = vec![0u8; 1024];
-                match stream.read(&mut response) {
+                match broker_read_into(&ctx, handle.as_mut(), &mut response, "brute.postgres_login")
+                {
                     Ok(n) if n >= 8 => {
                         if response[0] == b'R' && n >= 12 {
                             let auth_type = u32::from_be_bytes([
@@ -621,7 +643,12 @@ pub fn register_brute_library_with_services(
                                 let salt = &response[9..13];
                                 let md5_response =
                                     build_postgres_md5_response(&username, &password, salt);
-                                if let Err(e) = stream.write_all(&md5_response) {
+                                if let Err(e) = broker_write_all(
+                                    &ctx,
+                                    handle.as_mut(),
+                                    &md5_response,
+                                    "brute.postgres_login",
+                                ) {
                                     result.set("success", false)?;
                                     result.set("status", "error")?;
                                     result.set("error", format!("auth failed: {}", e))?;
@@ -629,7 +656,12 @@ pub fn register_brute_library_with_services(
                                 }
 
                                 let mut final_response = vec![0u8; 1024];
-                                match stream.read(&mut final_response) {
+                                match broker_read_into(
+                                    &ctx,
+                                    handle.as_mut(),
+                                    &mut final_response,
+                                    "brute.postgres_login",
+                                ) {
                                     Ok(m) if m >= 8 => {
                                         if final_response[0] == b'R' {
                                             let auth_result = u32::from_be_bytes([
@@ -684,128 +716,144 @@ pub fn register_brute_library_with_services(
                 }
 
                 Ok(result)
-            },
-        )?,
+            }
+        })?,
     )?;
 
     brute.set(
         "redis_login",
-        lua.create_function(|lua, (host, port, password): (String, u16, String)| {
-            let result = lua.create_table()?;
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, password): (String, u16, String)| {
+                let result = lua.create_table()?;
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("success", false)?;
-                    result.set("status", "error")?;
-                    result.set("error", format!("connection failed: {}", e))?;
-                    return Ok(result);
-                }
-            };
-
-            stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-            stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
-
-            let ping = b"*1\r\n$4\r\nPING\r\n";
-            if let Err(e) = stream.write_all(ping) {
-                result.set("success", false)?;
-                result.set("status", "error")?;
-                result.set("error", format!("ping failed: {}", e))?;
-                return Ok(result);
-            }
-
-            let mut response = vec![0u8; 64];
-            if let Ok(n) = stream.read(&mut response) {
-                if n == 0 || !response[..n.min(2)].starts_with(b"+PONG") {
-                    result.set("success", false)?;
-                    result.set("status", "error")?;
-                    result.set("error", "ping failed")?;
-                    return Ok(result);
-                }
-            }
-
-            let auth_cmd = format!(
-                "*2\r\n$4\r\nAUTH\r\n${}\r\n{}\r\n",
-                password.len(),
-                password
-            );
-            if let Err(e) = stream.write_all(auth_cmd.as_bytes()) {
-                result.set("success", false)?;
-                result.set("status", "error")?;
-                result.set("error", format!("auth failed: {}", e))?;
-                return Ok(result);
-            }
-
-            let mut auth_response = vec![0u8; 64];
-            match stream.read(&mut auth_response) {
-                Ok(n) if n > 0 => {
-                    if auth_response[0] == b'+' {
-                        result.set("success", true)?;
-                        result.set("status", "ok")?;
-                    } else if auth_response[0] == b'-' {
-                        result.set("success", false)?;
-                        result.set("status", "fail")?;
-                        result.set(
-                            "error",
-                            String::from_utf8_lossy(&auth_response[1..n]).to_string(),
-                        )?;
-                    } else {
+                // The broker resolves `host` (authority-preserving); the old
+                // literal-parse `Invalid address` shape now surfaces as the
+                // broker-mapped `connection failed: ...` below.
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "brute.redis_login",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
                         result.set("success", false)?;
                         result.set("status", "error")?;
+                        result.set("error", format!("connection failed: {}", e))?;
+                        return Ok(result);
                     }
-                }
-                _ => {
+                };
+
+                let _ = handle.set_timeouts(Duration::from_secs(10));
+
+                let ping = b"*1\r\n$4\r\nPING\r\n";
+                if let Err(e) = broker_write_all(&ctx, handle.as_mut(), ping, "brute.redis_login") {
                     result.set("success", false)?;
                     result.set("status", "error")?;
-                    result.set("error", "auth response failed")?;
+                    result.set("error", format!("ping failed: {}", e))?;
+                    return Ok(result);
                 }
-            }
 
-            Ok(result)
+                let mut response = vec![0u8; 64];
+                if let Ok(n) =
+                    broker_read_into(&ctx, handle.as_mut(), &mut response, "brute.redis_login")
+                {
+                    if n == 0 || !response[..n.min(2)].starts_with(b"+PONG") {
+                        result.set("success", false)?;
+                        result.set("status", "error")?;
+                        result.set("error", "ping failed")?;
+                        return Ok(result);
+                    }
+                }
+
+                let auth_cmd = format!(
+                    "*2\r\n$4\r\nAUTH\r\n${}\r\n{}\r\n",
+                    password.len(),
+                    password
+                );
+                if let Err(e) = broker_write_all(
+                    &ctx,
+                    handle.as_mut(),
+                    auth_cmd.as_bytes(),
+                    "brute.redis_login",
+                ) {
+                    result.set("success", false)?;
+                    result.set("status", "error")?;
+                    result.set("error", format!("auth failed: {}", e))?;
+                    return Ok(result);
+                }
+
+                let mut auth_response = vec![0u8; 64];
+                match broker_read_into(
+                    &ctx,
+                    handle.as_mut(),
+                    &mut auth_response,
+                    "brute.redis_login",
+                ) {
+                    Ok(n) if n > 0 => {
+                        if auth_response[0] == b'+' {
+                            result.set("success", true)?;
+                            result.set("status", "ok")?;
+                        } else if auth_response[0] == b'-' {
+                            result.set("success", false)?;
+                            result.set("status", "fail")?;
+                            result.set(
+                                "error",
+                                String::from_utf8_lossy(&auth_response[1..n]).to_string(),
+                            )?;
+                        } else {
+                            result.set("success", false)?;
+                            result.set("status", "error")?;
+                        }
+                    }
+                    _ => {
+                        result.set("success", false)?;
+                        result.set("status", "error")?;
+                        result.set("error", "auth response failed")?;
+                    }
+                }
+
+                Ok(result)
+            }
         })?,
     )?;
 
     brute.set(
         "ftp_login",
-        lua.create_function(
-            |lua, (host, port, username, password): (String, u16, String, String)| {
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, username, password): (String, u16, String, String)| {
                 let result = lua.create_table()?;
 
-                let addr = format!("{}:{}", host, port);
-                let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                    Ok(a) => a,
+                // The broker resolves `host` (authority-preserving); the old
+                // literal-parse `Invalid address` shape now surfaces as the
+                // broker-mapped `connection failed: ...` below.
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "brute.ftp_login",
+                ) {
+                    Ok(pair) => pair,
                     Err(e) => {
+                        result.set("success", false)?;
                         result.set("status", "error")?;
-                        result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
+                        result.set("error", format!("connection failed: {}", e))?;
                         return Ok(result);
                     }
                 };
-                let mut stream =
-                    match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            result.set("success", false)?;
-                            result.set("status", "error")?;
-                            result.set("error", format!("connection failed: {}", e))?;
-                            return Ok(result);
-                        }
-                    };
 
-                stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-                stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
+                let _ = handle.set_timeouts(Duration::from_secs(10));
 
                 let mut response = vec![0u8; 256];
-                match stream.read(&mut response) {
+                match broker_read_into(&ctx, handle.as_mut(), &mut response, "brute.ftp_login") {
                     Ok(n) if n >= 3 => {
                         if response[0] != b'2' {
                             result.set("success", false)?;
@@ -828,7 +876,12 @@ pub fn register_brute_library_with_services(
                 }
 
                 let user_cmd = format!("USER {}\r\n", username);
-                if let Err(e) = stream.write_all(user_cmd.as_bytes()) {
+                if let Err(e) = broker_write_all(
+                    &ctx,
+                    handle.as_mut(),
+                    user_cmd.as_bytes(),
+                    "brute.ftp_login",
+                ) {
                     result.set("success", false)?;
                     result.set("status", "error")?;
                     result.set("error", format!("user failed: {}", e))?;
@@ -836,11 +889,16 @@ pub fn register_brute_library_with_services(
                 }
 
                 let mut response = vec![0u8; 256];
-                match stream.read(&mut response) {
+                match broker_read_into(&ctx, handle.as_mut(), &mut response, "brute.ftp_login") {
                     Ok(n) if n >= 3 => {
                         if response[0] == b'3' {
                             let pass_cmd = format!("PASS {}\r\n", password);
-                            if let Err(e) = stream.write_all(pass_cmd.as_bytes()) {
+                            if let Err(e) = broker_write_all(
+                                &ctx,
+                                handle.as_mut(),
+                                pass_cmd.as_bytes(),
+                                "brute.ftp_login",
+                            ) {
                                 result.set("success", false)?;
                                 result.set("status", "error")?;
                                 result.set("error", format!("pass failed: {}", e))?;
@@ -848,7 +906,12 @@ pub fn register_brute_library_with_services(
                             }
 
                             let mut response = vec![0u8; 256];
-                            match stream.read(&mut response) {
+                            match broker_read_into(
+                                &ctx,
+                                handle.as_mut(),
+                                &mut response,
+                                "brute.ftp_login",
+                            ) {
                                 Ok(m) if m >= 3 => {
                                     if response[0] == b'2' {
                                         result.set("success", true)?;
@@ -880,41 +943,42 @@ pub fn register_brute_library_with_services(
                 }
 
                 Ok(result)
-            },
-        )?,
+            }
+        })?,
     )?;
 
     brute.set(
         "ssh_login",
-        lua.create_function(
-            |lua, (host, port, username, password): (String, u16, String, String)| {
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, username, password): (String, u16, String, String)| {
                 let result = lua.create_table()?;
 
-                let addr = format!("{}:{}", host, port);
-                let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                    Ok(a) => a,
+                // The broker resolves `host` (authority-preserving); the old
+                // literal-parse `Invalid address` shape now surfaces as the
+                // broker-mapped `connection failed: ...` below.
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "brute.ssh_login",
+                ) {
+                    Ok(pair) => pair,
                     Err(e) => {
+                        result.set("success", false)?;
                         result.set("status", "error")?;
-                        result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
+                        result.set("error", format!("connection failed: {}", e))?;
                         return Ok(result);
                     }
                 };
-                let mut stream =
-                    match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            result.set("success", false)?;
-                            result.set("status", "error")?;
-                            result.set("error", format!("connection failed: {}", e))?;
-                            return Ok(result);
-                        }
-                    };
 
-                stream.set_read_timeout(Some(Duration::from_secs(10))).ok();
-                stream.set_write_timeout(Some(Duration::from_secs(10))).ok();
+                let _ = handle.set_timeouts(Duration::from_secs(10));
 
                 let mut banner = vec![0u8; 256];
-                match stream.read(&mut banner) {
+                match broker_read_into(&ctx, handle.as_mut(), &mut banner, "brute.ssh_login") {
                     Ok(n) if n > 0 => {
                         if !banner[..n.min(6)].starts_with(b"SSH-") {
                             result.set("success", false)?;
@@ -932,7 +996,9 @@ pub fn register_brute_library_with_services(
                 }
 
                 let ssh_version = b"SSH-2.0-Eggsec_0.1\r\n";
-                if let Err(e) = stream.write_all(ssh_version) {
+                if let Err(e) =
+                    broker_write_all(&ctx, handle.as_mut(), ssh_version, "brute.ssh_login")
+                {
                     result.set("success", false)?;
                     result.set("status", "error")?;
                     result.set("error", format!("version exchange failed: {}", e))?;
@@ -940,7 +1006,7 @@ pub fn register_brute_library_with_services(
                 }
 
                 let mut kex_init = vec![0u8; 1024];
-                match stream.read(&mut kex_init) {
+                match broker_read_into(&ctx, handle.as_mut(), &mut kex_init, "brute.ssh_login") {
                     Ok(n) if n > 0 => {}
                     _ => {
                         result.set("success", false)?;
@@ -955,7 +1021,9 @@ pub fn register_brute_library_with_services(
                     b'a', b'u', b't', b'h',
                 ];
 
-                if let Err(e) = stream.write_all(&service_request) {
+                if let Err(e) =
+                    broker_write_all(&ctx, handle.as_mut(), &service_request, "brute.ssh_login")
+                {
                     result.set("success", false)?;
                     result.set("status", "error")?;
                     result.set("error", format!("service request failed: {}", e))?;
@@ -963,7 +1031,12 @@ pub fn register_brute_library_with_services(
                 }
 
                 let mut service_accept = vec![0u8; 64];
-                match stream.read(&mut service_accept) {
+                match broker_read_into(
+                    &ctx,
+                    handle.as_mut(),
+                    &mut service_accept,
+                    "brute.ssh_login",
+                ) {
                     Ok(n) if n >= 5 => {}
                     _ => {
                         result.set("success", false)?;
@@ -993,7 +1066,9 @@ pub fn register_brute_library_with_services(
                 auth_request.extend(pass_len.to_be_bytes());
                 auth_request.extend_from_slice(password.as_bytes());
 
-                if let Err(e) = stream.write_all(&auth_request) {
+                if let Err(e) =
+                    broker_write_all(&ctx, handle.as_mut(), &auth_request, "brute.ssh_login")
+                {
                     result.set("success", false)?;
                     result.set("status", "error")?;
                     result.set("error", format!("auth request failed: {}", e))?;
@@ -1001,7 +1076,8 @@ pub fn register_brute_library_with_services(
                 }
 
                 let mut auth_response = vec![0u8; 64];
-                match stream.read(&mut auth_response) {
+                match broker_read_into(&ctx, handle.as_mut(), &mut auth_response, "brute.ssh_login")
+                {
                     Ok(n) if n >= 5 => {
                         if auth_response[4] == 0x00 || auth_response[4] == 0x01 {
                             result.set("success", true)?;
@@ -1019,8 +1095,8 @@ pub fn register_brute_library_with_services(
                 }
 
                 Ok(result)
-            },
-        )?,
+            }
+        })?,
     )?;
 
     brute.set(

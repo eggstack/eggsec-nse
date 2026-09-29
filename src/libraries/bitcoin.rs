@@ -3,9 +3,10 @@
 //! Bitcoin protocol support for NSE scripts.
 //! Based on Nmap's bitcoin library.
 
+use crate::brokered_stream::broker_send_all;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, broker_tcp_receive, NseHostServices};
 use mlua::{Lua, Result as LuaResult, Table};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
 const BITCOIN_MAINNET_PORT: u16 = 8333;
@@ -24,7 +25,11 @@ const CMD_GETDATA: &str = "getdata";
 const CMD_BLOCK: &str = "block";
 const CMD_TX: &str = "tx";
 
-pub fn register_bitcoin_library(lua: &Lua) -> LuaResult<()> {
+pub fn register_bitcoin_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let bitcoin = lua.create_table()?;
 
@@ -115,183 +120,196 @@ pub fn register_bitcoin_library(lua: &Lua) -> LuaResult<()> {
     // get_version - Get version handshake
     bitcoin.set(
         "get_version",
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            let result = lua.create_table()?;
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, u16)| {
+                let result = lua.create_table()?;
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
+                // The broker resolves `host` (authority-preserving); unresolvable
+                // or refused hosts keep the original `status = "error"` shape.
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "bitcoin.get_version",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
+
+                if handle.set_timeouts(Duration::from_secs(10)).is_err() {
+                    tracing::warn!("Failed to set Bitcoin read timeout");
                 }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
 
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap_or_else(|e| tracing::warn!("Failed to set Bitcoin read timeout: {}", e));
+                // Send version message
+                let version_msg = create_version_message(70015);
 
-            // Send version message
-            let version_msg = create_version_message(70015);
+                match broker_send_all(&ctx, handle.as_mut(), &version_msg, "bitcoin.get_version") {
+                    Ok(_) => {
+                        // Read version response
+                        match broker_tcp_receive(&ctx, handle.as_mut(), 4096, "bitcoin.get_version")
+                        {
+                            Ok(data) => {
+                                let mut response = [0u8; 4096];
+                                let n = data.len().min(response.len());
+                                response[..n].copy_from_slice(&data[..n]);
+                                if n > 0 {
+                                    result.set("status", "ok")?;
+                                    result.set("connected", true)?;
 
-            match stream.write_all(&version_msg) {
-                Ok(_) => {
-                    // Read version response
-                    let mut response = [0u8; 4096];
-                    match stream.read(&mut response) {
-                        Ok(n) if n > 0 => {
-                            result.set("status", "ok")?;
-                            result.set("connected", true)?;
-
-                            // Try to parse version response
-                            if let Some(version) = parse_version_message(&response[..n]) {
-                                result.set("version", version.0)?;
-                                result.set("services", version.1)?;
-                                result.set("timestamp", version.2)?;
-                                result.set("remote_nonce", version.3)?;
-                            } else {
-                                result.set("version", 70015)?;
+                                    // Try to parse version response
+                                    if let Some(version) = parse_version_message(&response[..n]) {
+                                        result.set("version", version.0)?;
+                                        result.set("services", version.1)?;
+                                        result.set("timestamp", version.2)?;
+                                        result.set("remote_nonce", version.3)?;
+                                    } else {
+                                        result.set("version", 70015)?;
+                                    }
+                                } else {
+                                    result.set("status", "timeout")?;
+                                    result.set("connected", false)?;
+                                }
+                            }
+                            Err(e) => {
+                                result.set("status", "error")?;
+                                result.set("error", e)?;
                             }
                         }
-                        Ok(_) => {
-                            result.set("status", "timeout")?;
-                            result.set("connected", false)?;
-                        }
-                        Err(e) => {
-                            result.set("status", "error")?;
-                            result.set("error", e.to_string())?;
-                        }
+                    }
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
                     }
                 }
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                }
-            }
 
-            Ok(result)
+                Ok(result)
+            }
         })?,
     )?;
 
     // get_info - Get basic node information
     bitcoin.set(
         "get_info",
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            let result = lua.create_table()?;
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, u16)| {
+                let result = lua.create_table()?;
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "bitcoin.get_info",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
+
+                if handle.set_timeouts(Duration::from_secs(10)).is_err() {
+                    tracing::warn!("Failed to set Bitcoin read timeout");
                 }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
+
+                // Send version + verack
+                let version_msg = create_version_message(70015);
+                if broker_send_all(&ctx, handle.as_mut(), &version_msg, "bitcoin.get_info").is_err()
+                {
+                    tracing::warn!("Bitcoin: Failed to send version message");
                 }
-            };
 
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap_or_else(|e| tracing::warn!("Failed to set Bitcoin read timeout: {}", e));
+                // Read responses
+                if broker_tcp_receive(&ctx, handle.as_mut(), 4096, "bitcoin.get_info").is_err() {
+                    tracing::warn!("Failed to read Bitcoin version response");
+                }
 
-            // Send version + verack
-            let version_msg = create_version_message(70015);
-            if stream.write_all(&version_msg).is_err() {
-                tracing::warn!("Bitcoin: Failed to send version message");
+                result.set("status", "ok")?;
+                result.set("version", "70015")?;
+                result.set("protocol_version", 70015)?;
+                result.set("blocks", 0)?;
+                result.set("testnet", port == BITCOIN_TESTNET_PORT)?;
+
+                Ok(result)
             }
-
-            // Read responses
-            let mut response = [0u8; 4096];
-            if stream.read(&mut response).is_err() {
-                tracing::warn!("Failed to read Bitcoin version response");
-            }
-
-            result.set("status", "ok")?;
-            result.set("version", "70015")?;
-            result.set("protocol_version", 70015)?;
-            result.set("blocks", 0)?;
-            result.set("testnet", port == BITCOIN_TESTNET_PORT)?;
-
-            Ok(result)
         })?,
     )?;
 
     // get_addrs - Get addresses from node
     bitcoin.set(
         "get_addrs",
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            let result = lua.create_table()?;
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, u16)| {
+                let result = lua.create_table()?;
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "bitcoin.get_addrs",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
+
+                if handle.set_timeouts(Duration::from_secs(10)).is_err() {
+                    tracing::warn!("Failed to set Bitcoin read timeout");
                 }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
+
+                // Send version + verack + getaddr
+                let version_msg = create_version_message(70015);
+                if broker_send_all(&ctx, handle.as_mut(), &version_msg, "bitcoin.get_addrs")
+                    .is_err()
+                {
+                    tracing::warn!("Bitcoin: Failed to send version message");
                 }
-            };
 
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap_or_else(|e| tracing::warn!("Failed to set Bitcoin read timeout: {}", e));
+                // Read version + verack
+                if broker_tcp_receive(&ctx, handle.as_mut(), 4096, "bitcoin.get_addrs").is_err() {
+                    tracing::warn!("Failed to read Bitcoin version");
+                }
+                if broker_tcp_receive(&ctx, handle.as_mut(), 4096, "bitcoin.get_addrs").is_err() {
+                    tracing::warn!("Failed to read Bitcoin verack");
+                }
 
-            // Send version + verack + getaddr
-            let version_msg = create_version_message(70015);
-            if stream.write_all(&version_msg).is_err() {
-                tracing::warn!("Bitcoin: Failed to send version message");
+                // Send getaddr
+                let getaddr_msg = create_getaddr_message();
+                if broker_send_all(&ctx, handle.as_mut(), &getaddr_msg, "bitcoin.get_addrs")
+                    .is_err()
+                {
+                    tracing::warn!("Bitcoin: Failed to send getaddr");
+                }
+
+                // Read addr response
+                let _data = broker_tcp_receive(&ctx, handle.as_mut(), 4096, "bitcoin.get_addrs")
+                    .unwrap_or_default();
+
+                result.set("status", "ok")?;
+                result.set("addresses", lua.create_table()?)?;
+                result.set("count", 0)?;
+
+                Ok(result)
             }
-
-            // Read version + verack
-            let mut buf = [0u8; 4096];
-            if stream.read(&mut buf).is_err() {
-                tracing::warn!("Failed to read Bitcoin version");
-            }
-            if stream.read(&mut buf).is_err() {
-                tracing::warn!("Failed to read Bitcoin verack");
-            }
-
-            // Send getaddr
-            let getaddr_msg = create_getaddr_message();
-            if stream.write_all(&getaddr_msg).is_err() {
-                tracing::warn!("Bitcoin: Failed to send getaddr");
-            }
-
-            // Read addr response
-            let _n = stream.read(&mut buf).unwrap_or(0);
-
-            result.set("status", "ok")?;
-            result.set("addresses", lua.create_table()?)?;
-            result.set("count", 0)?;
-
-            Ok(result)
         })?,
     )?;
 

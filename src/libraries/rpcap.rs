@@ -3,9 +3,10 @@
 //! Remote Packet Capture (RPCAP) protocol support.
 //! Based on Nmap's rpcap library.
 
+use crate::brokered_stream::broker_send_all;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, broker_tcp_receive, NseHostServices, NseTcpConnection};
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
 const RPCAP_PORT: u16 = 2002;
@@ -15,122 +16,145 @@ const RPCAP_MSG_START: u8 = 0x10;
 const RPCAP_MSG_STOP: u8 = 0x11;
 const RPCAP_MSG_FILTER: u8 = 0x12;
 
-pub fn register_rpcap_library(lua: &Lua) -> LuaResult<()> {
+/// Brokered connect helper: resolve + capability-check + connect.
+///
+/// The broker resolves `host` (authority-preserving) instead of requiring a
+/// literal `SocketAddr` string; failures keep the callers' error-table shape.
+fn rpcap_connect(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+    host: &str,
+    port: u16,
+    operation: &'static str,
+) -> Result<Box<dyn NseTcpConnection>, String> {
+    let (handle, _endpoint) = broker_tcp_connect(
+        ctx,
+        services,
+        host,
+        port,
+        Duration::from_secs(10),
+        operation,
+    )?;
+    Ok(handle)
+}
+
+/// Provider-backed rpcap registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_rpcap_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let rpcap = lua.create_table()?;
 
     rpcap.set(
         "connect",
-        lua.create_function(|lua, (host, port): (String, Option<u16>)| {
-            let result = lua.create_table()?;
-            let addr = format!("{}:{}", host, port.unwrap_or(RPCAP_PORT));
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, Option<u16>)| {
+                let result = lua.create_table()?;
+                let port = port.unwrap_or(RPCAP_PORT);
+                let mut handle = match rpcap_connect(&ctx, &services, &host, port, "rpcap.connect")
+                {
+                    Ok(h) => h,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
 
-            let greeting = [0x00, 0x01, 0x00, 0x00];
-            stream.write_all(&greeting).ok();
-            let mut response = [0u8; 1024];
-            let n = stream.read(&mut response).unwrap_or(0);
+                let greeting = [0x00, 0x01, 0x00, 0x00];
+                let _ = broker_send_all(&ctx, handle.as_mut(), &greeting, "rpcap.connect");
+                let data = broker_tcp_receive(&ctx, handle.as_mut(), 1024, "rpcap.connect")
+                    .unwrap_or_default();
+                let n = data.len();
 
-            result.set("status", "ok")?;
-            result.set("host", host)?;
-            result.set("port", port.unwrap_or(RPCAP_PORT))?;
-            result.set("connected", n > 0)?;
+                result.set("status", "ok")?;
+                result.set("host", host)?;
+                result.set("port", port)?;
+                result.set("connected", n > 0)?;
 
-            Ok(result)
+                Ok(result)
+            }
         })?,
     )?;
 
     rpcap.set(
         "list_interfaces",
-        lua.create_function(|lua, (host, port): (String, Option<u16>)| {
-            let result = lua.create_table()?;
-            let addr = format!("{}:{}", host, port.unwrap_or(RPCAP_PORT));
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, Option<u16>)| {
+                let result = lua.create_table()?;
+                let port = port.unwrap_or(RPCAP_PORT);
+                let mut handle =
+                    match rpcap_connect(&ctx, &services, &host, port, "rpcap.list_interfaces") {
+                        Ok(h) => h,
+                        Err(e) => {
+                            result.set("status", "error")?;
+                            result.set("error", e)?;
+                            return Ok(result);
+                        }
+                    };
 
-            let greeting = [0x00, 0x01, 0x00, 0x00];
-            stream.write_all(&greeting).ok();
-            let mut response = [0u8; 4096];
-            let _n = stream.read(&mut response).unwrap_or(0);
+                let greeting = [0x00, 0x01, 0x00, 0x00];
+                let _ = broker_send_all(&ctx, handle.as_mut(), &greeting, "rpcap.list_interfaces");
+                let _data =
+                    broker_tcp_receive(&ctx, handle.as_mut(), 4096, "rpcap.list_interfaces")
+                        .unwrap_or_default();
 
-            let interfaces = lua.create_table()?;
-            interfaces.set(1, "eth0")?;
-            interfaces.set(2, "lo")?;
+                let interfaces = lua.create_table()?;
+                interfaces.set(1, "eth0")?;
+                interfaces.set(2, "lo")?;
 
-            result.set("status", "ok")?;
-            result.set("interfaces", interfaces)?;
-            result.set("count", 2)?;
+                result.set("status", "ok")?;
+                result.set("interfaces", interfaces)?;
+                result.set("count", 2)?;
 
-            Ok(result)
+                Ok(result)
+            }
         })?,
     )?;
 
     rpcap.set(
         "start_capture",
-        lua.create_function(|lua, (host, port, interface, filter): (String, Option<u16>, String, Option<String>)| {
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, interface, filter): (String, Option<u16>, String, Option<String>)| {
             let result = lua.create_table()?;
-            let addr = format!("{}:{}", host, port.unwrap_or(RPCAP_PORT));
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
+            let port = port.unwrap_or(RPCAP_PORT);
+            let mut handle = match rpcap_connect(
+                &ctx,
+                &services,
+                &host,
+                port,
+                "rpcap.start_capture",
+            ) {
+                Ok(h) => h,
                 Err(e) => {
                     result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-                };
-                let mut stream = match TcpStream::connect_timeout(
-                    &socket_addr,
-                    Duration::from_secs(10),
-                ) {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
+                    result.set("error", e)?;
                     return Ok(result);
                 }
             };
 
             let greeting = [0x00, 0x01, 0x00, 0x00];
-            stream.write_all(&greeting).ok();
+            let _ = broker_send_all(&ctx, handle.as_mut(), &greeting, "rpcap.start_capture");
 
             let mut start_msg = vec![RPCAP_MSG_START, 0x00, 0x00, 0x00];
             start_msg.extend_from_slice(interface.as_bytes());
             start_msg.push(0);
-            stream.write_all(&start_msg).ok();
+            let _ = broker_send_all(&ctx, handle.as_mut(), &start_msg, "rpcap.start_capture");
 
-            let mut response = [0u8; 1024];
-            let n = stream.read(&mut response).unwrap_or(0);
+            let data =
+                broker_tcp_receive(&ctx, handle.as_mut(), 1024, "rpcap.start_capture")
+                    .unwrap_or_default();
+            let n = data.len();
 
             result.set("status", "ok")?;
             result.set("interface", interface)?;
@@ -138,119 +162,110 @@ pub fn register_rpcap_library(lua: &Lua) -> LuaResult<()> {
             result.set("filter", filter.unwrap_or_default())?;
 
             Ok(result)
+            }
         })?,
     )?;
 
     rpcap.set(
         "stop_capture",
-        lua.create_function(|lua, (host, port): (String, Option<u16>)| {
-            let result = lua.create_table()?;
-            let addr = format!("{}:{}", host, port.unwrap_or(RPCAP_PORT));
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, Option<u16>)| {
+                let result = lua.create_table()?;
+                let port = port.unwrap_or(RPCAP_PORT);
+                let mut handle =
+                    match rpcap_connect(&ctx, &services, &host, port, "rpcap.stop_capture") {
+                        Ok(h) => h,
+                        Err(e) => {
+                            result.set("status", "error")?;
+                            result.set("error", e)?;
+                            return Ok(result);
+                        }
+                    };
 
-            let stop_msg = [RPCAP_MSG_STOP, 0x00, 0x00, 0x00];
-            stream.write_all(&stop_msg).ok();
+                let stop_msg = [RPCAP_MSG_STOP, 0x00, 0x00, 0x00];
+                let _ = broker_send_all(&ctx, handle.as_mut(), &stop_msg, "rpcap.stop_capture");
 
-            let mut response = [0u8; 256];
-            let _n = stream.read(&mut response).unwrap_or(0);
+                let _data = broker_tcp_receive(&ctx, handle.as_mut(), 256, "rpcap.stop_capture")
+                    .unwrap_or_default();
 
-            result.set("status", "ok")?;
-            result.set("capturing", false)?;
+                result.set("status", "ok")?;
+                result.set("capturing", false)?;
 
-            Ok(result)
+                Ok(result)
+            }
         })?,
     )?;
 
     rpcap.set(
         "set_filter",
-        lua.create_function(|lua, (host, port, filter): (String, Option<u16>, String)| {
-            let result = lua.create_table()?;
-            let addr = format!("{}:{}", host, port.unwrap_or(RPCAP_PORT));
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
-                }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, filter): (String, Option<u16>, String)| {
+                let result = lua.create_table()?;
+                let port = port.unwrap_or(RPCAP_PORT);
+                let mut handle =
+                    match rpcap_connect(&ctx, &services, &host, port, "rpcap.set_filter") {
+                        Ok(h) => h,
+                        Err(e) => {
+                            result.set("status", "error")?;
+                            result.set("error", e)?;
+                            return Ok(result);
+                        }
+                    };
 
-            let mut filter_msg = vec![RPCAP_MSG_FILTER, 0x00, 0x00, 0x00];
-            filter_msg.extend_from_slice(filter.as_bytes());
-            filter_msg.push(0);
-            stream.write_all(&filter_msg).ok();
+                let mut filter_msg = vec![RPCAP_MSG_FILTER, 0x00, 0x00, 0x00];
+                filter_msg.extend_from_slice(filter.as_bytes());
+                filter_msg.push(0);
+                let _ = broker_send_all(&ctx, handle.as_mut(), &filter_msg, "rpcap.set_filter");
 
-            let mut response = [0u8; 256];
-            let _n = stream.read(&mut response).unwrap_or(0);
+                let _data = broker_tcp_receive(&ctx, handle.as_mut(), 256, "rpcap.set_filter")
+                    .unwrap_or_default();
 
-            result.set("status", "ok")?;
-            result.set("filter", filter)?;
-            result.set("applied", true)?;
+                result.set("status", "ok")?;
+                result.set("filter", filter)?;
+                result.set("applied", true)?;
 
-            Ok(result)
+                Ok(result)
+            }
         })?,
     )?;
 
     rpcap.set(
         "capture_packet",
-        lua.create_function(
-            |lua, (host, port, interface): (String, Option<u16>, String)| {
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, interface): (String, Option<u16>, String)| {
                 let result = lua.create_table()?;
-                let addr = format!("{}:{}", host, port.unwrap_or(RPCAP_PORT));
-                let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                    Ok(a) => a,
-                    Err(e) => {
-                        result.set("status", "error")?;
-                        result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                        return Ok(result);
-                    }
-                };
-                let mut stream =
-                    match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-                        Ok(s) => s,
+                let port = port.unwrap_or(RPCAP_PORT);
+                let mut handle =
+                    match rpcap_connect(&ctx, &services, &host, port, "rpcap.capture_packet") {
+                        Ok(h) => h,
                         Err(e) => {
                             result.set("status", "error")?;
-                            result.set("error", e.to_string())?;
+                            result.set("error", e)?;
                             return Ok(result);
                         }
                     };
 
                 let greeting = [0x00, 0x01, 0x00, 0x00];
-                stream.write_all(&greeting).ok();
+                let _ = broker_send_all(&ctx, handle.as_mut(), &greeting, "rpcap.capture_packet");
 
                 let mut start_msg = vec![RPCAP_MSG_START, 0x00, 0x00, 0x00];
                 start_msg.extend_from_slice(interface.as_bytes());
                 start_msg.push(0);
-                stream.write_all(&start_msg).ok();
+                let _ = broker_send_all(&ctx, handle.as_mut(), &start_msg, "rpcap.capture_packet");
 
-                let mut packet = [0u8; 65536];
-                stream.set_read_timeout(Some(Duration::from_secs(1))).ok();
-                let n = stream.read(&mut packet).unwrap_or(0);
+                // Original 1s capture-read timeout, warn-only like before.
+                if handle.set_timeouts(Duration::from_secs(1)).is_err() {
+                    tracing::warn!("Failed to set rpcap capture read timeout");
+                }
+                let data = broker_tcp_receive(&ctx, handle.as_mut(), 65536, "rpcap.capture_packet")
+                    .unwrap_or_default();
+                let n = data.len();
 
                 result.set("status", "ok")?;
                 result.set("interface", interface)?;
@@ -259,7 +274,7 @@ pub fn register_rpcap_library(lua: &Lua) -> LuaResult<()> {
 
                 if n > 0 {
                     let sample_len = n.min(64);
-                    let sample: Vec<String> = packet[..sample_len]
+                    let sample: Vec<String> = data[..sample_len]
                         .iter()
                         .map(|b| format!("{:02x}", b))
                         .collect();
@@ -267,8 +282,8 @@ pub fn register_rpcap_library(lua: &Lua) -> LuaResult<()> {
                 }
 
                 Ok(result)
-            },
-        )?,
+            }
+        })?,
     )?;
 
     rpcap.set(

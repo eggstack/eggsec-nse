@@ -3,36 +3,38 @@
 //! RTSP (Real Time Streaming Protocol) support for NSE scripts.
 //! Based on Nmap's rtsp library.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, broker_tcp_receive, broker_tcp_send, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
-pub fn register_rtsp_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed rtsp registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_rtsp_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let rtsp = lua.create_table()?;
 
     rtsp.set(
         "request",
-        lua.create_function(
-            |lua, (host, port, method, url): (String, u16, String, String)| {
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, method, url): (String, u16, String, String)| {
                 let result = lua.create_table()?;
+                let timeout = Duration::from_secs(10);
 
-                let addr = format!("{}:{}", host, port);
-                let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                    Ok(a) => a,
-                    Err(e) => {
-                        result.set("status", "error")?;
-                        result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                        return Ok(result);
-                    }
-                };
-                let mut stream =
-                    match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-                        Ok(s) => s,
+                let (mut handle, _endpoint) =
+                    match broker_tcp_connect(&ctx, &services, &host, port, timeout, "rtsp.request")
+                    {
+                        Ok(pair) => pair,
                         Err(e) => {
                             result.set("status", "error")?;
-                            result.set("error", e.to_string())?;
+                            result.set("error", e)?;
                             return Ok(result);
                         }
                     };
@@ -46,10 +48,13 @@ pub fn register_rtsp_library(lua: &Lua) -> LuaResult<()> {
                     method, url, host, port
                 );
 
-                stream.write_all(request.as_bytes()).ok();
+                let _ = broker_tcp_send(&ctx, handle.as_mut(), request.as_bytes(), "rtsp.request");
 
+                let data = broker_tcp_receive(&ctx, handle.as_mut(), 4096, "rtsp.request")
+                    .unwrap_or_default();
                 let mut response = [0u8; 4096];
-                let n = stream.read(&mut response).unwrap_or(0);
+                let n = data.len().min(response.len());
+                response[..n].copy_from_slice(&data[..n]);
                 let response_str = String::from_utf8_lossy(&response[..n]);
 
                 // Parse status line
@@ -67,8 +72,8 @@ pub fn register_rtsp_library(lua: &Lua) -> LuaResult<()> {
                 result.set("response", response_str)?;
 
                 Ok(result)
-            },
-        )?,
+            }
+        })?,
     )?;
 
     rtsp.set(

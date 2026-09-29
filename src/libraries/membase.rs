@@ -3,54 +3,66 @@
 //! Membase (Couchbase) NoSQL database support.
 //! Based on Nmap's membase library.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, broker_tcp_receive, broker_tcp_send, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
-pub fn register_membase_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed membase registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_membase_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let membase = lua.create_table()?;
 
     membase.set(
         "connect",
-        lua.create_function(|lua, (host, port): (String, u16)| {
-            let result = lua.create_table()?;
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port): (String, u16)| {
+                let result = lua.create_table()?;
+                let timeout = Duration::from_secs(10);
 
-            let addr = format!("{}:{}", host, port);
-            let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                Ok(a) => a,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
-                    return Ok(result);
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    timeout,
+                    "membase.connect",
+                ) {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        result.set("status", "error")?;
+                        result.set("error", e)?;
+                        return Ok(result);
+                    }
+                };
+
+                // Membase hello
+                let hello = b"MECHO\r\n";
+                if let Err(e) = broker_tcp_send(&ctx, handle.as_mut(), hello, "membase.connect") {
+                    tracing::warn!("Failed to send membase hello: {}", e);
                 }
-            };
-            let mut stream = match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-            {
-                Ok(s) => s,
-                Err(e) => {
-                    result.set("status", "error")?;
-                    result.set("error", e.to_string())?;
-                    return Ok(result);
-                }
-            };
 
-            // Membase hello
-            let hello = b"MECHO\r\n";
-            stream
-                .write_all(hello)
-                .unwrap_or_else(|e| tracing::warn!("Failed to send membase hello: {}", e));
+                let data = broker_tcp_receive(&ctx, handle.as_mut(), 1024, "membase.connect")
+                    .unwrap_or_default();
+                let mut response = [0u8; 1024];
+                let n = data.len().min(response.len());
+                response[..n].copy_from_slice(&data[..n]);
 
-            let mut response = [0u8; 1024];
-            let n = stream.read(&mut response).unwrap_or(0);
+                result.set("status", "ok")?;
+                result.set("connected", n > 0)?;
+                result.set("host", host)?;
+                result.set("port", port)?;
 
-            result.set("status", "ok")?;
-            result.set("connected", n > 0)?;
-            result.set("host", host)?;
-            result.set("port", port)?;
-
-            Ok(result)
+                Ok(result)
+            }
         })?,
     )?;
 

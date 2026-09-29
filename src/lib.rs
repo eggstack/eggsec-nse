@@ -258,6 +258,8 @@ impl SandboxConfig {
 #[cfg(feature = "nse")]
 pub mod async_executor;
 #[cfg(feature = "nse")]
+pub mod brokered_stream;
+#[cfg(feature = "nse")]
 pub mod capabilities;
 #[cfg(feature = "nse")]
 pub mod context;

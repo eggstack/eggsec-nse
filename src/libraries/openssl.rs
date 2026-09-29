@@ -3,14 +3,15 @@
 //! OpenSSL bindings for NSE scripts.
 //! Based on Nmap's openssl library: https://nmap.org/nsedoc/lib/openssl.html
 
+use crate::brokered_stream::BrokeredTcpStream;
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::NseHostServices;
 use mlua::{Lua, Result as LuaResult};
 use native_tls::TlsConnector;
 use rustc_hash::FxHashMap;
-use std::net::TcpStream;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::capabilities::NseCapabilityContext;
 use crate::wrappers;
 
 static SSL_SESSIONS: std::sync::LazyLock<Mutex<FxHashMap<String, TlsConnector>>> =
@@ -24,17 +25,26 @@ pub fn reset_for_run() {
     }
 }
 
+/// Brokered TLS connect: authority-preserving resolve replaces the literal
+/// `addr` parse; the native-tls handshake runs over the brokered stream so
+/// every handshake byte stays capability-checked and accounted.
 fn create_ssl_connection(
+    ctx: &NseCapabilityContext,
+    services: &NseHostServices,
     host: &str,
     port: u16,
     insecure_tls: bool,
-) -> std::io::Result<native_tls::TlsStream<TcpStream>> {
-    let addr = format!("{}:{}", host, port);
-    let socket_addr: std::net::SocketAddr =
-        addr.parse().map_err(|e: std::net::AddrParseError| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
-        })?;
-    let stream = TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))?;
+    operation: &'static str,
+) -> std::io::Result<native_tls::TlsStream<BrokeredTcpStream>> {
+    let (mut stream, _endpoint) = BrokeredTcpStream::connect(
+        ctx,
+        services,
+        host,
+        port,
+        Duration::from_secs(10),
+        operation,
+    )
+    .map_err(|e| std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e))?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
 
@@ -44,12 +54,24 @@ fn create_ssl_connection(
         .build()
         .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-    connector
-        .connect(host, stream)
-        .map_err(|e| std::io::Error::other(e.to_string()))
+    connector.connect(host, stream).map_err(|e| match e {
+        native_tls::HandshakeError::Failure(e) => {
+            std::io::Error::other(format!("TLS handshake failed: {e}"))
+        }
+        native_tls::HandshakeError::WouldBlock(_) => {
+            std::io::Error::other("TLS handshake blocked: retry required")
+        }
+    })
 }
 
-pub fn register_openssl_library(lua: &Lua, capability_ctx: &NseCapabilityContext) -> LuaResult<()> {
+/// Provider-backed openssl registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_openssl_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let openssl = lua.create_table()?;
 
@@ -67,6 +89,7 @@ pub fn register_openssl_library(lua: &Lua, capability_ctx: &NseCapabilityContext
 
     // openssl.connect() - Connect with TLS
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let connect_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "openssl.connect");
         if decision.is_denied() {
@@ -86,7 +109,14 @@ pub fn register_openssl_library(lua: &Lua, capability_ctx: &NseCapabilityContext
         let host_clone = host.clone();
         let port_clone = port;
 
-        match create_ssl_connection(&host, port, cap_ctx.allows_insecure_tls()) {
+        match create_ssl_connection(
+            &cap_ctx,
+            &svc,
+            &host,
+            port,
+            cap_ctx.allows_insecure_tls(),
+            "openssl.connect",
+        ) {
             Ok(_tls_stream) => {
                 result.set("success", true)?;
                 result.set("host", host)?;
@@ -113,6 +143,7 @@ pub fn register_openssl_library(lua: &Lua, capability_ctx: &NseCapabilityContext
 
     // openssl.get_certificate() - Get server certificate
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let get_certificate_fn = lua.create_function(move |lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "openssl.get_certificate");
         if decision.is_denied() {
@@ -136,37 +167,30 @@ pub fn register_openssl_library(lua: &Lua, capability_ctx: &NseCapabilityContext
             .build()
         {
             Ok(connector) => {
-                let addr = format!("{}:{}", host, port);
-                let socket_addr: std::net::SocketAddr = match addr.parse() {
-                    Ok(a) => a,
-                    Err(_) => {
-                        result.set("subject", format!("CN={}", host))?;
-                        result.set("issuer", "Let's Encrypt")?;
-                        result.set("valid", true)?;
-                        return Ok(result);
-                    }
-                };
+                // Brokered connect replaces the literal-parse +
+                // `TcpStream::connect_timeout` form; unresolvable hosts
+                // fall through to the stub-data fallback below.
+                if let Ok((stream, _endpoint)) = BrokeredTcpStream::connect(
+                    &cap_ctx,
+                    &svc,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "openssl.get_certificate",
+                ) {
+                    if let Ok(tls_stream) = connector.connect(host.as_str(), stream) {
+                        if let Ok(Some(_c)) = tls_stream.peer_certificate() {
+                            result.set("subject", format!("CN={}", host))?;
+                            result.set("issuer", "Let's Encrypt")?;
+                            result.set("valid", true)?;
 
-                if let Ok(stream) =
-                    TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10))
-                {
-                    if let Ok(tls_stream) = connector.connect(&host, stream) {
-                        let peer_cert = tls_stream.peer_certificate();
+                            // Get SANs - native-tls doesn't expose this directly, return stub
+                            let san_table = lua.create_table()?;
+                            san_table.set(1, format!("*.{}", host))?;
+                            san_table.set(2, host)?;
+                            result.set("subject_alt_name", san_table)?;
 
-                        if let Ok(cert) = peer_cert {
-                            if let Some(_c) = cert {
-                                result.set("subject", format!("CN={}", host))?;
-                                result.set("issuer", "Let's Encrypt")?;
-                                result.set("valid", true)?;
-
-                                // Get SANs - native-tls doesn't expose this directly, return stub
-                                let san_table = lua.create_table()?;
-                                san_table.set(1, format!("*.{}", host))?;
-                                san_table.set(2, host)?;
-                                result.set("subject_alt_name", san_table)?;
-
-                                return Ok(result);
-                            }
+                            return Ok(result);
                         }
                     }
                 }
@@ -188,6 +212,7 @@ pub fn register_openssl_library(lua: &Lua, capability_ctx: &NseCapabilityContext
 
     // openssl.verify() - Verify certificate
     let cap_ctx = capability_ctx.clone();
+    let svc = services.clone();
     let verify_fn = lua.create_function(move |_lua, (host, port): (String, u16)| {
         let decision = wrappers::check_crypto(&cap_ctx, "openssl.verify");
         if decision.is_denied() {
@@ -209,27 +234,30 @@ pub fn register_openssl_library(lua: &Lua, capability_ctx: &NseCapabilityContext
         // Try to verify the connection
         match native_tls::TlsConnector::builder().build() {
             Ok(connector) => {
-                let addr = format!("{}:{}", host, port);
-                let socket_addr: std::net::SocketAddr = match addr.parse() {
-                    Ok(a) => a,
-                    Err(_) => {
-                        result.set("valid", false)?;
-                        result.set("error", "Invalid address")?;
-                        result.set("error_code", -1)?;
-                        return Ok(result);
-                    }
-                };
-
-                match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-                    Ok(stream) => match connector.connect(&host, stream) {
+                // Brokered connect replaces the literal-parse +
+                // `TcpStream::connect_timeout` form.
+                match BrokeredTcpStream::connect(
+                    &cap_ctx,
+                    &svc,
+                    &host,
+                    port,
+                    Duration::from_secs(10),
+                    "openssl.verify",
+                ) {
+                    Ok((stream, _endpoint)) => match connector.connect(host.as_str(), stream) {
                         Ok(_) => {
                             result.set("valid", true)?;
                             result.set("error", "")?;
                             result.set("error_code", 0)?;
                         }
-                        Err(e) => {
+                        Err(native_tls::HandshakeError::Failure(e)) => {
                             result.set("valid", false)?;
-                            result.set("error", e.to_string())?;
+                            result.set("error", format!("TLS handshake failed: {e}"))?;
+                            result.set("error_code", -1)?;
+                        }
+                        Err(native_tls::HandshakeError::WouldBlock(_)) => {
+                            result.set("valid", false)?;
+                            result.set("error", "TLS handshake blocked: retry required")?;
                             result.set("error_code", -1)?;
                         }
                     },

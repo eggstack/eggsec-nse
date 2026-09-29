@@ -3,39 +3,46 @@
 //! Apache Cassandra NoSQL database support.
 //! Based on Nmap's cassandra library.
 
+use crate::capabilities::NseCapabilityContext;
+use crate::providers::{broker_tcp_connect, broker_tcp_receive, broker_tcp_send, NseHostServices};
 use mlua::{Lua, Result as LuaResult};
-use std::io::{Read, Write};
-use std::net::TcpStream;
 use std::time::Duration;
 
-pub fn register_cassandra_library(lua: &Lua) -> LuaResult<()> {
+/// Provider-backed cassandra registration.
+///
+/// `services` backs every TCP connect/send/receive path.
+pub fn register_cassandra_library_with_services(
+    lua: &Lua,
+    capability_ctx: &NseCapabilityContext,
+    services: &NseHostServices,
+) -> LuaResult<()> {
     let globals = lua.globals();
     let cassandra = lua.create_table()?;
 
     cassandra.set(
         "connect",
-        lua.create_function(
-            |lua, (host, port, _keyspace): (String, u16, Option<String>)| {
+        lua.create_function({
+            let ctx = capability_ctx.clone();
+            let services = services.clone();
+            move |lua, (host, port, _keyspace): (String, u16, Option<String>)| {
                 let result = lua.create_table()?;
+                let timeout = Duration::from_secs(10);
 
-                let addr = format!("{}:{}", host, port);
-                let socket_addr = match addr.parse::<std::net::SocketAddr>() {
-                    Ok(a) => a,
+                let (mut handle, _endpoint) = match broker_tcp_connect(
+                    &ctx,
+                    &services,
+                    &host,
+                    port,
+                    timeout,
+                    "cassandra.connect",
+                ) {
+                    Ok(pair) => pair,
                     Err(e) => {
                         result.set("status", "error")?;
-                        result.set("error", format!("Invalid address \'{}\': {}", addr, e))?;
+                        result.set("error", e)?;
                         return Ok(result);
                     }
                 };
-                let mut stream =
-                    match TcpStream::connect_timeout(&socket_addr, Duration::from_secs(10)) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            result.set("status", "error")?;
-                            result.set("error", e.to_string())?;
-                            return Ok(result);
-                        }
-                    };
 
                 // Cassandra STARTUP message
                 let startup = vec![
@@ -46,10 +53,13 @@ pub fn register_cassandra_library(lua: &Lua) -> LuaResult<()> {
                     0x00, 0x00, // Opcode (STARTUP)
                 ];
 
-                stream.write_all(&startup).ok();
+                let _ = broker_tcp_send(&ctx, handle.as_mut(), &startup, "cassandra.connect");
 
+                let data = broker_tcp_receive(&ctx, handle.as_mut(), 1024, "cassandra.connect")
+                    .unwrap_or_default();
                 let mut response = [0u8; 1024];
-                let n = stream.read(&mut response).unwrap_or(0);
+                let n = data.len().min(response.len());
+                response[..n].copy_from_slice(&data[..n]);
 
                 result.set("status", "ok")?;
                 result.set("connected", n > 0)?;
@@ -58,8 +68,8 @@ pub fn register_cassandra_library(lua: &Lua) -> LuaResult<()> {
                 result.set("cql_version", "3.4.0")?;
 
                 Ok(result)
-            },
-        )?,
+            }
+        })?,
     )?;
 
     cassandra.set(
