@@ -443,9 +443,10 @@ while read -r f; do
     esac
 done < <(cat scripts/nse-specialized-advisory.txt scripts/nse-specialized-ungated.txt)
 
-# 1/2: classification file integrity + coverage of the current residual.
-# A classified line is `<path> <CLASS> <rationale...>`; the class must be
-# one of the recorded effect shapes and the rationale must be present.
+# 1/2/5: classification file integrity + coverage of the current residual
+# + preservation of the frozen M005E baseline. A classified line is
+# `<path> <CLASS> <rationale...>`; the class must be one of the recorded
+# effect shapes and the rationale must be present.
 known_class() {
     case "$1" in
         BrokerCompatibleTcp | BrokerCompatibleUdpConnected | AsyncDirectIo | \
@@ -484,6 +485,18 @@ for p in $(rg -o -e '^src/[^ ]+' scripts/nse-migration-classes.txt | sort -u); d
         exit 1
     fi
 done
+
+# 5: the frozen M005E baseline (97 files) must keep exactly one final
+# classification, so a migration can never erase the history it is
+# measured against.
+unclassified_baseline=$(comm -23 \
+    <(rg -o -e '^src/[^ ]+' scripts/nse-m005e-direct-io-baseline.txt | sort -u) \
+    <(rg -o -e '^src/[^ ]+' scripts/nse-migration-classes.txt | sort -u))
+if [ -n "$unclassified_baseline" ]; then
+    echo "M007B violation: M005E baseline entries lost their final migration class:" >&2
+    printf '%s\n' "$unclassified_baseline" >&2
+    exit 1
+fi
 
 # Provider/broker infrastructure must never be counted as a specialized
 # protocol residual (ADR-0003: the provider zone owns native mechanics).

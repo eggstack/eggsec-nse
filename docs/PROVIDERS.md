@@ -650,12 +650,21 @@ shape the current provider contract cannot represent:
 - native socket handoff to `ssh2::Session`: `libssh2`, `ssh`, `ssh2`;
 - public sync compatibility surface: `public_api/api.rs`.
 
-`scripts/nse-migration-classes.txt` keeps one final class per original
-M005E entry (plus the two DNS entries the corrected scan discovered), and
-`scripts/check-boundaries.sh` fails if a `BrokerCompatible*` /
+`scripts/nse-m005e-direct-io-baseline.txt` freezes the original 97
+paths as history, `scripts/nse-migration-classes.txt` keeps one final
+class per baseline entry plus the two DNS entries the corrected scan
+discovered (99 lines), and `scripts/check-boundaries.sh` fails if a
+baseline entry loses its class, if a `BrokerCompatible*` /
 `ProviderBackedDns` class is ever left on a file that still holds a
 direct effect, if a residual file has no class, or if
 provider/broker infrastructure re-enters the pins.
+
+Final class distribution across the 99 classified paths: 74
+`BrokerCompatibleTcp`, 17 `UnconnectedDatagram`, 3 `NativeHandleEscape`,
+1 `BrokerCompatibleUdpConnected`, 1 `RawPacketOrInterface`, 1
+`PublicCompatibilityApi`, 2 `ProviderBackedDns`. `AsyncDirectIo` is
+empty — the audit found no structural async anywhere in the cohort;
+every tokio use was bridge-only and has been removed.
 
 ### Promotion rule
 

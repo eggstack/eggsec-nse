@@ -1822,6 +1822,45 @@ mod tests {
     }
 
     #[test]
+    fn m005e_baseline_keeps_exactly_one_class() {
+        // The frozen M005E baseline (97 files) is history, not current
+        // state. Every one of its paths must still carry exactly one
+        // final classification in scripts/nse-migration-classes.txt, so a
+        // migration can never erase the history it is measured against.
+        let baseline: std::collections::BTreeSet<&str> =
+            include_str!("../scripts/nse-m005e-direct-io-baseline.txt")
+                .lines()
+                .filter(|l| !l.trim_start().starts_with('#') && !l.trim().is_empty())
+                .collect();
+        assert_eq!(
+            baseline.len(),
+            97,
+            "the M005E baseline must stay frozen at 97 files"
+        );
+
+        let mut classified: std::collections::BTreeMap<&str, usize> =
+            std::collections::BTreeMap::new();
+        for line in include_str!("../scripts/nse-migration-classes.txt").lines() {
+            if line.trim_start().starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+            *classified
+                .entry(line.split_whitespace().next().unwrap())
+                .or_default() += 1;
+        }
+
+        for path in &baseline {
+            let count = classified
+                .get(path)
+                .unwrap_or_else(|| panic!("M005E baseline entry {path} lost its migration class"));
+            assert_eq!(
+                *count, 1,
+                "M005E baseline entry {path} must have exactly one class, found {count}"
+            );
+        }
+    }
+
+    #[test]
     fn migrated_cohort_is_promoted_to_provider_backed() {
         // M007B promoted the broker-compatible cohort. Each name must be
         // `ProviderBacked` so automated profiles get it, which is only

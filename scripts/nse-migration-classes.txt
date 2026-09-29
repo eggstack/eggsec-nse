@@ -84,6 +84,7 @@ src/libraries/cvs.rs BrokerCompatibleTcp blocking connects + plain read/write.
 src/libraries/dicom.rs BrokerCompatibleTcp single blocking connect + exchange.
 src/libraries/drda.rs BrokerCompatibleTcp single blocking connect + exchange.
 src/libraries/ftp.rs BrokerCompatibleTcp blocking TCP core (all sites rewired) plus spawn_blocking async aliases now on the broker.
+src/libraries/finger.rs BrokerCompatibleTcp blocking TCP + bridge-only async entry; query_async rewired. Broker-migrated, not registered.
 src/libraries/helpers.rs BrokerCompatibleTcp dead direct-connect helpers (tls_connect/tcp_connect_with_timeout + make_addr/parse_socket_addr, zero production callers) removed in M007B; the remaining reqwest client builders are shared HTTP helpers, not socket effects.
 src/libraries/http2.rs BrokerCompatibleTcp async-only entry with blocking connect-style semantics, rewired to brokered sync.
 src/libraries/iec61850mms.rs BrokerCompatibleTcp single blocking connect + exchange.
