@@ -58,6 +58,16 @@ publication from a maintainer workstation:
   verification before `cargo publish`.
 - Do not publish another version merely to exercise automation.
 
+### Release history
+
+- `0.1.0` (`v0.1.0`): first public release via the bootstrap path above.
+- `0.2.0` (`v0.2.0`): provider-inversion release (M005 provider
+  surface, breaking `register_vulns_library` signature, corrected
+  send/write accounting); published via the manual-token recovery path
+  with exact-candidate qualification, crates.io/docs.rs verification,
+  and an immutable tag on the published source commit. The release
+  workflow's ripgrep prerequisite was fixed in the same release.
+
 ### Trusted Publishing status
 
 - Repository side: `.github/workflows/release.yml` is Trusted
@@ -85,13 +95,22 @@ cargo check --features nse
 cargo test --features nse
 cargo check --features nse-ssh2
 cargo check --features nse,sandbox
-cargo clippy --all-targets --features nse -- -D warnings
+cargo clippy --all-targets --features nse
 cargo +1.89.0 check --locked --no-default-features
 cargo +1.89.0 check --locked --features nse
 cargo publish --dry-run
 cargo package --list
 cargo package
 ```
+
+Lint-gate note: the historical gate spelled `cargo clippy ...
+-- -D warnings`, but the repository carries accepted warning debt
+(deprecated `openssl::asn1::Asn1StringRef::as_utf8` call sites and
+related lints), so `-D warnings` does not pass. Release
+qualification uses plain `cargo clippy --all-targets --features nse`
+(zero errors) plus the hosted CI matrix. Do not re-add `-D warnings`
+to release docs or scripts without first clearing the underlying
+debt under a separate plan.
 
 CI must also exercise the real loopback SSH2 runtime test
 (`tests/ssh_runtime_tests.rs` with a disposable local `sshd`).

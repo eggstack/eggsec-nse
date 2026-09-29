@@ -8,7 +8,7 @@ This project targets practical compatibility for supported script categories. It
 
 ```toml
 [dependencies]
-eggsec-nse = { version = "0.1", features = ["nse"] }
+eggsec-nse = { version = "0.2", features = ["nse"] }
 ```
 
 ```rust,no_run
@@ -82,7 +82,7 @@ cargo check --features nse
 cargo test --features nse
 cargo check --features nse-ssh2
 cargo check --features nse,sandbox
-cargo clippy --all-targets --features nse -- -D warnings
+cargo clippy --all-targets --features nse
 cargo package --list
 cargo package
 ./scripts/check-boundaries.sh

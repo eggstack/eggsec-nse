@@ -44,6 +44,19 @@ jobs:
             exit 1
           }
       - run: cargo fmt --all --check
+      - name: Install ripgrep (required by scripts/check-boundaries.sh)
+        run: |
+          set -euo pipefail
+          if ! command -v rg >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y ripgrep
+            else
+              echo "ripgrep (rg) is required by scripts/check-boundaries.sh and no supported installer was found" >&2
+              exit 1
+            fi
+          fi
+          rg --version
       - run: ./scripts/check-boundaries.sh
       - run: cargo metadata --no-deps
       - run: cargo check --no-default-features
