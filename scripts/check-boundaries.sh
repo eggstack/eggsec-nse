@@ -314,4 +314,53 @@ if [ -n "$platform_violation" ]; then
     exit 1
 fi
 
+# M007A automated library effect gate: complete manifest coverage, no silent
+# unsafe expansion, M005E agreement, native HTTP never authority-bound.
+#
+# - every `register_*_library` call in ExecutorCore::register_libraries()
+#   must have a matching manifest entry (by register_fn name);
+# - the post-registration scrub must exist and run (covers manual-only libs
+#   whose call sites bypass gate_then_register);
+# - representative M005E residual libraries must classify ManualOnly;
+# - native constructors must default http_authority_bound to false; only
+#   with_authority_bound_http() may set it true.
+for regfn in $(rg -o --no-heading -e 'register_[a-z0-9_]+_library' src/executor_core.rs | sort -u); do
+    if ! rg -q -F "$regfn" src/effect_manifest.rs; then
+        echo "M007A violation: $regfn has no effect-manifest entry (see src/effect_manifest.rs)" >&2
+        exit 1
+    fi
+done
+
+if ! rg -q 'fn scrub_ineligible_globals' src/executor_core.rs; then
+    echo "M007A violation: scrub_ineligible_globals missing (automated profiles would retain ungated unsafe globals)" >&2
+    exit 1
+fi
+
+if ! rg -q 'scrub_ineligible_globals\(\)' src/executor_core.rs; then
+    echo "M007A violation: scrub_ineligible_globals never called in register_libraries()" >&2
+    exit 1
+fi
+
+# Representative M005E residuals must stay manual-only in the manifest.
+for lib in pop3 smb ftp ssh sslcert tftp sip; do
+    if ! rg -q -e "name: \"$lib\"" src/effect_manifest.rs; then
+        echo "M007A violation: representative library '$lib' missing from manifest" >&2
+        exit 1
+    fi
+done
+if grep -A4 -F 'name: "pop3"' src/effect_manifest.rs | rg -q -e 'Eligibility::(Pure|ProviderBacked)'; then
+    echo "M007A violation: pop3 promoted out of manual-only without provider-backed evidence" >&2
+    exit 1
+fi
+
+# Native HTTP must never default to authority-bound.
+if ! rg -q 'http_authority_bound: false' src/providers.rs; then
+    echo "M007A violation: native NseHostServices lost its authority-bound=false default" >&2
+    exit 1
+fi
+if rg -n 'http_authority_bound: true' src/providers.rs | rg -v 'with_authority_bound_http|//'; then
+    echo "M007A violation: http_authority_bound set true outside with_authority_bound_http()" >&2
+    exit 1
+fi
+
 echo "standalone boundary and provenance checks passed"

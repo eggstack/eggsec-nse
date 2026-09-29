@@ -988,8 +988,12 @@ impl ExecutorCore {
             &self.capability_context,
             &self.host_services,
         )?;
-        crate::libraries::sslcert::register_sslcert_library(&self.lua, &self.capability_context)?;
-        crate::libraries::tls::register_tls_library(&self.lua, &self.capability_context)?;
+        self.gate_then_register("sslcert", |ctx| {
+            crate::libraries::sslcert::register_sslcert_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("tls", |ctx| {
+            crate::libraries::tls::register_tls_library(&ctx.lua, &ctx.capability_context)
+        })?;
         crate::libraries::shortport::register_shortport_library(&self.lua)?;
         crate::libraries::socket::register_socket_library_with_services(
             &self.lua,
@@ -998,37 +1002,73 @@ impl ExecutorCore {
             &self.host_services,
         )?;
         crate::libraries::ssh2::register_ssh2_library(&self.lua)?;
-        crate::libraries::ftp::register_ftp_library(&self.lua, &self.capability_context)?;
-        crate::libraries::smtp::register_smtp_library(&self.lua, &self.capability_context)?;
-        crate::libraries::mysql::register_mysql_library(&self.lua, &self.capability_context)?;
-        crate::libraries::postgres::register_postgres_library(&self.lua, &self.capability_context)?;
-        crate::libraries::mssql::register_mssql_library(&self.lua, &self.capability_context)?;
-        crate::libraries::redis::register_redis_library(&self.lua, &self.capability_context)?;
-        crate::libraries::mongodb::register_mongodb_library(&self.lua, &self.capability_context)?;
-        crate::libraries::ldap::register_ldap_library(&self.lua, &self.capability_context)?;
-        crate::libraries::snmp::register_snmp_library(&self.lua, &self.capability_context)?;
-        crate::libraries::smb::register_smb_library(&self.lua, &self.capability_context)?;
-        crate::libraries::smb2::register_smb2_library(&self.lua, &self.capability_context)?;
+        self.gate_then_register("ftp", |ctx| {
+            crate::libraries::ftp::register_ftp_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("smtp", |ctx| {
+            crate::libraries::smtp::register_smtp_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("mysql", |ctx| {
+            crate::libraries::mysql::register_mysql_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("postgres", |ctx| {
+            crate::libraries::postgres::register_postgres_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("mssql", |ctx| {
+            crate::libraries::mssql::register_mssql_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("redis", |ctx| {
+            crate::libraries::redis::register_redis_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("mongodb", |ctx| {
+            crate::libraries::mongodb::register_mongodb_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("ldap", |ctx| {
+            crate::libraries::ldap::register_ldap_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("snmp", |ctx| {
+            crate::libraries::snmp::register_snmp_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("smb", |ctx| {
+            crate::libraries::smb::register_smb_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("smb2", |ctx| {
+            crate::libraries::smb2::register_smb2_library(&ctx.lua, &ctx.capability_context)
+        })?;
         crate::libraries::smbauth::register_smbauth_library(&self.lua)?;
-        crate::libraries::rdp::register_rdp_library(&self.lua, &self.capability_context)?;
-        crate::libraries::vnc::register_vnc_library(&self.lua, &self.capability_context)?;
-        crate::libraries::ntp::register_ntp_library(&self.lua, &self.capability_context)?;
+        self.gate_then_register("rdp", |ctx| {
+            crate::libraries::rdp::register_rdp_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("vnc", |ctx| {
+            crate::libraries::vnc::register_vnc_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("ntp", |ctx| {
+            crate::libraries::ntp::register_ntp_library(&ctx.lua, &ctx.capability_context)
+        })?;
         crate::libraries::memcached::register_memcached_library(&self.lua)?;
-        crate::libraries::imap::register_imap_library(&self.lua, &self.capability_context)?;
+        self.gate_then_register("imap", |ctx| {
+            crate::libraries::imap::register_imap_library(&ctx.lua, &ctx.capability_context)
+        })?;
         crate::libraries::pop3::register_pop3_library(&self.lua)?;
         crate::libraries::netbios::register_netbios_library(&self.lua)?;
         crate::libraries::oracle::register_oracle_library(&self.lua)?;
         crate::libraries::winrm::register_winrm_library(&self.lua)?;
         crate::libraries::radius::register_radius_library(&self.lua)?;
-        crate::libraries::dhcp::register_dhcp_library(&self.lua, &self.capability_context)?;
-        crate::libraries::dhcp6::register_dhcp6_library(&self.lua, &self.capability_context)?;
+        self.gate_then_register("dhcp", |ctx| {
+            crate::libraries::dhcp::register_dhcp_library(&ctx.lua, &ctx.capability_context)
+        })?;
+        self.gate_then_register("dhcp6", |ctx| {
+            crate::libraries::dhcp6::register_dhcp6_library(&ctx.lua, &ctx.capability_context)
+        })?;
         crate::libraries::sip::register_sip_library(&self.lua)?;
         crate::libraries::tftp::register_tftp_library(&self.lua)?;
-        crate::libraries::upnp::register_upnp_library_with_services(
-            &self.lua,
-            &self.capability_context,
-            &self.host_services,
-        )?;
+        self.gate_then_register("upnp", |ctx| {
+            crate::libraries::upnp::register_upnp_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
+        })?;
         crate::libraries::tns::register_tns_library(&self.lua)?;
         crate::libraries::afp::register_afp_library(&self.lua)?;
         crate::libraries::amqp::register_amqp_library(&self.lua)?;
@@ -1060,7 +1100,9 @@ impl ExecutorCore {
         )?;
         crate::libraries::url::register_url_library(&self.lua)?;
         crate::libraries::creds::register_creds_library(&self.lua, &self.capability_context)?;
-        crate::libraries::openssl::register_openssl_library(&self.lua, &self.capability_context)?;
+        self.gate_then_register("openssl", |ctx| {
+            crate::libraries::openssl::register_openssl_library(&ctx.lua, &ctx.capability_context)
+        })?;
         crate::libraries::pcre::register_pcre_library(&self.lua)?;
         crate::libraries::io::register_io_library_with_services(
             &self.lua,
@@ -1087,17 +1129,21 @@ impl ExecutorCore {
             &self.host_services,
         )?;
         crate::libraries::unpwdb::register_unpwdb_library(&self.lua, &self.capability_context)?;
-        crate::libraries::brute::register_brute_library_with_services(
-            &self.lua,
-            &self.capability_context,
-            &self.host_services,
-        )?;
+        self.gate_then_register("brute", |ctx| {
+            crate::libraries::brute::register_brute_library_with_services(
+                &ctx.lua,
+                &ctx.capability_context,
+                &ctx.host_services,
+            )
+        })?;
         crate::libraries::datafiles::register_datafiles_library(
             &self.lua,
             &self.capability_context,
         )?;
         crate::libraries::json::register_json_library(&self.lua)?;
-        crate::libraries::ssh::register_ssh_library(&self.lua, &self.capability_context)?;
+        self.gate_then_register("ssh", |ctx| {
+            crate::libraries::ssh::register_ssh_library(&ctx.lua, &ctx.capability_context)
+        })?;
         crate::libraries::dns::register_dns_library_with_services(
             &self.lua,
             &self.capability_context,
@@ -1144,7 +1190,9 @@ impl ExecutorCore {
         crate::libraries::proxy::register_proxy_library(&self.lua)?;
         crate::libraries::srvloc::register_srvloc_library(&self.lua)?;
         crate::libraries::wsdd::register_wsdd_library(&self.lua)?;
-        crate::libraries::xdmcp::register_xdmcp_library(&self.lua, &self.capability_context)?;
+        self.gate_then_register("xdmcp", |ctx| {
+            crate::libraries::xdmcp::register_xdmcp_library(&ctx.lua, &ctx.capability_context)
+        })?;
         crate::libraries::bjnp::register_bjnp_library(&self.lua)?;
         crate::libraries::cvs::register_cvs_library(&self.lua)?;
         crate::libraries::dnssd::register_dnssd_library(&self.lua)?;
@@ -1155,7 +1203,9 @@ impl ExecutorCore {
         crate::libraries::ipmi::register_ipmi_library(&self.lua)?;
         crate::libraries::irc::register_irc_library(&self.lua)?;
         crate::libraries::versant::register_versant_library(&self.lua)?;
-        crate::libraries::omp2::register_omp2_library(&self.lua, &self.capability_context)?;
+        self.gate_then_register("omp2", |ctx| {
+            crate::libraries::omp2::register_omp2_library(&ctx.lua, &ctx.capability_context)
+        })?;
         crate::libraries::gps::register_gps_library(&self.lua)?;
         crate::libraries::mobileme::register_mobileme_library(&self.lua)?;
         crate::libraries::ls::register_ls_library(&self.lua, &self.capability_context)?;
@@ -1175,7 +1225,9 @@ impl ExecutorCore {
             &self.capability_context,
             &self.host_services,
         )?;
-        crate::libraries::libssh2::register_libssh2_library(&self.lua, &self.capability_context)?;
+        self.gate_then_register("libssh2", |ctx| {
+            crate::libraries::libssh2::register_libssh2_library(&ctx.lua, &ctx.capability_context)
+        })?;
         crate::libraries::msrpcperformance::register_msrpcperformance_library(&self.lua)?;
         crate::libraries::msrpctypes::register_msrpctypes_library(&self.lua)?;
         crate::libraries::oops::register_oops_library(&self.lua)?;
@@ -1186,11 +1238,100 @@ impl ExecutorCore {
         crate::libraries::listop::register_listop_library(&self.lua)?;
         crate::libraries::zlib::register_zlib_library(&self.lua, &self.capability_context)?;
 
+        self.scrub_ineligible_globals()?;
         self.sync_require_modules()
+    }
+
+    /// M007A: post-registration scrub ensuring AgentSafe/CiSafe never retain
+    /// unsafe globals.
+    ///
+    /// Only 27 of the 106 manual-only libraries route through
+    /// `gate_then_register()` at their call site; the remainder are
+    /// registered unconditionally for manual compatibility. This scrub runs
+    /// after all registrations (but before any script executes) and replaces
+    /// every manifest-ineligible global with `nil` under automated profiles,
+    /// so direct-global access and dynamic `require()` both fail closed.
+    /// Manual profiles are untouched.
+    fn scrub_ineligible_globals(&self) -> LuaResult<()> {
+        if !crate::effect_manifest::is_automated_profile(self.profile_kind) {
+            return Ok(());
+        }
+        let globals = self.lua.globals();
+        for entry in crate::effect_manifest::LIBRARY_EFFECT_MANIFEST
+            .iter()
+            .filter(|e| !crate::effect_manifest::eligible_for_profile(e.name, self.profile_kind))
+        {
+            // `set` to Nil removes the global; ignore errors so one
+            // missing global cannot break executor construction.
+            if globals.set(entry.name, mlua::Value::Nil).is_err() {
+                tracing::warn!(
+                    library = entry.name,
+                    "M007A scrub: failed to remove ineligible global"
+                );
+            } else {
+                tracing::debug!(
+                    library = entry.name,
+                    eligibility = %entry.eligibility,
+                    "M007A scrub: removed ineligible global under automated profile"
+                );
+            }
+        }
+        Ok(())
     }
 
     fn sync_require_modules(&self) -> LuaResult<()> {
         shared::sync_require_modules(&self.lua)
+    }
+
+    /// Conditionally register a Lua library/global based on its
+    /// automated-profile eligibility.
+    ///
+    /// Behavior:
+    /// - If the library is eligible under the current
+    ///   [`NseExecutionProfileKind`], the registration closure runs
+    ///   normally.
+    /// - If the library is not eligible under an automated profile
+    ///   (`AgentSafe` / `CiSafe`), the pre-set empty global table is
+    ///   replaced with `nil` so direct-global access and dynamic
+    ///   `require()` both fail closed (a Lua `nil` index raises
+    ///   "attempt to index a nil value").
+    /// - If the library is not eligible under a manual profile, the
+    ///   registration closure runs normally (manual compatibility is
+    ///   preserved per ADR-0004 §3).
+    ///
+    /// This is the M007A registration gate. The same classification is
+    /// consulted by `setup_require()` to produce a
+    /// [`NseRequiredModuleSource::BlockedByPolicy`] record when a
+    /// script attempts to `require()` an unsafe name under an
+    /// automated profile.
+    fn gate_then_register<F>(&self, name: &'static str, register_fn: F) -> LuaResult<()>
+    where
+        F: FnOnce(&ExecutorCore) -> LuaResult<()>,
+    {
+        let eligibility = crate::effect_manifest::automated_library_eligibility(name);
+        let profile = self.profile_kind;
+        let is_safe = crate::effect_manifest::eligible_for_profile(name, profile);
+
+        if is_safe {
+            register_fn(self)
+        } else if crate::effect_manifest::is_automated_profile(profile) {
+            // Unsafe under automated profile: delete the pre-set global
+            // so direct-global access and dynamic require() both fail
+            // closed. Lua will raise "attempt to index a nil value"
+            // when a script touches `name` (or requires it).
+            let globals = self.lua.globals();
+            globals.set(name, mlua::Value::Nil)?;
+            tracing::debug!(
+                library = name,
+                ?eligibility,
+                ?profile,
+                "M007A: blocked unsafe library under automated profile"
+            );
+            Ok(())
+        } else {
+            // Manual profile: register anyway for compatibility.
+            register_fn(self)
+        }
     }
 
     fn setup_require(&self, _scripts_path: Arc<Mutex<Vec<PathBuf>>>) -> LuaResult<()> {
@@ -1201,6 +1342,7 @@ impl ExecutorCore {
         let module_policy = self.module_policy.clone();
         let limits = self.limits.clone();
         let cancellation = self.cancellation.clone();
+        let profile_kind = self.profile_kind;
 
         fn record_required_module(
             required_modules: &Arc<Mutex<Vec<NseRequiredModuleReport>>>,
@@ -1220,6 +1362,28 @@ impl ExecutorCore {
         }
 
         let require_fn = self.lua.create_function(move |lua, name: String| {
+            // M007A: dynamic require gate. Check the same manifest as
+            // the registration gate before resolving from cache,
+            // _REQUIRE_MODULES, or globals. Unsafe libraries under
+            // automated profiles produce a BlockedByPolicy report
+            // (visible in `NseRunReport.libraries`) and a runtime error.
+            if !crate::effect_manifest::eligible_for_profile(&name, profile_kind) {
+                let deny_reason = format!(
+                    "library '{}' is not eligible under automated profile '{}'",
+                    name, profile_kind
+                );
+                record_required_module(
+                    &required_modules,
+                    NseRequiredModuleReport {
+                        name: name.clone(),
+                        loaded: false,
+                        source: NseRequiredModuleSource::BlockedByPolicy,
+                        error: Some(deny_reason.clone()),
+                    },
+                );
+                return Err(mlua::Error::RuntimeError(deny_reason));
+            }
+
             if cancellation.is_cancelled() {
                 return Err(mlua::Error::RuntimeError(
                     "Require cancelled".to_string(),

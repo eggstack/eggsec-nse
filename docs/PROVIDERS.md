@@ -494,3 +494,65 @@ connect, and script-supplied host identity on the HTTP request;
 concurrent full runs isolate bundles/filesystem/CWD; cancelled and
 deny-all contexts block all seven brokered domains with zero provider
 contact; denied Lua runs record denials with zero provider contact.
+
+## M007A — automated library effect gate and HTTP authority assurance
+
+Fail-closed automated-profile boundary over every Lua library/global,
+plus an explicit authority contract for automated HTTP.
+
+### Effect manifest
+
+`src/effect_manifest.rs` (`LIBRARY_EFFECT_MANIFEST`, 159 entries) classifies
+every `register_*_library` call in `ExecutorCore::register_libraries()`:
+
+| Class | Meaning | Automated profiles |
+|---|---|---|
+| `Pure` (35) | no host side effects | allowed |
+| `ProviderBacked` (18) | effects route through the capability-aware broker | allowed |
+| `ManualOnlyDirectIo` (80) | direct host I/O remains, no provider injection | denied |
+| `ManualOnlyAdvisory` (26) | capability gate exists but effects stay outside provider accounting/authority | denied |
+
+Unknown/unclassified names resolve to `ManualOnlyDirectIo` (deny by
+default, ADR-0004 §3). The manifest is additive: the public
+`NseLibraryDescriptor` struct layout is untouched.
+
+The 72-file ungated + 25-file advisory M005E residual sets map to the
+two manual-only classes; no residual entry was promoted to
+automated-safe. Representative pins: `pop3` → `ManualOnlyDirectIo`,
+`smb` → `ManualOnlyAdvisory`, `http`/`stdnse` → `ProviderBacked`,
+`base64` → `Pure`.
+
+### Registration gate
+
+- 27 high-risk libraries route through `gate_then_register()` at their
+  call site (representative residual + advisory modules).
+- All remaining manual-only libraries are removed by
+  `scrub_ineligible_globals()`, which runs after every registration
+  (before any script executes) and sets each ineligible global to `nil`
+  under AgentSafe/CiSafe. Manual profiles are untouched.
+- Dynamic `require()` consults the same manifest and records
+  `NseRequiredModuleSource::BlockedByPolicy` for unsafe/unknown names
+  under automated profiles; `report.libraries` surfaces the denial as a
+  `blocked-by-policy` warning.
+
+Proven by `tests/effect_manifest_tests.rs` (direct-global absence for
+`pop3`/`sip`/`tftp`/`smbauth`/`memcached`/`netbios`/`ftp`/`smb`/`ssh`/`sslcert`
+under AgentSafe+CiSafe, presence under manual, safe globals retained,
+require blocked for unsafe/unknown, require succeeds for `json`) and the
+migrated `tests/local_protocol_tests.rs` denial tests (16 tests now assert
+the manifest block instead of network-capability events).
+
+### HTTP authority assurance
+
+`NseHostServices` carries an additive `http_authority_bound` flag
+(default `false`; only `with_authority_bound_http()` sets it `true`).
+`broker_http_request()` denies AgentSafe hostname requests before
+provider contact unless the bundle explicitly carries authority-bound
+assurance; CiSafe remains network-denied; manual profiles keep native
+behavior. No provider is treated as authority-bound merely because a
+capability pre-check occurred — the Eggsec adapter becomes the first
+authority-bound provider in M007D.
+
+Regeneration: `scripts/check-boundaries.sh` (M007A section) asserts
+manifest coverage of every `register_*_library` call, scrub presence,
+representative residual pins, and the `false`-by-default HTTP flag.

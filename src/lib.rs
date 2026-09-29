@@ -263,6 +263,7 @@ pub mod capabilities;
 pub mod context;
 #[cfg(feature = "nse")]
 pub mod cve;
+pub mod effect_manifest;
 #[cfg(feature = "nse")]
 pub mod executor;
 #[cfg(feature = "nse")]
@@ -316,6 +317,12 @@ pub use profile::{
 pub use resolver::{
     is_builtin_script, validate_nse_module_name, NseLoadDiagnostic, NseLoadError, NseModuleName,
     NseScriptSource, ResolvedNseModule, ResolvedNseScript, ScriptResolver,
+};
+
+pub use effect_manifest::{
+    automated_library_eligibility, classified_libraries, classify, eligibility_counts,
+    eligible_for_profile, is_automated_library_safe, is_automated_profile, EligibilityCounts,
+    LibraryEffectEntry, NseAutomatedLibraryEligibility,
 };
 
 pub use resolver::registry::{

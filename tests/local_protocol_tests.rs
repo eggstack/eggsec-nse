@@ -117,6 +117,38 @@ fn make_ci_safe_runtime_profile(roots: Vec<PathBuf>) -> ResolvedNseExecutionProf
 }
 
 /// Execute a fixture script against a local server and return the report.
+
+/// M007A: assert that a script's required library was blocked by the
+/// automated library effect gate (BlockedByPolicy source) and the
+/// script did not execute the network operation. After M007A, unsafe
+/// libraries under automated profiles are blocked at the
+/// `require()` gate rather than at the network-capability layer, so
+/// the capability_events list will be empty (no network call was
+/// attempted).
+fn assert_library_blocked_by_manifest(
+    report: &eggsec_nse::NseRunReport,
+    library: &str,
+    profile_label: &str,
+) {
+    let blocked: Vec<_> = report
+        .libraries
+        .iter()
+        .filter(|m| {
+            m.name == library
+                && !m.loaded
+                && m.warnings.iter().any(|w| w.contains("blocked-by-policy"))
+        })
+        .collect();
+    assert!(
+        !blocked.is_empty(),
+        "{} library '{}' must be blocked by M007A effect gate: modules={:?}, output={}",
+        profile_label,
+        library,
+        report.libraries,
+        report.output.content,
+    );
+}
+
 fn run_local_fixture(
     script_path: &str,
     target_ip: &str,
@@ -1458,17 +1490,7 @@ fn local_sslcert_get_certificate_agent_safe_denied() {
         Some("https"),
         &profile,
     );
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "AgentSafe sslcert get_certificate must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "sslcert", "AgentSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -1490,17 +1512,7 @@ fn local_sslcert_get_chain_certs_agent_safe_denied() {
         Some("https"),
         &profile,
     );
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "AgentSafe sslcert get_chain_certs must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "sslcert", "AgentSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -1522,17 +1534,7 @@ fn local_sslcert_get_certificate_ci_safe_denied() {
         Some("https"),
         &profile,
     );
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "CiSafe sslcert get_certificate must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "sslcert", "CiSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -1554,17 +1556,7 @@ fn local_sslcert_get_chain_certs_ci_safe_denied() {
         Some("https"),
         &profile,
     );
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "CiSafe sslcert get_chain_certs must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "sslcert", "CiSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -1729,17 +1721,8 @@ fn local_ftp_connect_agent_safe_denied() {
         Some("ftp"),
         &profile,
     );
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "AgentSafe FTP connect must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "ftp", "AgentSafe");
+    assert_eq!(server.hits(), 0, "AgentSafe ftp must not reach the server");
 }
 
 /// FTP connect under CiSafe: network TCP denied, zero hits.
@@ -1756,17 +1739,8 @@ fn local_ftp_connect_ci_safe_denied() {
         Some("ftp"),
         &profile,
     );
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "CiSafe FTP connect must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "ftp", "CiSafe");
+    assert_eq!(server.hits(), 0, "CiSafe ftp must not reach the server");
 }
 
 // ---------------------------------------------------------------------------
@@ -1787,17 +1761,8 @@ fn local_upnp_get_external_ip_agent_safe_denied() {
         Some("upnp"),
         &profile,
     );
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "AgentSafe UPnP get_external_ip must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "upnp", "AgentSafe");
+    assert_eq!(server.hits(), 0, "AgentSafe upnp must not reach the server");
 }
 
 /// UPnP get_external_ip under CiSafe: network TCP denied, zero hits.
@@ -1814,17 +1779,8 @@ fn local_upnp_get_external_ip_ci_safe_denied() {
         Some("upnp"),
         &profile,
     );
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "CiSafe UPnP get_external_ip must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "upnp", "CiSafe");
+    assert_eq!(server.hits(), 0, "CiSafe upnp must not reach the server");
 }
 
 // ---------------------------------------------------------------------------
@@ -1845,17 +1801,7 @@ fn local_httpspider_fetch_agent_safe_denied() {
         Some("http"),
         &profile,
     );
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "AgentSafe httpspider fetch must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "httpspider", "AgentSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -1877,17 +1823,7 @@ fn local_httpspider_fetch_ci_safe_denied() {
         Some("http"),
         &profile,
     );
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "CiSafe httpspider fetch must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "httpspider", "CiSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -1994,17 +1930,7 @@ fn local_xdmcp_connect_agent_safe_denied() {
         Some("xdmcp"),
         &profile,
     );
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "AgentSafe xdmcp.connect must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "xdmcp", "AgentSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -2026,17 +1952,7 @@ fn local_xdmcp_connect_ci_safe_denied() {
         Some("xdmcp"),
         &profile,
     );
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "CiSafe xdmcp.connect must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "xdmcp", "CiSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -2058,17 +1974,7 @@ fn local_dhcp_discover_agent_safe_denied() {
         None,
         &profile,
     );
-    let udp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_udp" && !e.allowed)
-        .collect();
-    assert!(
-        !udp_denials.is_empty(),
-        "AgentSafe dhcp.discover must produce network_udp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "dhcp", "AgentSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -2090,17 +1996,7 @@ fn local_dhcp_discover_ci_safe_denied() {
         None,
         &profile,
     );
-    let udp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_udp" && !e.allowed)
-        .collect();
-    assert!(
-        !udp_denials.is_empty(),
-        "CiSafe dhcp.discover must produce network_udp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "dhcp", "CiSafe");
     assert_eq!(
         server.hits(),
         0,
@@ -2126,17 +2022,7 @@ fn local_ftp_list_pasv_agent_safe_denied() {
         &profile,
     );
 
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "AgentSafe ftp.list must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "ftp", "AgentSafe");
 
     assert_eq!(
         server.control_hits(),
@@ -2165,17 +2051,7 @@ fn local_ftp_list_pasv_ci_safe_denied() {
         &profile,
     );
 
-    let tcp_denials: Vec<_> = report
-        .capability_events
-        .iter()
-        .filter(|e| e.kind == "network_tcp" && !e.allowed)
-        .collect();
-    assert!(
-        !tcp_denials.is_empty(),
-        "CiSafe ftp.list must produce network_tcp denial events: events={:?}, output={}",
-        report.capability_events,
-        report.output.content,
-    );
+    assert_library_blocked_by_manifest(&report, "ftp", "CiSafe");
 
     assert_eq!(
         server.control_hits(),

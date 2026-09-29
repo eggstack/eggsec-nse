@@ -164,6 +164,14 @@ pub struct NseHostServices {
     fs: Arc<dyn NseFilesystemProvider>,
     process: Arc<dyn NseProcessProvider>,
     http: Arc<dyn NseHttpProvider>,
+    /// M007A HTTP authority assurance. Default `false` — the native
+    /// reqwest provider is **not** authority-bound. Set to `true` only
+    /// when the injected HTTP provider carries the engine's existing
+    /// approved scope/authority (e.g. Eggsec's
+    /// `NseHttpTransportProvider` backed by `HttpTransport` +
+    /// `NetworkAuthority`). Under automated profiles, this is required
+    /// for HTTP to succeed.
+    http_authority_bound: bool,
 }
 
 impl std::fmt::Debug for NseHostServices {
@@ -178,6 +186,7 @@ impl std::fmt::Debug for NseHostServices {
             .field("has_fs", &true)
             .field("has_process", &true)
             .field("has_http", &true)
+            .field("http_authority_bound", &self.http_authority_bound)
             .finish()
     }
 }
@@ -201,6 +210,7 @@ impl NseHostServices {
             fs: Arc::new(NativeFilesystemProvider::new()),
             process: Arc::new(NativeProcessProvider),
             http: Arc::new(NativeHttpProvider::new()),
+            http_authority_bound: false,
         }
     }
 
@@ -224,6 +234,7 @@ impl NseHostServices {
             fs: Arc::new(NativeFilesystemProvider::new()),
             process: Arc::new(NativeProcessProvider),
             http: Arc::new(NativeHttpProvider::new()),
+            http_authority_bound: false,
         }
     }
 
@@ -246,6 +257,7 @@ impl NseHostServices {
             fs: Arc::new(NativeFilesystemProvider::new()),
             process: Arc::new(NativeProcessProvider),
             http: Arc::new(NativeHttpProvider::new()),
+            http_authority_bound: false,
         }
     }
 
@@ -303,6 +315,25 @@ impl NseHostServices {
         self
     }
 
+    /// Mark the injected HTTP provider as authority-bound.
+    ///
+    /// M007A HTTP authority assurance. Only safe to call when the
+    /// injected HTTP provider actually carries engine/owner scope
+    /// authority — i.e. it has resolved, evaluated, and connected to
+    /// the **same** concrete endpoint that the Eggsec enforcement
+    /// boundary approved. The native reqwest provider is never
+    /// authority-bound because it resolves/follows redirects
+    /// internally.
+    ///
+    /// `broker_http_request()` will refuse to invoke an authority
+    /// provider under automated profiles unless this flag is set, and
+    /// will refuse to invoke a non-authority provider under automated
+    /// profiles when this flag is set. See ADR-0004 §3.
+    pub fn with_authority_bound_http(mut self) -> Self {
+        self.http_authority_bound = true;
+        self
+    }
+
     /// Borrow the clock provider.
     pub fn clock(&self) -> &Arc<dyn NseClockProvider> {
         &self.clock
@@ -346,6 +377,13 @@ impl NseHostServices {
     /// Borrow the HTTP provider.
     pub fn http(&self) -> &Arc<dyn NseHttpProvider> {
         &self.http
+    }
+
+    /// Whether the injected HTTP provider is authority-bound.
+    ///
+    /// See [`Self::with_authority_bound_http`] for the contract.
+    pub fn is_http_authority_bound(&self) -> bool {
+        self.http_authority_bound
     }
 }
 
@@ -4711,6 +4749,23 @@ pub fn broker_http_request(
     request: &NseHttpRequest,
     operation: &'static str,
 ) -> Result<NseHttpResponse, NseHttpError> {
+    // M007A HTTP authority assurance: under automated profiles, the
+    // injected HTTP provider MUST be explicitly marked authority-bound
+    // (see [`NseHostServices::with_authority_bound_http`]). Native
+    // reqwest is never authority-bound because it resolves hostnames
+    // and follows redirects internally; treating it as scope-authoritative
+    // would be a false claim per ADR-0004 §3.
+    if ctx.profile_kind == crate::profile::NseExecutionProfileKind::AgentSafe
+        || ctx.profile_kind == crate::profile::NseExecutionProfileKind::CiSafe
+    {
+        if !services.is_http_authority_bound() {
+            return Err(NseHttpError::Denied(
+                "HTTP provider is not authority-bound; automated profile denies request"
+                    .to_string(),
+            ));
+        }
+    }
+
     if let Err(e) = ctx.check_cancelled(operation) {
         return Err(NseHttpError::Cancelled(e));
     }
