@@ -67,6 +67,33 @@ publication from a maintainer workstation:
   with exact-candidate qualification, crates.io/docs.rs verification,
   and an immutable tag on the published source commit. The release
   workflow's ripgrep prerequisite was fixed in the same release.
+- `0.3.0` (`v0.3.0`): breaking security release carrying the M007A/M007B
+  boundary work (automated library effect gate, broker-compatible protocol
+  migration, residual reconciliation); published via the manual-token
+  recovery path. Removed 74 public functions relative to 0.2.0 — 70
+  `register_<mod>_library(&Lua)` entry points plus 4 `helpers::*` — of
+  which two were a capability bypass on the public API and are withdrawn
+  without replacement.
+
+### Security-disclosure note
+
+`0.3.0` is the first release without the capability-bypassing public TCP
+helpers `helpers::tls_connect` and `helpers::tcp_connect_with_timeout`, both
+of which returned a raw `std::net::TcpStream` from an unmediated
+`connect_timeout`. Both were present in **every** published version
+(`0.1.0` and `0.2.0`), so the advisory range is `>= 0.1.0, < 0.3.0` and the
+advisory/yank disposition is owned by the security-advisory companion plan in
+the consuming repository, not here.
+
+Two communication rules for any release that touches this area:
+
+1. Publish the advisory **after** the fixed artifact is verified, never
+   before, unless an active-exploitation reason is recorded separately.
+2. Never collapse four distinct facts into one: the withdrawn public helper
+   bypass; the broader M007 automated-library effect gating; the 22-file
+   specialized direct-I/O residual (not provider-backed); and the still-deferred
+   DNS scope binding in the consuming application. 0.3.0 does not deliver
+   universal NSE protocol scope enforcement.
 
 ### Trusted Publishing status
 

@@ -266,25 +266,18 @@ done
 # file must have a class. A `BrokerCompatible*` class may never sit on a
 # file that still has a direct effect: that is the M007B closure invariant.
 
-# Production-code view of a file: everything above the first `mod tests`.
-nse_production_code() {
-    if grep -q "mod tests" "$1"; then
-        line=$(grep -n "mod tests" "$1" | head -n 1 | cut -d: -f1)
-        head -n $((line - 1)) "$1"
-    else
-        cat "$1"
-    fi
-}
-
-# Specialized direct host network-effect patterns. Every pattern is anchored
-# behind `(^|[^A-Za-z0-9_])` so an identifier prefix (Brokered…, broker_…)
-# cannot satisfy it. `rg -v '^[[:space:]]*(//|/\*|\*)'` drops comment-only
-# lines. The final stage uses `-c` (count) rather than `-q` so it always
-# drains its input: an early-exiting `rg -q` would SIGPIPE the upstream
-# stages and, under `set -o pipefail`, silently report "no match".
-nse_specialized_effect_hits() {
-    nse_production_code "$1" \
-        | rg -v -e '^[[:space:]]*(//|/\*|\*)' \
+# Specialized direct host network-effect patterns, shared by the production-code
+# scan and the untruncated sweep below so the two can never drift apart.
+#
+# Every pattern is anchored behind `(^|[^A-Za-z0-9_])` so an identifier prefix
+# (Brokered…, broker_…) cannot satisfy it. `rg -v '^[[:space:]]*(//|/\*|\*)'`
+# drops comment-only lines. The final stage uses `-c` (count) rather than `-q`
+# so it always drains its input: an early-exiting `rg -q` would SIGPIPE the
+# upstream stages and, under `set -o pipefail`, silently report "no match".
+# `rg -c` on stdin prints nothing (and exits 1) when there are no matches, so
+# the callers can test for a non-empty result.
+nse_specialized_effect_filter() {
+    rg -v -e '^[[:space:]]*(//|/\*|\*)' \
         | rg -c -e '(^|[^A-Za-z0-9_])TcpStream::(connect|connect_timeout)' \
                -e '(^|[^A-Za-z0-9_])UdpSocket::bind' \
                -e '(^|[^A-Za-z0-9_])TcpListener::bind' \
@@ -297,12 +290,56 @@ nse_specialized_effect_hits() {
                -e '(^|[^A-Za-z0-9_])tokio::net' || true
 }
 
-nse_specialized_residual() {
-    for f in $(rg -l --no-heading -e 'TcpStream::' -e 'UdpSocket::' -e 'TcpListener::' \
+# Candidate files for the specialized zone. A file is a candidate when it
+# mentions a native socket/resolver type at all; whether that mention is a real
+# host network effect is decided by the effect filter, not by the candidate
+# list.
+nse_specialized_candidates() {
+    rg -l --no-heading -e 'TcpStream::' -e 'UdpSocket::' -e 'TcpListener::' \
                       -e 'AsyncTcpStream::' -e 'AsyncUdpSocket::' -e 'to_socket_addrs' \
                       -e 'ToSocketAddrs' -e 'lookup_host' -e 'hickory' -e 'tokio::net' \
-                      src/libraries src/public_api/api.rs | sort); do
+                      src/libraries src/public_api/api.rs | sort
+}
+
+# Production-code view of a file: everything above the first `mod tests`.
+#
+# CAVEAT, deliberately load-bearing: this truncates at the first `mod tests`
+# marker, but a test module is just a module, so production items can follow
+# one. src/libraries/helpers.rs carries 45 production lines below its
+# `mod tests`, which this view therefore does not see. Do not treat the
+# residual scan below as a complete direct-I/O detector on its own:
+# `nse_specialized_residual_untruncated` below is the fail-closed backstop for
+# that hole, and the two withdrawn direct-connect helpers are enforced by the
+# compiler via compile-fail doctests in src/libraries/helpers.rs rather than by
+# any text scan here.
+nse_production_code() {
+    if grep -q "mod tests" "$1"; then
+        line=$(grep -n "mod tests" "$1" | head -n 1 | cut -d: -f1)
+        head -n $((line - 1)) "$1"
+    else
+        cat "$1"
+    fi
+}
+
+nse_specialized_effect_hits() {
+    nse_production_code "$1" | nse_specialized_effect_filter
+}
+
+nse_specialized_effect_hits_untruncated() {
+    nse_specialized_effect_filter < "$1"
+}
+
+nse_specialized_residual() {
+    for f in $(nse_specialized_candidates); do
         if [ -n "$(nse_specialized_effect_hits "$f")" ]; then
+            echo "$f"
+        fi
+    done
+}
+
+nse_specialized_residual_untruncated() {
+    for f in $(nse_specialized_candidates); do
+        if [ -n "$(nse_specialized_effect_hits_untruncated "$f")" ]; then
             echo "$f"
         fi
     done
@@ -316,6 +353,30 @@ if [ "$actual_socket_files" != "$expected_socket_files" ]; then
     echo "$expected_socket_files" >&2
     echo "--- actual (source) ---" >&2
     echo "$actual_socket_files" >&2
+    exit 1
+fi
+
+# M007C-R guard hardening. `nse_production_code()` truncates each file at its
+# first `mod tests` marker, so a direct-I/O primitive placed *after* a test
+# module would be invisible to the comparison above. This re-runs the same
+# effect patterns on the UNTRUNCATED file and requires the resulting file set
+# to stay inside the pinned residual inventory, which turns that silent hole
+# into a fail-closed violation.
+#
+# Containment, not equality: the untruncated sweep resolves to exactly the same
+# 22 pinned files today, so this adds no new pin and changes no pin. The
+# reserved failure mode is a new direct effect appearing anywhere in the
+# specialized zone without a reviewed pin entry.
+untruncated_socket_files=$(nse_specialized_residual_untruncated)
+untruncated_unpinned=$(comm -13 \
+    <(printf '%s\n' "$expected_socket_files") \
+    <(printf '%s\n' "$untruncated_socket_files"))
+if [ -n "$untruncated_unpinned" ]; then
+    echo "M007C-R violation: untruncated direct-I/O effect outside the pinned residual inventory." >&2
+    echo "The specialized-zone residual scan reads production code only, so a direct-I/O" >&2
+    echo "primitive placed after a 'mod tests' line would be invisible to it. The files below" >&2
+    echo "carry a direct host network effect that no pin covers:" >&2
+    echo "$untruncated_unpinned" >&2
     exit 1
 fi
 

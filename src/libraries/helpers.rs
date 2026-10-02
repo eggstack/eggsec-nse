@@ -2,6 +2,55 @@
 //!
 //! Provides reusable abstractions to reduce code duplication across NSE protocol libraries.
 
+#[cfg(all(feature = "nse", doctest))]
+mod withdrawn_api_guards {
+    //! Compiler-enforced absence of the API withdrawn in 0.3.0.
+    //!
+    //! `tls_connect` and `tcp_connect_with_timeout` were `pub` on 0.1.0 and
+    //! 0.2.0 and returned a raw `std::net::TcpStream` from an unmediated
+    //! `connect_timeout`, so a consumer calling them bypassed the runtime's
+    //! capability decision, cancellation, accounting, and provider-selection
+    //! boundary (ADR-0004 §8). They are permanently withdrawn, with no
+    //! replacement and no deprecated alias: connection work goes through
+    //! `broker_tcp_connect` / `broker_dns_lookup`.
+    //!
+    //! `make_addr` and `parse_socket_addr` went with them; both are pure and
+    //! trivially inlinable, and no crate-internal caller remains.
+    //!
+    //! These are `compile_fail` doctests, so they are checked by the compiler
+    //! over the *whole* crate rather than by a text scan. That matters: the
+    //! `nse_production_code()` view in `scripts/check-boundaries.sh` truncates
+    //! each file at its first `mod tests` marker, and this file carries
+    //! production items below its test module, so a name restored there would
+    //! be invisible to any prefix-based scan. The text-level backstop for the
+    //! rest of the specialized zone is the untruncated sweep in that script.
+    //!
+    //! The first block is a control: it proves `libraries::helpers` itself
+    //! resolves, so the `compile_fail` blocks below cannot pass merely because
+    //! the crate failed to build for an unrelated reason.
+    //!
+    //! ```no_run
+    //! use eggsec_nse::libraries::helpers;
+    //! assert!(helpers::parse_hex_pairs("41") == vec![0x41]);
+    //! ```
+    //!
+    //! ```compile_fail
+    //! use eggsec_nse::libraries::helpers::tls_connect;
+    //! ```
+    //!
+    //! ```compile_fail
+    //! use eggsec_nse::libraries::helpers::tcp_connect_with_timeout;
+    //! ```
+    //!
+    //! ```compile_fail
+    //! use eggsec_nse::libraries::helpers::make_addr;
+    //! ```
+    //!
+    //! ```compile_fail
+    //! use eggsec_nse::libraries::helpers::parse_socket_addr;
+    //! ```
+}
+
 use mlua::{Lua, Result as LuaResult, Table};
 use native_tls::TlsConnector;
 use std::time::Duration;

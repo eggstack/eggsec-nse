@@ -8,8 +8,29 @@ This project targets practical compatibility for supported script categories. It
 
 ```toml
 [dependencies]
-eggsec-nse = { version = "0.2", features = ["nse"] }
+eggsec-nse = { version = "0.3", features = ["nse"] }
 ```
+
+## Upgrading from 0.2
+
+0.3.0 is a breaking security release; there is no 0.2.1. Two changes:
+
+1. **Withdrawn, no replacement.** `helpers::tls_connect` and
+   `helpers::tcp_connect_with_timeout` returned a raw `std::net::TcpStream`
+   from an unmediated `connect_timeout`, so calling them bypassed the
+   runtime's capability decision, cancellation, and accounting. Move that work
+   to `broker_tcp_connect` / `broker_dns_lookup`, which are capability-checked
+   and accounted. Do not recreate a raw-socket helper. `helpers::make_addr`
+   and `helpers::parse_socket_addr` went with them and are trivial to inline.
+2. **Registration takes services.** 70 libraries changed from
+   `register_x_library(lua)` to
+   `register_x_library_with_services(lua, &capability_ctx, &services)`. The
+   arguments are mandatory on purpose: a `&Lua`-only entry point could only
+   ever construct native defaults, which is the fallback path the capability
+   boundary forbids for automated authority claims.
+
+`CHANGELOG.md` §0.3.0 lists all 74 removed functions, the mechanical
+replacement, and the security rationale.
 
 ```rust,no_run
 use eggsec_nse::{execute_nse_run, NseExecutionProfileKind, NseRunRequest,
@@ -45,6 +66,13 @@ The crate defaults to no features. Execution profiles include `ManualPermissive`
 Profiles and capability checks constrain NSE runtime operations; they are **not authorization or scope enforcement for the embedding application**. Applications must independently authorize each requested operation and enforce their own target scope before calling this crate. In particular, `ManualPermissive` is intended for an explicitly controlled manual surface, not unattended execution.
 
 The resolver applies source policy, canonical path containment, symlink-escape rejection, extension and size limits, and validated module names. Network, filesystem, and process helpers use runtime capability checks. Those controls do not replace operating-system isolation when executing untrusted scripts.
+
+Automated profiles (`AgentSafe`, `CiSafe`) are gated by a deny-by-default effect
+manifest over every registered library and global, so unsafe and manual-only
+libraries are structurally unavailable there. A 22-file specialized direct-I/O
+residual remains outside provider coverage; it is manual-only and pinned
+against expansion. **0.3.0 is not complete protocol-wide scope enforcement.**
+See [`docs/PROVIDERS.md`](docs/PROVIDERS.md).
 
 ## Host providers and deterministic testing
 

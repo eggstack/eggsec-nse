@@ -714,3 +714,68 @@ Tests: `src/effect_manifest.rs` (`registration_and_manifest_agree`,
 (focused loopback success, in-scope/out-of-scope, CiSafe denial,
 cancellation, and byte-accounting evidence for `target`, `radius`, and
 the promoted TCP cohort), and `tests/brokered_stream_tests.rs`.
+
+## M007C — 0.3.0: withdrawn public direct-connect helpers, and the guard that enforces it
+
+0.3.0 is the release that carries the M007A/M007B boundary work to the
+registry. Two things about it belong in this document rather than only in the
+changelog.
+
+### The withdrawn public API
+
+`helpers::tls_connect` and `helpers::tcp_connect_with_timeout` were `pub` on
+0.1.0 and 0.2.0 and returned a raw `std::net::TcpStream` obtained from
+`TcpStream::connect_timeout` outside the broker. Under ADR-0004 §8 that is the
+exact defect shape the rest of this document exists to prevent, and it was
+reachable through the crate's public API rather than through a registered Lua
+library — which is why the M007B audit, scoped to registered modules and the
+residual pins, did not see it. They are withdrawn in 0.3.0 with no replacement
+and no deprecated alias; a deprecated alias would still be a reachable bypass.
+`make_addr` and `parse_socket_addr` were removed alongside them (pure, trivially
+inlined, no crate-internal caller). Replacement path is the broker:
+`broker_tcp_connect` / `broker_dns_lookup`.
+
+### Why the enforcement is compiler-based, not scan-based
+
+The M007B residual scan reads a *production-code* view of each file, produced
+by `nse_production_code()`, which truncates at the first `mod tests` marker.
+A test module is just a module, so production items can follow one — and
+`src/libraries/helpers.rs` itself carries 45 production lines below its test
+module. A text scan over a truncated prefix therefore cannot be a complete
+absence proof for the very file that lost the helpers.
+
+0.3.0 fixes this in two layers:
+
+1. **Compiler.** `src/libraries/helpers.rs` carries `compile_fail` doctests
+   for all four withdrawn names, plus one `no_run` control proving
+   `libraries::helpers` itself resolves so the `compile_fail` blocks cannot
+   pass vacuously. The check is made by the compiler over the whole crate and
+   runs in `cargo test --features nse`.
+2. **Text backstop.** `scripts/check-boundaries.sh` re-runs the same
+   specialized direct-I/O effect patterns on the **untruncated** file and
+   requires the resulting file set to stay inside
+   `scripts/nse-specialized-{ungated,advisory}.txt`. The untruncated sweep
+   resolves to exactly the same 22 files today, so this adds no pin and
+   changes no pin; the reserved failure is a new direct effect appearing
+   anywhere in the specialized zone with no reviewed pin entry. The effect
+   pattern list is now factored into one `nse_specialized_effect_filter`
+   helper shared by both views so they cannot drift apart.
+
+### What 0.3.0 still does not give you
+
+Unchanged from the M007B sections above, and stated here so this document is
+not read as a completeness claim:
+
+- the 22-file specialized residual (15 ungated + 7 advisory) is **not**
+  provider-backed, and 41 manifest entries remain manual-only;
+- `broker_dns_lookup` gates `DnsResolution` on `DenyAll` only and does not
+  evaluate per-target membership for the resolved name, so runtime DNS policy
+  is not bound to an embedding application's approved scope by this crate;
+- `DnsResolution` is not charged to `network_operations`;
+- `upnp.discover` uses a brokered TCP connect to the SSDP multicast group
+  rather than real UDP multicast discovery.
+
+The four facts are deliberately kept distinct: the withdrawn public helper
+bypass, the broader M007 automated-library effect gating, the 22-file residual,
+and the still-deferred DNS scope binding are four separate claims, and 0.3.0
+does not make them one.
