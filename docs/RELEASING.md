@@ -81,9 +81,28 @@ publication from a maintainer workstation:
 helpers `helpers::tls_connect` and `helpers::tcp_connect_with_timeout`, both
 of which returned a raw `std::net::TcpStream` from an unmediated
 `connect_timeout`. Both were present in **every** published version
-(`0.1.0` and `0.2.0`), so the advisory range is `>= 0.1.0, < 0.3.0` and the
-advisory/yank disposition is owned by the security-advisory companion plan in
-the consuming repository, not here.
+(`0.1.0` and `0.2.0`): `src/libraries/helpers.rs` is byte-for-byte identical
+between the two tags, and both reach `TcpStream::connect_timeout` twice.
+
+Advisory `GHSA-w2g3-v83j-frp2` (`eggsec-nse`, Rust/crates.io) was published
+*after* `0.3.0` was verified on the registry, with affected range
+`>= 0.1.0, < 0.3.0`, patched `0.3.0`, and severity `medium` — derived from the
+threat model (the consumer must call the public helper, so this is a
+library-boundary bypass, not a remote-execution vulnerability), not from the
+word "bypass".
+
+### Predecessor-version disposition (recorded)
+
+- `0.1.0`: **yanked.** No identified consumer requires a fresh `0.1`
+  resolution, and `0.3.0` is available as the safe upgrade target. A lockfile
+  pinned to `0.1.0` still resolves and builds; a fresh `^0.1` resolution is
+  refused; an unconstrained `>=0.1.0` consumer now resolves to `0.3.0`.
+- `0.2.0`: **not yanked, deliberately.** The principal consumer requires
+  `^0.2.0`, and `0.2.0` is the only `0.2.x` that exists, so yanking it would
+  leave that requirement with no resolvable candidate — the case the release
+  procedure exists to prevent. The version **remains affected**; not being
+  yanked does not make it safe. Revisit once the principal consumer adopts
+  `0.3.0`.
 
 Two communication rules for any release that touches this area:
 
